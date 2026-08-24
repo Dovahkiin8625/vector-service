@@ -1,9 +1,14 @@
 import os
+import sys
 import uuid
 
 import pytest
 
 pymilvus = pytest.importorskip("pymilvus")
+# milvus-lite ships only Linux/macOS wheels; on Windows this entire module
+# cannot run. The implementation is exercised in CI on Linux / WSL / Docker.
+if sys.platform == "win32":
+    pytest.skip("milvus-lite has no Windows wheels", allow_module_level=True)
 
 from vector_service.stores.milvus_lite import MilvusLiteStore
 

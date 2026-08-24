@@ -75,6 +75,23 @@ make test-integration  # 集成（不含 slow）
 make test-slow         # 真实 BGE-M3 + Milvus Lite（需要可选依赖）
 ```
 
+> **Windows 注意**：`milvus-lite` 没有 Windows wheel。Milvus 相关契约测试
+> 在 Windows 上自动跳过。要运行完整 Milvus 测试，请使用 WSL、Docker 或 Linux。
+
+## 环境管理（uv）
+
+```bash
+# 一次性同步依赖（含 embed、store、dev 全套可选依赖）
+uv venv --python 3.11                # 在 .venv 创建虚拟环境
+uv pip install -e ".[embed,store]"    # 安装项目 + 可选依赖
+uv pip install --group dev            # 安装开发依赖（pytest/ruff/mypy 等）
+
+# 运行测试 / smoke
+uv run pytest -q                      # 全部测试（默认排除 slow）
+uv run pytest -m slow                 # 跑真实模型集成测试
+uv run python scripts/smoke.py        # 端到端 smoke
+```
+
 ## 添加新嵌入器
 
 参见 `src/vector_service/embeddings/`：
