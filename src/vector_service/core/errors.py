@@ -20,6 +20,22 @@ class StoreError(VectorServiceError):
     """Vector store backend failure."""
 
 
+class DatabaseNotFound(StoreError):
+    """Operation referenced a non-existent database."""
+
+    def __init__(self, message: str, *, name: str | None = None):
+        super().__init__(message)
+        self.name = name
+
+
+class DatabaseAlreadyExists(StoreError):
+    """Creation would clobber an existing database."""
+
+    def __init__(self, message: str, *, name: str | None = None):
+        super().__init__(message)
+        self.name = name
+
+
 class CollectionNotFound(StoreError):
     """Operation referenced a non-existent collection."""
 
@@ -39,3 +55,11 @@ class DimensionMismatch(StoreError):
 
 class BackendError(StoreError):
     """Wrapped native backend exception."""
+
+
+class RerankerError(VectorServiceError):
+    """Base class for reranker failures."""
+
+
+class RerankerNotLoaded(RerankerError):
+    """Reranker weights are not loaded (lifespan failed or skipped)."""
