@@ -35,6 +35,28 @@ EMBEDDING_REQUESTS_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+IMAGE_EMBEDDING_REQUESTS_TOTAL = Counter(
+    "vs_image_embedding_requests_total",
+    "Total image embedding requests",
+    labelnames=("model", "status"),
+    registry=REGISTRY,
+)
+
+IMAGE_EMBEDDING_DURATION_SECONDS = Histogram(
+    "vs_image_embedding_duration_seconds",
+    "Image embedding request duration in seconds",
+    labelnames=("model", "status"),
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+    registry=REGISTRY,
+)
+
+IMAGE_EMBEDDING_INPUTS_TOTAL = Counter(
+    "vs_image_embedding_inputs_total",
+    "Total images processed by image embedder",
+    labelnames=("model",),
+    registry=REGISTRY,
+)
+
 STORE_OP_DURATION_SECONDS = Histogram(
     "vs_store_operation_duration_seconds",
     "Vector store operation duration in seconds",
@@ -72,6 +94,7 @@ MODEL_LOADED = Gauge(
 )
 MODEL_LOADED.labels(kind="embedder").set(0)
 MODEL_LOADED.labels(kind="reranker").set(0)
+MODEL_LOADED.labels(kind="image_embedder").set(0)
 
 VS_INFO = Gauge(
     "vs_info",
