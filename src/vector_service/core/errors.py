@@ -63,3 +63,38 @@ class RerankerError(VectorServiceError):
 
 class RerankerNotLoaded(RerankerError):
     """Reranker weights are not loaded (lifespan failed or skipped)."""
+
+
+class ImageEmbedderError(VectorServiceError):
+    """Base class for image embedding failures (sibling of EmbedderError)."""
+
+
+class ModelNotLoadedForImages(ImageEmbedderError):
+    """Image model failed to load at startup or is no longer available.
+
+    Intentionally NOT a subclass of ModelNotLoaded — the text and image
+    embedder lifecycles are independent, and a missing image model should
+    not look like a text-embedder failure to dispatchers.
+    """
+
+
+class ImageDecodeError(VectorServiceError):
+    """Base class for image decoding failures (422 image_decode_failed family)."""
+
+
+class UnsupportedMime(ImageDecodeError):
+    """MIME type was not in the allow-list."""
+
+    def __init__(self, message: str, *, got: str, allowed: list[str]):
+        super().__init__(message)
+        self.got = got
+        self.allowed = allowed
+
+
+class ImageTooLarge(ImageDecodeError):
+    """Decoded image bytes exceeded the configured maximum."""
+
+    def __init__(self, message: str, *, got: int, max: int):
+        super().__init__(message)
+        self.got = got
+        self.max = max
