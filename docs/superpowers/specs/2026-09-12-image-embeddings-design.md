@@ -145,20 +145,26 @@ class in `core/errors.py`, parallel to `EmbedderError`.
 ### 4.4 Image decoding helper — `embeddings/image_decoding.py`
 
 ```python
-def decode_image(b64: str, mime: str, *, max_bytes: int) -> ImageInput:
-    """Decode base64 + validate MIME + size. Raises ImageDecodeError."""
-    if mime not in ALLOWED_MIME:
-        raise ImageDecodeError(f"unsupported mime: {mime!r}")
+def decode_image(b64: str, mime: str, *, max_bytes: int, allowed_mime: set[str]) -> ImageInput:
+    """Decode base64 + validate MIME + size.
+
+    Raises the exception family defined in §4.13:
+      - UnsupportedMime        → maps to 422 `unsupported_mime`
+      - ImageTooLarge          → maps to 422 `image_too_large`
+      - ImageDecodeError       → maps to 422 `image_decode_failed`
+    """
+    if mime not in allowed_mime:
+        raise UnsupportedMime(f"unsupported mime: {mime!r}", got=mime, allowed=sorted(allowed_mime))
     try:
         raw = base64.b64decode(b64, validate=True)
     except (binascii.Error, ValueError) as e:
         raise ImageDecodeError(f"base64 decode failed: {e}") from e
     if len(raw) > max_bytes:
-        raise ImageDecodeError(f"image too large: {len(raw)} > {max_bytes}")
+        raise ImageTooLarge(f"image too large: {len(raw)} > {max_bytes}", got=len(raw), max=max_bytes)
     return ImageInput(data=raw, mime=mime)
 ```
 
-`ALLOWED_MIME` is read from `Settings.image_embedding.allowed_mime` (default
+`allowed_mime` is read from `Settings.image_embedding.allowed_mime` (default
 `{"image/jpeg", "image/png", "image/webp"}`). `max_bytes` is
 `Settings.image_embedding.max_image_bytes`.
 
@@ -318,7 +324,7 @@ Mirror of `api/embeddings.py`. Differences:
 
 - Pulls `image_embedder` from `request.app.state.image_embedder`.
 - Validates `model` via `get_image_embedder_class()`.
-- Decodes each input via `decode_image(b64, mime, max_bytes=...)` — collects decode failures into a single `image_decode_failed` 422 with per-index details.
+- Decodes each input via `decode_image(b64, mime, max_bytes=..., allowed_mime=...)` — collects decode failures into a single 422 with `failed_indices: list[int]` (one envelope per error code: `image_decode_failed`, `image_too_large`, `unsupported_mime`).
 - Calls `embedder.embed_images([...])` inside `loop.run_in_executor`.
 - Records metrics under `IMAGE_EMBEDDING_*` labels (see §4.12).
 
@@ -331,7 +337,11 @@ if body.images is not None:
     cls = get_image_embedder_class(body.model)
     image_embedder = request.app.state.image_embedder
     inputs = [
-        decode_image(b64, mime, max_bytes=settings.image_embedding.max_image_bytes)
+        decode_image(
+            b64, mime,
+            max_bytes=settings.image_embedding.max_image_bytes,
+            allowed_mime=set(settings.image_embedding.allowed_mime),
+        )
         for b64, mime in zip(body.images, body.image_mimes)
     ]
     vectors = await loop.run_in_executor(None, image_embedder.embed_images, inputs)
@@ -366,16 +376,33 @@ for distinct dashboards.
 | `too_many_images` | 422 | count > `max_images_per_request` |
 | `unsupported_mime` | 422 | mime not in `allowed_mime` |
 
-Two new exception classes in `core/errors.py`:
+New exception classes in `core/errors.py`:
 
 ```python
 class ImageEmbedderError(VectorServiceError): ...
 class ModelNotLoadedForImages(ImageEmbedderError): ...   # mirrors ModelNotLoaded
+
+class ImageDecodeError(VectorServiceError):
+    """Generic base64 / image-bytes failure (422 image_decode_failed)."""
+
+class UnsupportedMime(ImageDecodeError):
+    got: str
+    allowed: list[str]
+
+class ImageTooLarge(ImageDecodeError):
+    got: int
+    max: int
 ```
 
-Routes raise `HTTPException` with the canonical `detail={"error": {...}}`
-envelope; the global handler in `main.py` does not need changes — it already
-converts `HTTPException` to the canonical envelope.
+Routes catch each subclass and raise `HTTPException` with the matching `code`
+from the table above, with the canonical `detail={"error": {...}}` envelope.
+The global handler in `main.py` does not need changes — it already converts
+`HTTPException` to the canonical envelope.
+
+Decode failures inside an `/v1/image_embeddings` request that contains multiple
+images are aggregated into a single 422 response with
+`extra.failed_indices: list[int]` so the caller knows which inputs were bad
+without retrying the whole batch.
 
 ---
 
