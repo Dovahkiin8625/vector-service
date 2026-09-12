@@ -5,10 +5,12 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from vector_service.core.config import Settings, get_settings
-from vector_service.core.errors import ModelNotLoaded
+from vector_service.core.errors import ModelNotLoaded, RerankerError, RerankerNotLoaded
 from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
 from vector_service.embeddings.registry import get_embedder_class
+from vector_service.rerankers.base import Reranker
+from vector_service.rerankers.registry import get_reranker_class
 from vector_service.stores.registry import build_store
 
 if TYPE_CHECKING:
@@ -19,6 +21,15 @@ log = get_logger(__name__)
 
 def build_embedder(settings: Settings):
     cls = get_embedder_class(settings.embedding_backend)
+    return cls(settings=settings)
+
+
+def build_reranker(settings: Settings) -> Reranker:
+    """Construct a reranker instance for ``settings.reranker.backend``.
+
+    Raises ``KeyError`` if the backend name is not registered.
+    """
+    cls = get_reranker_class(settings.reranker.backend)
     return cls(settings=settings)
 
 
@@ -64,6 +75,29 @@ async def lifespan(app: "FastAPI"):
     app.state.settings = settings
     app.state.embedder = embedder
     app.state.store = store
+
+    # ---- reranker (loaded last; not on the /search hot path) ----
+    # Missing/invalid VS_RERANKER__BACKEND is treated as a startup
+    # error: re-raise so lifespan exits non-zero. /readyz is diagnostic
+    # only — embedder + store still gate the overall ready signal.
+    try:
+        reranker = build_reranker(settings)
+        reranker.load()
+        app.state.reranker = reranker
+        MODEL_LOADED.labels(kind="reranker").set(1)
+        log.info(
+            "reranker_loaded",
+            model=reranker.model_name,
+            backend=settings.reranker.backend,
+        )
+    except (RerankerNotLoaded, RerankerError, KeyError) as exc:
+        MODEL_LOADED.labels(kind="reranker").set(0)
+        log.error(
+            "reranker_load_failed",
+            backend=settings.reranker.backend,
+            error=str(exc),
+        )
+        raise
 
     try:
         yield
