@@ -6,6 +6,7 @@ import base64
 import pytest
 
 from vector_service.core.errors import ImageDecodeError, ImageTooLarge, UnsupportedMime
+from vector_service.embeddings.image_base import ImageInput
 from vector_service.embeddings.image_decoding import decode_image
 
 
@@ -16,11 +17,12 @@ def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode("ascii")
 
 
-def test_decode_image_happy_path_returns_bytes_and_mime():
+def test_decode_image_happy_path_returns_image_input():
     raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
-    data, mime = decode_image(_b64(raw), "image/png", max_bytes=1024, allowed_mime=ALLOWED)
-    assert data == raw
-    assert mime == "image/png"
+    out = decode_image(_b64(raw), "image/png", max_bytes=1024, allowed_mime=ALLOWED)
+    assert isinstance(out, ImageInput)
+    assert out.data == raw
+    assert out.mime == "image/png"
 
 
 def test_decode_image_rejects_unsupported_mime():
@@ -50,6 +52,6 @@ def test_decode_image_does_not_touch_pil():
     """The helper must NOT decode bytes into a PIL.Image — that's the
     embedder's job. It only validates and returns raw bytes."""
     raw = b"raw-bytes"
-    data, _ = decode_image(_b64(raw), "image/jpeg", max_bytes=1024, allowed_mime=ALLOWED)
-    assert isinstance(data, bytes)  # not a PIL.Image
-    assert data == raw  # content preserved
+    out = decode_image(_b64(raw), "image/jpeg", max_bytes=1024, allowed_mime=ALLOWED)
+    assert isinstance(out.data, bytes)  # not a PIL.Image
+    assert out.data == raw  # content preserved

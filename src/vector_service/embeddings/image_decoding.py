@@ -9,6 +9,7 @@ import base64
 import binascii
 
 from vector_service.core.errors import ImageDecodeError, ImageTooLarge, UnsupportedMime
+from vector_service.embeddings.image_base import ImageInput
 
 
 def decode_image(
@@ -17,7 +18,7 @@ def decode_image(
     *,
     max_bytes: int,
     allowed_mime: set[str],
-) -> tuple[bytes, str]:
+) -> ImageInput:
     """Decode base64 + validate MIME + size.
 
     Args:
@@ -27,8 +28,7 @@ def decode_image(
         allowed_mime: Set of permitted MIME types.
 
     Returns:
-        ``(raw_bytes, mime)`` tuple — ``mime`` is echoed back unchanged
-        after the allow-list check.
+        ``ImageInput`` carrying raw bytes and the verified MIME type.
 
     Raises:
         UnsupportedMime: ``mime`` not in ``allowed_mime``.
@@ -51,4 +51,4 @@ def decode_image(
             got=len(raw),
             max=max_bytes,
         )
-    return raw, mime
+    return ImageInput(data=raw, mime=mime)
