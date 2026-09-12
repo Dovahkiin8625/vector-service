@@ -191,9 +191,16 @@ def test_lifespan_calls_embedder_load(monkeypatch):
         "close": lambda self: None,
         "list_databases": lambda self: [],
     })()
+    image_embedder = type("IE", (), {
+        "_impl": object(),
+        "model_name": "fake-img",
+        "dim": 4,
+        "load": lambda self: None,
+    })()
 
     monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: embedder)
     monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: image_embedder)
     monkeypatch.setattr(lifespan_mod, "build_reranker", lambda s: _RecordingReranker())
 
     from fastapi import FastAPI
@@ -226,9 +233,16 @@ def test_lifespan_keeps_app_up_when_load_fails(monkeypatch):
         "close": lambda self: None,
         "list_databases": lambda self: [],
     })()
+    image_embedder = type("IE", (), {
+        "_impl": object(),
+        "model_name": "fake-img",
+        "dim": 4,
+        "load": lambda self: None,
+    })()
 
     monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: embedder)
     monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: image_embedder)
     monkeypatch.setattr(lifespan_mod, "build_reranker", lambda s: _RecordingReranker())
 
     from fastapi import FastAPI
@@ -263,9 +277,16 @@ def test_readyz_reports_loaded_after_successful_lifespan(monkeypatch):
         "close": lambda self: None,
         "list_databases": lambda self: [],
     })()
+    image_embedder = type("IE", (), {
+        "_impl": object(),
+        "model_name": "fake-img",
+        "dim": 4,
+        "load": lambda self: None,
+    })()
 
     monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: embedder)
     monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: image_embedder)
     monkeypatch.setattr(lifespan_mod, "build_reranker", lambda s: _RecordingReranker())
 
     from fastapi import FastAPI
@@ -290,6 +311,12 @@ def test_readyz_503_when_store_list_raises_even_after_load(monkeypatch):
     from vector_service.core import lifespan as lifespan_mod
 
     embedder = _RecordingEmbedder()
+    image_embedder = type("IE", (), {
+        "_impl": object(),
+        "model_name": "fake-img",
+        "dim": 4,
+        "load": lambda self: None,
+    })()
 
     class _BrokenStore:
         backend_name = "fake"
@@ -300,6 +327,7 @@ def test_readyz_503_when_store_list_raises_even_after_load(monkeypatch):
 
     monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: embedder)
     monkeypatch.setattr(lifespan_mod, "build_store", lambda s: _BrokenStore())
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: image_embedder)
     monkeypatch.setattr(lifespan_mod, "build_reranker", lambda s: _RecordingReranker())
 
     from fastapi import FastAPI

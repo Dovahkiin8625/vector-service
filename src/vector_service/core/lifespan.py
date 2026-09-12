@@ -5,9 +5,17 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from vector_service.core.config import Settings, get_settings
-from vector_service.core.errors import ModelNotLoaded, RerankerError, RerankerNotLoaded
+from vector_service.core.errors import (
+    ImageEmbedderError,
+    ModelNotLoaded,
+    ModelNotLoadedForImages,
+    RerankerError,
+    RerankerNotLoaded,
+)
 from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
+from vector_service.embeddings.image_base import ImageEmbedder
+from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.embeddings.registry import get_embedder_class
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import get_reranker_class
@@ -31,6 +39,15 @@ def build_reranker(settings: Settings) -> Reranker:
     """
     cls = get_reranker_class(settings.reranker.backend)
     return cls(settings=settings)
+
+
+def build_image_embedder(settings: Settings) -> ImageEmbedder:
+    """Construct an image embedder instance for ``settings.image_embedding.backend``.
+
+    Raises ``KeyError`` if the backend name is not registered.
+    """
+    cls = get_image_embedder_class(settings.image_embedding.backend)
+    return cls(settings=settings.image_embedding)
 
 
 @asynccontextmanager
@@ -98,6 +115,29 @@ async def lifespan(app: "FastAPI"):
             error=str(exc),
         )
         raise
+
+    # ---- image embedder (parallel to text embedder) ----
+    # A failed image-embedder load is logged + surfaced via /readyz (503),
+    # but does NOT kill the process — same fail-open policy as the text
+    # embedder.
+    try:
+        image_embedder = build_image_embedder(settings)
+        image_embedder.load()
+        app.state.image_embedder = image_embedder
+        MODEL_LOADED.labels(kind="image_embedder").set(1)
+        log.info(
+            "image_embedder_loaded",
+            model=image_embedder.model_name,
+            device=getattr(image_embedder, "_device", "unknown"),
+            dim=image_embedder.dim,
+        )
+    except (ModelNotLoadedForImages, ImageEmbedderError) as exc:
+        MODEL_LOADED.labels(kind="image_embedder").set(0)
+        log.error(
+            "image_embedder_load_failed",
+            backend=settings.image_embedding.backend,
+            error=str(exc),
+        )
 
     try:
         yield

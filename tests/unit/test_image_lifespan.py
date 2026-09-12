@@ -1,0 +1,134 @@
+"""Image embedder lifespan wiring + /readyz reporting."""
+from __future__ import annotations
+
+import pytest
+
+from vector_service.core import lifespan as lifespan_mod
+from vector_service.core.errors import ModelNotLoadedForImages
+from vector_service.embeddings.image_base import ImageEmbedder
+
+
+class _RecordingImageEmbedder(ImageEmbedder):
+    dim = 4
+    model_name = "recording"
+
+    def __init__(self, raise_on_load=None):
+        self.load_called = 0
+        self._raise = raise_on_load
+        self._impl = None  # sentinel pattern
+
+    def load(self):
+        self.load_called += 1
+        if self._raise is not None:
+            raise self._raise
+        self._impl = object()
+
+    def embed_images(self, images):
+        return [[0.0] * self.dim for _ in images]
+
+    def embed_query_image(self, image):
+        return [0.0] * self.dim
+
+
+class _FakeTextEmbedder:
+    model_name = "text"
+    dim = 4
+
+    def load(self):
+        self.load_called = getattr(self, "load_called", 0) + 1
+
+
+class _FakeStore:
+    backend_name = "fake"
+    uri = ""
+
+    def _ensure_connected(self):
+        pass
+
+    def list_databases(self):
+        return []
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def patched_lifespan_deps(monkeypatch):
+    img_embedder = _RecordingImageEmbedder()
+    text_embedder = _FakeTextEmbedder()
+    fake_store = _FakeStore()
+
+    monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: text_embedder)
+    monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: img_embedder)
+    monkeypatch.setattr(
+        lifespan_mod,
+        "build_reranker",
+        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+    )
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from vector_service.api.health import router as health_router
+
+    app = FastAPI(lifespan=lifespan_mod.lifespan)
+    app.include_router(health_router)
+
+    return img_embedder, app
+
+
+def test_lifespan_calls_image_embedder_load(patched_lifespan_deps):
+    img, app = patched_lifespan_deps
+    from fastapi.testclient import TestClient
+
+    with TestClient(app):
+        assert img.load_called == 1
+
+
+def test_lifespan_sets_image_embedder_on_state(patched_lifespan_deps):
+    img, app = patched_lifespan_deps
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        # The embedder is reachable via the app.state we built
+        assert app.state.image_embedder is img
+
+
+def test_readyz_reports_image_embedder_loaded(patched_lifespan_deps):
+    _, app = patched_lifespan_deps
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        r = client.get("/readyz")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["image_embedder"] == "loaded"
+
+
+def test_readyz_reports_image_embedder_not_loaded_on_failure(monkeypatch):
+    img = _RecordingImageEmbedder(raise_on_load=ModelNotLoadedForImages("disk full"))
+    text_embedder = _FakeTextEmbedder()
+    fake_store = _FakeStore()
+
+    monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: text_embedder)
+    monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: img)
+    monkeypatch.setattr(
+        lifespan_mod,
+        "build_reranker",
+        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+    )
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from vector_service.api.health import router as health_router
+
+    app = FastAPI(lifespan=lifespan_mod.lifespan)
+    app.include_router(health_router)
+
+    with TestClient(app) as client:
+        r = client.get("/readyz")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["image_embedder"] == "not_loaded"

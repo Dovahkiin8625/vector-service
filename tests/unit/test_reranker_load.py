@@ -67,11 +67,12 @@ def _make_app(reranker):
 
     app = FastAPI()
     app.include_router(health_router)
-    # Embedder must also be present — without it /readyz will report
-    # embedder=not_loaded (which is fine for these assertions, but
-    # setting a minimal stand-in keeps the body's "reranker" field the
+    # Embedder + image embedder must also be present — without them /readyz
+    # would report them as not_loaded (which is fine for these assertions,
+    # but setting minimal stand-ins keeps the body's "reranker" field the
     # sole variable under test).
     app.state.embedder = _AlwaysLoaded()
+    app.state.image_embedder = _AlwaysLoadedImage()
     app.state.store = _NoopStore()
     app.state.reranker = reranker
     return app
@@ -79,6 +80,15 @@ def _make_app(reranker):
 
 class _AlwaysLoaded:
     """Embedder stand-in that reports loaded without a real model."""
+
+    _impl = object()  # non-None sentinel
+
+    def load(self):
+        return None
+
+
+class _AlwaysLoadedImage:
+    """Image embedder stand-in that reports loaded without a real model."""
 
     _impl = object()  # non-None sentinel
 

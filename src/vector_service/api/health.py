@@ -39,16 +39,36 @@ def _reranker_loaded(request: Request) -> bool:
     return reranker is not None and getattr(reranker, "_impl", None) is not None
 
 
+def _image_embedder_loaded(request: Request) -> bool:
+    """True iff the image embedder has finished its eager load().
+
+    Looks for the `_impl` / `_model` attributes set by concrete image
+    embedders after a successful load. Falls back to True for embedders
+    that don't expose an internal handle (e.g. lightweight fakes).
+    """
+    img = getattr(request.app.state, "image_embedder", None)
+    if img is None:
+        return False
+    for attr in ("_impl", "_model"):
+        if hasattr(img, attr):
+            return getattr(img, attr) is not None
+    return True
+
+
 @router.get("/readyz")
 async def readyz(request: Request):
-    """Readiness: embedder loaded AND vector store reachable."""
+    """Readiness: text embedder loaded AND image embedder loaded AND store reachable."""
     embedder = getattr(request.app.state, "embedder", None)
+    image_embedder = getattr(request.app.state, "image_embedder", None)
     store = getattr(request.app.state, "store", None)
     embedder_ok = _embedder_loaded(embedder)
+    image_ok = _image_embedder_loaded(request)
     if store is None:
         body = (
             '{"status":"not_ready","store":"down","embedder":"'
             + ("loaded" if embedder_ok else "not_loaded")
+            + '","image_embedder":"'
+            + ("loaded" if image_ok else "not_loaded")
             + '","reranker":"'
             + ("ready" if _reranker_loaded(request) else "not_loaded")
             + '"}'
@@ -62,18 +82,23 @@ async def readyz(request: Request):
     except Exception:
         store_ok = False
 
-    overall_ok = embedder_ok and store_ok
-    status = "ready" if overall_ok else (
-        "degraded" if embedder_ok and not store_ok else "not_ready"
-    )
+    overall_ok = embedder_ok and image_ok and store_ok
+    if overall_ok:
+        status = "ready"
+    elif (embedder_ok and image_ok) and not store_ok:
+        status = "degraded"
+    else:
+        status = "not_ready"
     store_state = "ok" if store_ok else "down"
     embedder_state = "loaded" if embedder_ok else "not_loaded"
+    image_state = "loaded" if image_ok else "not_loaded"
     reranker_state = "ready" if _reranker_loaded(request) else "not_loaded"
     code = 200 if overall_ok else 503
     body = (
         '{"status":"' + status
         + '","store":"' + store_state
         + '","embedder":"' + embedder_state
+        + '","image_embedder":"' + image_state
         + '","reranker":"' + reranker_state
         + '"}'
     )
