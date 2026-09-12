@@ -53,6 +53,36 @@ class RerankerSettings(BaseSettings):
         return v
 
 
+class ImageEmbeddingSettings(BaseSettings):
+    """Image embedding subsystem configuration.
+
+    Env prefix: ``VS_IMAGE_EMBEDDING__`` (double underscore — pydantic-settings
+    nested-field separator).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_IMAGE_EMBEDDING__", extra="ignore")
+
+    backend: str = "openclip-vit-l-14"
+    model_dir: str = "./models/openclip-vit-l-14"
+    auto_download: bool = True
+    download_source: Literal["huggingface"] = "huggingface"
+    hf_repo: str = "openai/ViT-L-14"
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    batch_size: int = Field(16, ge=1, le=512)
+    max_images_per_request: int = Field(64, ge=1, le=1024)
+    max_image_bytes: int = Field(10 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    allowed_mime: list[str] = Field(
+        default_factory=lambda: ["image/jpeg", "image/png", "image/webp"]
+    )
+
+    @field_validator("device")
+    @classmethod
+    def _validate_device(cls, v: str) -> str:
+        if v not in ("auto", "cpu", "cuda"):
+            raise ValueError(f"device must be auto|cpu|cuda, got {v!r}")
+        return v
+
+
 class Settings(BaseSettings):
     # 服务
     host: str = "0.0.0.0"
@@ -92,9 +122,13 @@ class Settings(BaseSettings):
     # Reranker (nested; env prefix VS_RERANKER__)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
 
+    # Image embedding (nested; env prefix VS_IMAGE_EMBEDDING__)
+    image_embedding: ImageEmbeddingSettings = Field(default_factory=ImageEmbeddingSettings)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="VS_",
+        env_nested_delimiter="__",
         extra="ignore",
         case_sensitive=False,
     )
