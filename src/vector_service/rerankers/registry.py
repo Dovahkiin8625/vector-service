@@ -27,3 +27,6 @@ def get_reranker_class(name: str) -> type[Reranker]:
 def list_reranker_names() -> list[str]:
     """Return all registered reranker backend names (sorted by insertion)."""
     return list(RERANKER_REGISTRY)
+
+
+from . import cross_encoder  # noqa: F401  # side-effect: registers CrossEncoderReranker
