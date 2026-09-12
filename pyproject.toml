@@ -25,18 +25,14 @@ embed = [
     "FlagEmbedding>=1.2.10",
     "transformers>=4.41",
     "huggingface-hub>=0.23",
+    "modelscope>=1.9",
+    "sentence-transformers>=2.6",
 ]
 store = [
     "pymilvus>=2.4.3",
-    # milvus-lite ships only Linux/macOS wheels. On Windows, run via WSL or
-    # point VS_VECTOR_STORE_BACKEND at milvus_standalone (Docker) once added.
-    "milvus-lite>=2.4.0; sys_platform != 'win32'",
 ]
-dev = [
-    "pytest>=8.1",
-    "pytest-cov>=5.0",
-    "ruff>=0.4",
-    "mypy>=1.10",
+all = [
+    "vector-service[embed,store]",
 ]
 
 [project.scripts]
@@ -45,27 +41,22 @@ vector-service = "vector_service.main:run"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "contract: contract tests that need a real Milvus server (deselect with '-m \"not contract\"')",
+    "slow: slow tests (deselect with '-m \"not slow\"')",
+    "integration: full-stack integration tests",
+]
+filterwarnings = [
+    # Treat pymilvus ORM-style API deprecations as test failures so we
+    # notice the moment the SDK drops them. The action is "error", the
+    # match pattern is the warning message, scoped to our package.
+    "error:ORM-style PyMilvus API:DeprecationWarning:vector_service",
+    "error:PyMilvusDeprecationWarning:DeprecationWarning:vector_service",
+]
+
 [tool.uv]
 package = true
-
-[dependency-groups]
-dev = [
-    "pytest>=8.1",
-    "pytest-cov>=5.0",
-    "ruff>=0.4",
-    "mypy>=1.10",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
-addopts = "-ra --strict-markers -m \"not slow\""
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "N", "SIM"]
