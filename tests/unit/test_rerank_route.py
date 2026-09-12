@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from vector_service.api.rerank import router as rerank_router
 from vector_service.core.config import RerankerSettings, Settings
-from vector_service.core.errors import RerankerNotLoaded
+from vector_service.core.errors import RerankerError, RerankerNotLoaded
 from vector_service.core.middleware import RequestIDMiddleware
 from vector_service.main import _err
 from vector_service.rerankers import cross_encoder  # noqa: F401 — registers "bge-reranker-v2-m3"
@@ -53,6 +53,12 @@ def _make_app(reranker: Reranker | None, *, settings: Settings | None = None) ->
     @app.exception_handler(RerankerNotLoaded)
     async def _h(req, exc):
         return _err("reranker_not_loaded", str(exc), 503, exc=exc)
+
+    @app.exception_handler(RerankerError)
+    async def _re(req, exc):
+        # RerankerNotLoaded is a subclass; FastAPI dispatches to the most
+        # specific handler, so this only fires for plain RerankerError.
+        return _err("reranker_error", str(exc) or "rerank failed", 503, exc=exc)
 
     @app.exception_handler(RequestValidationError)
     async def _v(req, exc):
@@ -280,6 +286,35 @@ def test_rerank_422_pydantic_rejects_empty_documents():
         )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "invalid_request"
+
+
+def test_rerank_503_reranker_error_from_defensive_wrap():
+    """Unexpected exceptions from reranker.rerank() inside the executor
+    are caught by the ``except Exception`` defensive wrap in
+    ``api/rerank.py`` and re-raised as ``RerankerError``, which the main
+    handler maps to 503 with code ``reranker_error``.
+    """
+
+    class _BoomReranker(Reranker):
+        model_name = "fake-reranker"
+
+        def __init__(self) -> None:
+            self._impl = None
+
+        def load(self) -> None:
+            self._impl = "ready"
+
+        def rerank(self, query, documents, top_n=None):
+            raise RuntimeError("boom")
+
+    app = _make_app(_BoomReranker())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/rerank",
+            json={"query": "q", "documents": ["a", "b"]},
+        )
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "reranker_error"
 
 
 # ---- list models -------------------------------------------------------
