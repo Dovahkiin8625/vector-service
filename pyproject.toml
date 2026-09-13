@@ -31,8 +31,11 @@ embed = [
 store = [
     "pymilvus>=2.4.3",
 ]
+image-embed = [
+    "open_clip_torch>=2.24",
+]
 all = [
-    "vector-service[embed,store]",
+    "vector-service[embed,store,image-embed]",
 ]
 
 [project.scripts]

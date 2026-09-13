@@ -3,6 +3,7 @@
 生产级 FastAPI 向量服务：
 
 - **OpenAI 兼容嵌入 API**：`/v1/embeddings`、`/v1/models`
+- **图像嵌入 API**：`/v1/image_embeddings`（OpenCLIP ViT-L/14，把 base64 图片转成 768 维向量）
 - **多 database 管理**：`/v1/databases` 增删改查 database，每个 database 下挂若干 collection
 - **database-scoped 向量库管理**：`/v1/databases/{db}/collections/{coll}/vectors|search|...`
 - **直连 Milvus server**：通过 `pymilvus` 直接连接独立部署的 Milvus，无中间代理
@@ -14,6 +15,7 @@
 | 组件 | 实现 |
 |------|------|
 | Embedder | BGE-M3 (GPU: torch fp16 / CPU: ONNX int8) |
+| ImageEmbedder | OpenCLIP ViT-L/14 (openai/ViT-L-14, 768 维) |
 | VectorStore | Milvus server（直连 pymilvus） |
 
 ---
@@ -23,13 +25,15 @@
 ```
 client ──HTTP──▶ vector-service ──gRPC──▶ Milvus server
                   ├─ BGE-M3 嵌入
+                  ├─ OpenCLIP 图像嵌入
                   └─ Milvus store 客户端（pymilvus 直连）
 ```
 
-`vector-service` 自己的职责只有两块：
+`vector-service` 自己的职责有三块：
 
-1. **嵌入**：用 BGE-M3 把文本变成 `list[float]`。
-2. **向量库 CRUD**：通过 `pymilvus` 直接对 Milvus 做 database / collection / 向量管理。
+1. **文本嵌入**：用 BGE-M3 把文本变成 `list[float]`。
+2. **图像嵌入**：用 OpenCLIP 把 base64 图片变成 `list[float]`。
+3. **向量库 CRUD**：通过 `pymilvus` 直接对 Milvus 做 database / collection / 向量管理。
 
 ---
 
@@ -171,8 +175,8 @@ curl -X DELETE http://localhost:8080/v1/databases/tenant-a
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/v1/embeddings` | OpenAI 兼容嵌入 |
-| `GET` | `/v1/models` | 列已注册嵌入器 |
-| `GET` | `/v1/models/{model_id}` | 单个模型元信息 |
+| `GET` | `/v1/models` | 列已注册的嵌入器和 reranker（用 `type` 区分） |
+| `GET` | `/v1/models/{model_id}` | 单个模型元信息（嵌入器或 reranker） |
 
 ### 可观测性
 
@@ -271,7 +275,8 @@ Reranker 子系统把向量检索回来的候选 documents 交给 cross-encoder 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/v1/rerank` | 重排序：接收 `query` + `documents`，返回按相关性降序的 `{index, score}` 列表 |
-| `GET`  | `/v1/rerank/models` | 列出已注册的 reranker 后端 |
+
+> 已注册的 reranker 后端通过 `GET /v1/models` 暴露，按 `type=reranker` 过滤即可。
 
 ### 启动
 
@@ -325,6 +330,120 @@ curl -X POST localhost:8080/v1/rerank \
 | 503 | `reranker_not_loaded` | 启动期权重加载失败（模型目录缺失且未启用 auto_download） |
 | 503 | `reranker_error` | 重排序推理失败（sentence-transformers 抛错等） |
 | 500 | `internal` | 未捕获的兜底异常 |
+
+---
+
+## 图像嵌入（Image Embeddings）
+
+图像嵌入子系统把 base64 编码的图片转成 `list[float]`。当前内置 `openclip-vit-l-14`（OpenCLIP ViT-L/14，openai 预训练权重，768 维）。
+
+### 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/image_embeddings` | 图像嵌入：接收 base64 图片，返回 `{index, embedding}` 列表 |
+
+> 已注册的图像嵌入器通过 `GET /v1/models` 暴露，按 `type=image_embedder` 过滤即可。
+
+### 启动
+
+首次启动会自动从 HuggingFace 下载 `openai/ViT-L-14` 权重到 `./models/openclip-vit-l-14/`；离线环境把 `VS_IMAGE_EMBEDDING__AUTO_DOWNLOAD=false`，手工把权重放到 `VS_IMAGE_EMBEDDING__MODEL_DIR` 指定的目录。
+
+所有 `VS_IMAGE_EMBEDDING__*` 配置项见 `.env.example` 的 `Image embedding` 段（`backend` / `model_dir` / `auto_download` / `device` / `batch_size` / `max_images_per_request` / `max_image_bytes` / `hf_repo` / `allowed_mime`）。
+
+### 示例
+
+```bash
+curl -X POST localhost:8080/v1/image_embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openclip-vit-l-14",
+    "input": {
+      "data": "'$(base64 -w0 cat.png)'",
+      "mime": "image/png"
+    }
+  }'
+```
+
+返回示例：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"object": "image_embedding", "index": 0, "embedding": [0.0123, -0.0456, ...]}
+  ],
+  "model": "openclip-vit-l-14",
+  "usage": {"prompt_tokens": 1, "total_tokens": 1}
+}
+```
+
+### 图搜图：upsert + search 接入
+
+`PUT /v1/databases/{db}/collections/{coll}/vectors` 和 `POST .../search` 同时接受文本、向量和图像三种输入（三选一）。图像模式下：
+
+- `PUT`：body 用 `images`（base64 列表）+ `image_mimes`（并行）+ `model`（图像嵌入器 id）代替 `texts`。
+- `search`：body 用 `query_image`（base64 单张）+ `query_image_mime` + `model` 代替 `query_text`。
+
+```bash
+# 1) 建 collection（dim 必须等于 768）
+curl -X POST localhost:8080/v1/databases/tenant-a/collections \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "products",
+    "primary_field": "id",
+    "scalar_fields": [{"name": "id", "dtype": "varchar", "is_primary": true, "max_length": 64}],
+    "vector_field": {"name": "vector", "dim": 768, "metric_type": "cosine"}
+  }'
+
+# 2) upsert 图片
+curl -X PUT localhost:8080/v1/databases/tenant-a/collections/products/vectors \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "primary_field": "id",
+    "vector_field": "vector",
+    "ids": ["sku-1"],
+    "images": ["'"$(base64 -w0 mouse.png)"'"],
+    "image_mimes": ["image/png"],
+    "model": "openclip-vit-l-14"
+  }'
+
+# 3) 图搜图
+curl -X POST localhost:8080/v1/databases/tenant-a/collections/products/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "primary_field": "id",
+    "vector_field": "vector",
+    "query_image": "'"$(base64 -w0 query.png)"'",
+    "query_image_mime": "image/png",
+    "model": "openclip-vit-l-14",
+    "top_k": 5
+  }'
+```
+
+### 错误码
+
+所有非 2xx 响应共用前文 "API 表面" 一节展示的统一 error 信封。图像嵌入端点的错误码：
+
+| HTTP | code | 触发 |
+|------|------|------|
+| 404 | `model_not_found` | 图像嵌入器 id 未在 `IMAGE_EMBEDDER_REGISTRY` 注册 |
+| 422 | `image_decode_failed` | base64 解码失败 |
+| 422 | `image_too_large` | 解码后字节数超过 `VS_IMAGE_EMBEDDING__MAX_IMAGE_BYTES` |
+| 422 | `too_many_images` | 输入图片数超过 `VS_IMAGE_EMBEDDING__MAX_IMAGES_PER_REQUEST` |
+| 422 | `unsupported_mime` | MIME 不在 `VS_IMAGE_EMBEDDING__ALLOWED_MIME` |
+| 503 | `image_embedder_unavailable` | 启动期权重加载失败 / 推理失败 |
+| 500 | `internal` | 未捕获的兜底异常 |
+
+## 添加新图像嵌入器
+
+参见 `src/vector_service/embeddings/`：
+
+1. 新建 `embeddings/<backend>.py`，实现 `ImageEmbedder` ABC
+2. 在 `embeddings/image_registry.py` 注册
+3. 如需新配置项，扩展 `core/config.py` 的 `ImageEmbeddingSettings`
+
+---
 
 ## 添加新 reranker 后端
 
