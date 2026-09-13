@@ -185,7 +185,9 @@ def _resolve_image_embedder_or_404(request: Request, model_id: str):
 
     - 404 ``model_not_found`` if the id is not registered.
     - 503 ``image_embedder_unavailable`` if no embedder instance is
-      attached to ``app.state`` (lifespan failed to load it).
+      attached to ``app.state`` (lifespan failed to load it) OR if
+      the queried id does not match the embedder that is currently
+      loaded (a registered-but-not-loaded backend).
 
     Returns the live ``ImageEmbedder`` instance on success.
     """
@@ -199,7 +201,12 @@ def _resolve_image_embedder_or_404(request: Request, model_id: str):
             "exception_type": type(e).__name__,
         }})
     embedder = getattr(request.app.state, "image_embedder", None)
-    if embedder is None:
+    # Constraint: the service only ever keeps one image embedder loaded
+    # at a time. A request naming a *registered* but *not currently
+    # loaded* model id must be told the embedder is unavailable rather
+    # than silently falling through to whichever backend happens to be
+    # in app.state. Mirrors the guard in ``api/models.py``.
+    if embedder is None or embedder.model_name != model_id:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "image_embedder_unavailable",
             "message": (

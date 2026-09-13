@@ -88,10 +88,8 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         # Warmup: single image to materialize kernels. Generate a tiny
         # valid PNG (1x1 black) — a bare PNG header is rejected by PIL.
         try:
-            import io as _io
-
             tiny = Image.new("RGB", (1, 1), color=(0, 0, 0))
-            buf = _io.BytesIO()
+            buf = io.BytesIO()
             tiny.save(buf, format="PNG")
             self.embed_images([ImageInput(data=buf.getvalue(), mime="image/png")])
         except Exception as e:  # warmup failures are non-fatal

@@ -86,7 +86,6 @@ def _decode_all(items, *, max_bytes, allowed_mime):
 )
 async def create_image_embeddings(body: ImageEmbeddingRequest, request: Request):
     settings = request.app.state.settings.image_embedding
-    embedder = request.app.state.image_embedder
 
     # Validate model id.
     try:
@@ -95,6 +94,21 @@ async def create_image_embeddings(body: ImageEmbeddingRequest, request: Request)
         raise HTTPException(status_code=404, detail={"error": {
             "code": "model_not_found",
             "message": str(e) or f"unknown model {body.model!r}",
+            "model": body.model,
+        }})
+
+    # Resolve the live embedder. A None here means the lifespan step
+    # never produced one (weights download failed, model dir missing,
+    # etc.) — per spec the route should surface that as
+    # 503 image_embedder_unavailable, never a 500 AttributeError.
+    embedder = getattr(request.app.state, "image_embedder", None)
+    if embedder is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "image_embedder_unavailable",
+            "message": (
+                f"image embedder {body.model!r} is not loaded; "
+                "the lifespan step did not initialise it"
+            ),
             "model": body.model,
         }})
 

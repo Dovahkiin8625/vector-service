@@ -188,6 +188,25 @@ def test_embedder_inference_failure_returns_503(app_with_stub):
     assert r.json()["error"]["code"] == "image_embedder_unavailable"
 
 
+def test_unavailable_embedder_returns_503_when_state_is_none(app_with_stub):
+    """If lifespan failed to load the embedder, ``app.state.image_embedder``
+    is never assigned (or set to None). The route must surface that as a
+    503 ``image_embedder_unavailable`` — NOT a 500 AttributeError.
+    """
+    app, _, client = app_with_stub
+    # Mirror the lifespan failure mode: ``app.state.image_embedder`` is None.
+    app.state.image_embedder = None
+
+    r = client.post("/v1/image_embeddings", json={
+        "model": "openclip-vit-l-14",
+        "input": {"data": VALID_PNG_B64, "mime": "image/png"},
+    })
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["error"]["code"] == "image_embedder_unavailable"
+    assert body["error"]["model"] == "openclip-vit-l-14"
+
+
 def test_metrics_recorded(app_with_stub):
     _, stub, client = app_with_stub
     client.post("/v1/image_embeddings", json={

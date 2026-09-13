@@ -114,10 +114,17 @@ class FakeImageEmbedder(ImageEmbedder):
     ``dim`` matches the production OpenCLIP ViT-L/14 (768) so tests
     stay realistic; the FakeStore doesn't validate dimension, so any
     value is fine for routing tests.
+
+    ``model_name`` matches the registered id used in test request
+    bodies ("openclip-vit-l-14") so the guard in
+    ``_resolve_image_embedder_or_404`` (which rejects mismatches
+    between the queried model id and the live embedder on app.state)
+    accepts the fake. Keeping the fake aligned with the registered id
+    is the minimum-invasive way to keep these routing tests realistic.
     """
 
     dim = 4  # keep aligned with the fake store; routing does not care
-    model_name = "fake-image"
+    model_name = "openclip-vit-l-14"
 
     def __init__(self):
         self.calls = []

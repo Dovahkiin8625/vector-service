@@ -53,8 +53,18 @@ def list_models(request: Request):
         models.append(Model(id=name, type="reranker", dimensions=None))
     image_embedder = request.app.state.image_embedder
     for name in list_image_embedder_names():
+        # Constraint: only the embedder that is actually loaded on
+        # ``app.state.image_embedder`` can report a real dimension.
+        # Querying a registered-but-unloaded model id must surface
+        # ``dimensions=null`` so callers can tell apart "available"
+        # from "currently loaded".
+        effective = (
+            image_embedder
+            if (image_embedder and image_embedder.model_name == name)
+            else None
+        )
         try:
-            dim = image_embedder.dim if (image_embedder and name == image_embedder.model_name) else None
+            dim = effective.dim if effective else None
         except Exception:
             dim = None
         models.append(Model(id=name, type="image_embedder", dimensions=dim))
@@ -80,7 +90,15 @@ def get_model(model_id: str, request: Request):
         return Model(id=model_id, type="reranker", dimensions=None)
     if model_id in IMAGE_EMBEDDER_REGISTRY:
         image_embedder = request.app.state.image_embedder
-        dim = image_embedder.dim if (image_embedder and image_embedder.model_name == model_id) else None
+        # See note above in ``list_models``: only report ``dimensions``
+        # when the queried id matches the live embedder on app.state.
+        # Otherwise the model is registered but not loaded, and the
+        # dimension is genuinely unknown to this process.
+        dim = (
+            image_embedder.dim
+            if (image_embedder and image_embedder.model_name == model_id)
+            else None
+        )
         return Model(id=model_id, type="image_embedder", dimensions=dim)
     registered = (
         sorted(EMBEDDER_REGISTRY)
