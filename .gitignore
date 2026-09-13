@@ -1,3 +1,4 @@
+# --- Python build/cache artifacts ---
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -7,14 +8,22 @@ dist/
 .mypy_cache/
 .ruff_cache/
 *.db
+
+# --- Virtual environments ---
+.venv/
+.newvenv/
+.venv-uv/
+
+# --- Local secrets / runtime data ---
 .env
 data/
 models/
 logs/
 
-# Tooling runtime artifacts (playwright MCP, etc.)
+# --- Tooling runtime artifacts ---
+.pytest_cache/
+.run-dev/
 .playwright-mcp/
 
-# Virtual environments
-.venv/
-.newvenv/
+# --- Superpowers plugin state (skills live under the plugin path; local state is per-machine) ---
+.superpowers/
