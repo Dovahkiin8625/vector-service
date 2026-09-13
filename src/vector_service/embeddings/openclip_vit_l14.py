@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -18,12 +19,6 @@ def _create_model_and_transforms(name: str, pretrained: str, **kwargs):
     import open_clip  # lazy
 
     return open_clip.create_model_and_transforms(name, pretrained=pretrained, **kwargs)
-
-
-def _snapshot_download(repo_id: str, local_dir: str) -> str:
-    from huggingface_hub import snapshot_download  # lazy
-
-    return snapshot_download(repo_id=repo_id, local_dir=local_dir, local_dir_use_symlinks=False)
 
 
 def _dir_has_model(p: Path) -> bool:
@@ -75,7 +70,21 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         self._load_internal()
 
     def _load_internal(self) -> None:
-        self._ensure_model_dir()
+        # Ensure the local model_dir exists so open_clip can use it as a
+        # download cache. open_clip's own downloader (called inside
+        # create_model_and_transforms) handles fetching weights; we don't
+        # talk to HuggingFace directly because OpenCLIP's manifest is
+        # served from open_clip's CDN, not a normal HF repo.
+        self._model_dir.mkdir(parents=True, exist_ok=True)
+        # Point open_clip at our local cache so subsequent loads skip the
+        # network call.
+        os.environ.setdefault("OPEN_CLIP_DOWNLOAD_PATH", str(self._model_dir))
+
+        if not _dir_has_model(self._model_dir) and not self._settings.auto_download:
+            raise ModelNotLoadedForImages(
+                f"model dir {self._model_dir} has no OpenCLIP weights and auto_download is off"
+            )
+
         try:
             self._model, self._preprocess, _ = _create_model_and_transforms(
                 "ViT-L-14", pretrained="openai", device=self._device
@@ -96,16 +105,6 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
             import structlog
 
             structlog.get_logger(__name__).warning("openclip_warmup_failed", error=str(e))
-
-    def _ensure_model_dir(self) -> None:
-        self._model_dir.mkdir(parents=True, exist_ok=True)
-        if _dir_has_model(self._model_dir):
-            return
-        if not self._settings.auto_download:
-            raise ModelNotLoadedForImages(
-                f"model dir {self._model_dir} has no OpenCLIP weights and auto_download is off"
-            )
-        _snapshot_download(self._settings.hf_repo, str(self._model_dir))
 
     def _preprocess_one(self, image: ImageInput):
         pil = Image.open(io.BytesIO(image.data))

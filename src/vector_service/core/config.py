@@ -65,8 +65,12 @@ class ImageEmbeddingSettings(BaseSettings):
     backend: str = "openclip-vit-l-14"
     model_dir: str = "./models/openclip-vit-l-14"
     auto_download: bool = True
+    # OpenCLIP weights are fetched by open_clip itself (not via
+    # huggingface_hub). The download_source / hf_repo fields are kept for
+    # future embedders that DO use HF directly; default values are
+    # inert placeholders.
     download_source: Literal["huggingface"] = "huggingface"
-    hf_repo: str = "openai/ViT-L-14"
+    hf_repo: str = ""
     device: Literal["auto", "cpu", "cuda"] = "auto"
     batch_size: int = Field(16, ge=1, le=512)
     max_images_per_request: int = Field(64, ge=1, le=1024)

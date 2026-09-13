@@ -29,7 +29,7 @@ class _FakeImageSettings:
         batch_size=4,
         auto_download=True,
         download_source="huggingface",
-        hf_repo="openai/ViT-L-14",
+        hf_repo="",
     ):
         self.model_dir = model_dir
         self.device = device

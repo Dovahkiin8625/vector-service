@@ -131,12 +131,13 @@ async def lifespan(app: "FastAPI"):
             device=getattr(image_embedder, "_device", "unknown"),
             dim=image_embedder.dim,
         )
-    except (ModelNotLoadedForImages, ImageEmbedderError) as exc:
+    except Exception as exc:  # noqa: BLE001 — fail-open: image embedder unavailable must not kill startup
         MODEL_LOADED.labels(kind="image_embedder").set(0)
         log.error(
             "image_embedder_load_failed",
             backend=settings.image_embedding.backend,
             error=str(exc),
+            exception_type=type(exc).__name__,
         )
 
     try:

@@ -15,7 +15,7 @@
 | 组件 | 实现 |
 |------|------|
 | Embedder | BGE-M3 (GPU: torch fp16 / CPU: ONNX int8) |
-| ImageEmbedder | OpenCLIP ViT-L/14 (openai/ViT-L-14, 768 维) |
+| ImageEmbedder | OpenCLIP ViT-L/14 (openai 预训练权重, 768 维) |
 | VectorStore | Milvus server（直连 pymilvus） |
 
 ---
@@ -347,7 +347,7 @@ curl -X POST localhost:8080/v1/rerank \
 
 ### 启动
 
-首次启动会自动从 HuggingFace 下载 `openai/ViT-L-14` 权重到 `./models/openclip-vit-l-14/`；离线环境把 `VS_IMAGE_EMBEDDING__AUTO_DOWNLOAD=false`，手工把权重放到 `VS_IMAGE_EMBEDDING__MODEL_DIR` 指定的目录。
+首次启动会自动从 open_clip 的 CDN（`openaipublic.azureedge.net`）下载 openai 预训练的 `ViT-L-14` 权重到 `./models/openclip-vit-l-14/`（`OPEN_CLIP_DOWNLOAD_PATH` 环境变量也会被指向同一目录）。离线环境把 `VS_IMAGE_EMBEDDING__AUTO_DOWNLOAD=false`，手工把权重放到 `VS_IMAGE_EMBEDDING__MODEL_DIR` 指定的目录。
 
 所有 `VS_IMAGE_EMBEDDING__*` 配置项见 `.env.example` 的 `Image embedding` 段（`backend` / `model_dir` / `auto_download` / `device` / `batch_size` / `max_images_per_request` / `max_image_bytes` / `hf_repo` / `allowed_mime`）。
 

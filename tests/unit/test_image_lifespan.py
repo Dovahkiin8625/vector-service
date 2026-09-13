@@ -132,3 +132,53 @@ def test_readyz_reports_image_embedder_not_loaded_on_failure(monkeypatch):
         assert r.status_code == 503
         body = r.json()
         assert body["image_embedder"] == "not_loaded"
+
+
+def test_lifespan_fails_open_on_unexpected_image_embedder_exception(monkeypatch):
+    """Regression: lifespan must NOT propagate non-ModelNotLoadedForImages
+    exceptions (e.g. huggingface_hub.RepositoryNotFoundError from a bad
+    hf_repo, or a network error). The image embedder fails closed (the
+    app comes up but /readyz reports image_embedder=not_loaded), mirroring
+    the text embedder's fail-open policy.
+    """
+    class _BoomEmbedder(ImageEmbedder):
+        dim = 768
+        model_name = "boom"
+
+        def __init__(self):
+            self._impl = None
+
+        def load(self):
+            raise RuntimeError("disk I/O error")  # not ModelNotLoadedForImages
+
+        def embed_images(self, images): return []
+        def embed_query_image(self, image): return []
+
+    img = _BoomEmbedder()
+    text_embedder = _FakeTextEmbedder()
+    fake_store = _FakeStore()
+
+    monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: text_embedder)
+    monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
+    monkeypatch.setattr(lifespan_mod, "build_image_embedder", lambda s: img)
+    monkeypatch.setattr(
+        lifespan_mod,
+        "build_reranker",
+        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+    )
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from vector_service.api.health import router as health_router
+
+    app = FastAPI(lifespan=lifespan_mod.lifespan)
+    app.include_router(health_router)
+
+    # App must come up despite the unexpected exception.
+    with TestClient(app) as client:
+        r = client.get("/readyz")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["image_embedder"] == "not_loaded"
+        assert body["embedder"] == "loaded"  # text embedder still works
+        assert body["store"] == "ok"
