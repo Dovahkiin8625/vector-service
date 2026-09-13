@@ -1,4 +1,4 @@
-"""Unit tests for ``/v1/rerank`` and ``/v1/rerank/models``."""
+"""Unit tests for ``/v1/rerank``."""
 from __future__ import annotations
 
 import pytest
@@ -315,15 +315,3 @@ def test_rerank_503_reranker_error_from_defensive_wrap():
         )
     assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "reranker_error"
-
-
-# ---- list models -------------------------------------------------------
-
-
-def test_list_rerank_models_returns_registered_names():
-    app = _make_app(_FakeReranker())
-    with TestClient(app) as client:
-        resp = client.get("/v1/rerank/models")
-    assert resp.status_code == 200
-    names = [m["name"] for m in resp.json()["data"]]
-    assert "bge-reranker-v2-m3" in names

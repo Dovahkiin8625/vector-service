@@ -4,6 +4,7 @@
 
 - **OpenAI 兼容嵌入 API**：`/v1/embeddings`、`/v1/models`
 - **图像嵌入 API**：`/v1/image_embeddings`（OpenCLIP ViT-L/14，把 base64 图片转成 768 维向量）
+- **图文跨模态嵌入 API**：`/v1/multimodal_embeddings`（Chinese-CLIP ViT-B/16，同时接受中文文本与图片，返回 512 维共享空间向量，可用于文搜图、图搜文）
 - **多 database 管理**：`/v1/databases` 增删改查 database，每个 database 下挂若干 collection
 - **database-scoped 向量库管理**：`/v1/databases/{db}/collections/{coll}/vectors|search|...`
 - **直连 Milvus server**：通过 `pymilvus` 直接连接独立部署的 Milvus，无中间代理
@@ -16,6 +17,7 @@
 |------|------|
 | Embedder | BGE-M3 (GPU: torch fp16 / CPU: ONNX int8) |
 | ImageEmbedder | OpenCLIP ViT-L/14 (openai 预训练权重, 768 维) |
+| MultimodalEmbedder | Chinese-CLIP ViT-B/16 (OFA-Sys, 512 维共享投影空间) |
 | VectorStore | Milvus server（直连 pymilvus） |
 
 ---
@@ -434,6 +436,92 @@ curl -X POST localhost:8080/v1/databases/tenant-a/collections/products/search \
 | 422 | `unsupported_mime` | MIME 不在 `VS_IMAGE_EMBEDDING__ALLOWED_MIME` |
 | 503 | `image_embedder_unavailable` | 启动期权重加载失败 / 推理失败 |
 | 500 | `internal` | 未捕获的兜底异常 |
+
+---
+
+## 图文跨模态嵌入（Multimodal Embeddings）
+
+跨模态嵌入子系统同时接受中文文本和 base64 图片，统一在 **512 维共享投影空间**中输出向量。两端的向量可以直接做 cos similarity，是 **文搜图** 和 **图搜文** 检索的基础。当前内置 `chinese-clip-vit-base-patch16`（Chinese-CLIP ViT-B/16，OFA-Sys 预训练权重，文本塔 / 图像塔共享 512 维投影空间）。
+
+> 与图像嵌入 (`openclip-vit-l-14`, 768 维) 不同，跨模态模型的两个塔必须使用同一个 `MultimodalEmbedder` 实例、产生同维度向量，才能保证跨模态相似度有意义。
+
+### 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/multimodal_embeddings` | 图文嵌入：每个 item 是 `{text}` 或 `{image:{data,mime}}`，返回 `{index, embedding}` 列表 |
+
+已注册的跨模态嵌入器通过 `GET /v1/models` 暴露，按 `type=multimodal_embedder` 过滤即可。
+
+### 启动
+
+首次启动会从 HuggingFace（默认 `OFA-Sys/chinese-clip-vit-base-patch16`）下载权重到 `./models/chinese-clip-vit-base-patch16/`。离线环境把 `VS_MULTIMODAL_EMBEDDING__AUTO_DOWNLOAD=false`，手工把权重放到 `VS_MULTIMODAL_EMBEDDING__MODEL_DIR` 指定的目录。
+
+`VS_MULTIMODAL_EMBEDDING__*` 配置项见 `.env.example` 的 `Multimodal embedding` 段。
+
+### 示例
+
+```bash
+# 纯文本
+curl -X POST localhost:8080/v1/multimodal_embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "chinese-clip-vit-base-patch16",
+    "input": [{"text": "一只猫"}, {"text": "一只狗"}]
+  }'
+
+# 纯图片（image.png 用 base64 -w0 转码）
+curl -X POST localhost:8080/v1/multimodal_embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "chinese-clip-vit-base-patch16",
+    "input": [{"image": {"data": "'$(base64 -w0 cat.png)'", "mime": "image/png"}}]
+  }'
+
+# 混合输入 — 返回顺序与请求顺序一一对应
+curl -X POST localhost:8080/v1/multimodal_embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "chinese-clip-vit-base-patch16",
+    "input": [
+      {"text": "一只小猫在窗台上晒太阳"},
+      {"image": {"data": "'$(base64 -w0 cat.png)'", "mime": "image/png"}},
+      {"text": "一只小狗在草地上奔跑"}
+    ]
+  }'
+```
+
+返回示例（每个 embedding 都是 512 维浮点列表）：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"object": "multimodal_embedding", "index": 0, "embedding": [0.0123, -0.0456, ...]},
+    {"object": "multimodal_embedding", "index": 1, "embedding": [0.0789, -0.1011, ...]},
+    {"object": "multimodal_embedding", "index": 2, "embedding": [0.1314, -0.1718, ...]}
+  ],
+  "model": "chinese-clip-vit-base-patch16",
+  "usage": {"prompt_tokens": 3, "total_tokens": 3}
+}
+```
+
+### 文搜图 / 图搜文
+
+由于文本塔和图像塔输出同空间向量，把文本向量与图片向量存进同一个 `dim=512` 的 Milvus collection 之后，就可以直接做 cos 相似度检索（Milvus 端无需区分 query 端是文本还是图片 — 上层把文本 query 通过同一 embedder 转成向量即可）。Milvus upsert / search 端点打通跨模态路由在后续版本提供；本轮先把图文嵌入能力上线。
+
+### 错误码
+
+| HTTP | code | 触发 |
+|------|------|------|
+| 404 | `model_not_found` | 跨模态嵌入器 id 未在 `MULTIMODAL_EMBEDDER_REGISTRY` 注册 |
+| 422 | `image_decode_failed` / `image_too_large` / `unsupported_mime` | 图片解码 / 大小 / MIME 校验失败 |
+| 422 | `text_too_long` | 单条文本超过 `VS_MULTIMODAL_EMBEDDING__MAX_TEXT_CHARS` |
+| 422 | `too_many_items` | 输入 item 数超过 `VS_MULTIMODAL_EMBEDDING__MAX_ITEMS_PER_REQUEST` |
+| 503 | `multimodal_embedder_unavailable` | 启动期权重加载失败 / 推理失败 |
+| 500 | `internal` | 未捕获的兜底异常 |
+
+---
 
 ## 添加新图像嵌入器
 

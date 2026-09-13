@@ -16,6 +16,10 @@ from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
 from vector_service.embeddings.image_base import ImageEmbedder
 from vector_service.embeddings.image_registry import get_image_embedder_class
+from vector_service.embeddings.multimodal_base import MultimodalEmbedder
+from vector_service.embeddings.multimodal_registry import (
+    get_multimodal_embedder_class,
+)
 from vector_service.embeddings.registry import get_embedder_class
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import get_reranker_class
@@ -48,6 +52,15 @@ def build_image_embedder(settings: Settings) -> ImageEmbedder:
     """
     cls = get_image_embedder_class(settings.image_embedding.backend)
     return cls(settings=settings.image_embedding)
+
+
+def build_multimodal_embedder(settings: Settings) -> MultimodalEmbedder:
+    """Construct a multimodal embedder for ``settings.multimodal_embedding.backend``.
+
+    Raises ``KeyError`` if the backend name is not registered.
+    """
+    cls = get_multimodal_embedder_class(settings.multimodal_embedding.backend)
+    return cls(settings=settings.multimodal_embedding)
 
 
 @asynccontextmanager
@@ -136,6 +149,29 @@ async def lifespan(app: "FastAPI"):
         log.error(
             "image_embedder_load_failed",
             backend=settings.image_embedding.backend,
+            error=str(exc),
+            exception_type=type(exc).__name__,
+        )
+
+    # ---- multimodal embedder (cross-modal text + image) ----
+    # Same fail-open policy: a failed multimodal load is logged + surfaced
+    # via /readyz but does NOT kill the process.
+    try:
+        multimodal_embedder = build_multimodal_embedder(settings)
+        multimodal_embedder.load()
+        app.state.multimodal_embedder = multimodal_embedder
+        MODEL_LOADED.labels(kind="multimodal_embedder").set(1)
+        log.info(
+            "multimodal_embedder_loaded",
+            model=multimodal_embedder.model_name,
+            device=getattr(multimodal_embedder, "_device", "unknown"),
+            dim=multimodal_embedder.dim,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        MODEL_LOADED.labels(kind="multimodal_embedder").set(0)
+        log.error(
+            "multimodal_embedder_load_failed",
+            backend=settings.multimodal_embedding.backend,
             error=str(exc),
             exception_type=type(exc).__name__,
         )

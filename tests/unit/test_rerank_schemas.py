@@ -5,11 +5,9 @@ import pytest
 from pydantic import ValidationError
 
 from vector_service.schemas.rerank import (
-    RerankModelsResponse,
     RerankRequest,
     RerankResponse,
     RerankResultItem,
-    RerankerInfo,
 )
 
 
@@ -52,8 +50,3 @@ def test_rerank_response_roundtrip():
         "results": [{"index": 0, "score": 0.5}],
         "request_id": "req_abc",
     }
-
-
-def test_reranker_info_and_models_response():
-    m = RerankModelsResponse(data=[RerankerInfo(name="bge-reranker-v2-m3")])
-    assert m.data[0].name == "bge-reranker-v2-m3"

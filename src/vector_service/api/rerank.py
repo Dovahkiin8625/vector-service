@@ -1,4 +1,8 @@
-"""Rerank API: ``POST /v1/rerank`` and ``GET /v1/rerank/models``."""
+"""Rerank API: ``POST /v1/rerank``.
+
+The list of registered rerankers is exposed through the unified
+``GET /v1/models`` endpoint (filter by ``type=reranker``).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -14,11 +18,9 @@ from vector_service.core.metrics import RERANK_DURATION_SECONDS, RERANK_REQUESTS
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import list_reranker_names
 from vector_service.schemas.rerank import (
-    RerankModelsResponse,
     RerankRequest,
     RerankResponse,
     RerankResultItem,
-    RerankerInfo,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -126,12 +128,4 @@ async def rerank(req: RerankRequest, request: Request) -> RerankResponse:
         model=model,
         results=[RerankResultItem(index=h.index, score=h.score) for h in hits],
         request_id=request_id_var.get(),
-    )
-
-
-@router.get("/rerank/models", response_model=RerankModelsResponse)
-async def list_rerank_models() -> RerankModelsResponse:
-    """List registered reranker backends (does not require a loaded instance)."""
-    return RerankModelsResponse(
-        data=[RerankerInfo(name=n) for n in list_reranker_names()]
     )

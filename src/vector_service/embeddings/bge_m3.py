@@ -1,7 +1,6 @@
 """BGE-M3 embedder with GPU/CPU dispatch."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from vector_service.core.config import Settings, get_settings
@@ -42,6 +41,20 @@ class BGEM3Embedder(Embedder):
     def _ensure_loaded(self) -> "_BGEBackend":
         if self._impl is not None:
             return self._impl
+        self._load_internal()
+        return self._impl  # type: ignore[return-value]
+
+    def load(self) -> None:
+        """Eagerly download (if needed), instantiate the backend, and warm up.
+
+        Idempotent: a second call is a no-op. Raises `ModelNotLoaded` on
+        failure so the lifespan handler can decide whether to stay up.
+        """
+        if self._impl is not None:
+            return
+        self._load_internal()
+
+    def _load_internal(self) -> None:
         self._ensure_model_dir()
         try:
             if self._device == "cuda":
@@ -49,15 +62,11 @@ class BGEM3Embedder(Embedder):
                     self._model_dir, self._device, self._max_length, self._batch_size
                 )
             else:
-                # CPU: 优先 ONNX（int8 量化），失败回退 Torch
-                try:
-                    self._impl = _OnnxBackend(
-                        self._model_dir, self._max_length, self._batch_size
-                    )
-                except Exception:
-                    self._impl = _TorchBackend(
-                        self._model_dir, "cpu", self._max_length, self._batch_size
-                    )
+                # CPU：直接用 PyTorch 后端（ONNX int8 镜像在 ModelScope/HF 上经常
+                # 缺失或不稳定，PyTorch 是通用可移植的最低公分母）。
+                self._impl = _TorchBackend(
+                    self._model_dir, "cpu", self._max_length, self._batch_size
+                )
         except Exception as e:
             raise ModelNotLoaded(f"failed to load BGE-M3: {e}") from e
 
@@ -67,7 +76,6 @@ class BGEM3Embedder(Embedder):
         except Exception as e:  # 预热失败不致命
             import structlog
             structlog.get_logger(__name__).warning("bge_m3_warmup_failed", error=str(e))
-        return self._impl
 
     def _ensure_model_dir(self) -> None:
         s = self._settings
@@ -79,14 +87,22 @@ class BGEM3Embedder(Embedder):
             raise ModelNotLoaded(
                 f"model dir {self._model_dir} has no BGE-M3 files and auto_download is off"
             )
-        # 下载
-        from huggingface_hub import snapshot_download  # lazy: 仅 auto_download 时需要
-        repo = s.embedding_onnx_repo if self._device == "cpu" else s.embedding_hf_repo
-        snapshot_download(
-            repo_id=repo,
-            local_dir=str(self._model_dir),
-            local_dir_use_symlinks=False,
-        )
+        # 下载：按配置的 source 路由到 HF 或 ModelScope
+        source = (s.embedding_download_source or "huggingface").lower()
+        repo = s.embedding_ms_repo if source == "modelscope" else s.embedding_hf_repo
+        if source == "modelscope":
+            from modelscope import snapshot_download  # lazy
+            snapshot_download(
+                repo_id=repo,
+                local_dir=str(self._model_dir),
+            )
+        else:
+            from huggingface_hub import snapshot_download  # lazy
+            snapshot_download(
+                repo_id=repo,
+                local_dir=str(self._model_dir),
+                local_dir_use_symlinks=False,
+            )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -134,31 +150,6 @@ class _TorchBackend(_BGEBackend):
             str(model_dir),
             use_fp16=(device == "cuda"),
             device=device,
-        )
-        self._max_length = max_length
-        self._batch_size = batch_size
-
-    def encode(self, texts, is_query):
-        out = self._model.encode(
-            texts,
-            batch_size=self._batch_size,
-            max_length=self._max_length,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )
-        return [list(map(float, v)) for v in out["dense_vecs"]]
-
-
-class _OnnxBackend(_BGEBackend):
-    def __init__(self, model_dir: Path, max_length: int, batch_size: int):
-        # 简单 ONNX 推理：使用 optimum 或 onnxruntime 直接跑
-        # 这里用 FlagEmbedding 的 ONNX 接口；若仓库不含 ONNX，会抛错回退
-        from FlagEmbedding import BGEM3FlagModel
-        self._model = BGEM3FlagModel(
-            str(model_dir),
-            use_fp16=False,
-            device="cpu",
         )
         self._max_length = max_length
         self._batch_size = batch_size

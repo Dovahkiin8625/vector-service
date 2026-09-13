@@ -1,1 +1,0 @@
-"""Integration tests using TestClient with FakeEmbedder/FakeStore."""

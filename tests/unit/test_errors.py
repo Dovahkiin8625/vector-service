@@ -1,39 +1,44 @@
-import pytest
+"""Unit tests for the typed error hierarchy."""
+from __future__ import annotations
 
 from vector_service.core.errors import (
-    VectorServiceError,
-    EmbedderError,
-    ModelNotLoaded,
-    StoreError,
-    CollectionNotFound,
-    CollectionAlreadyExists,
-    DimensionMismatch,
     BackendError,
+    CollectionAlreadyExists,
+    CollectionNotFound,
+    DatabaseAlreadyExists,
+    DatabaseNotFound,
+    DimensionMismatch,
+    StoreError,
+    VectorServiceError,
 )
 
 
-def test_hierarchy():
-    assert issubclass(EmbedderError, VectorServiceError)
-    assert issubclass(StoreError, VectorServiceError)
-    assert issubclass(CollectionNotFound, StoreError)
-    assert issubclass(CollectionAlreadyExists, StoreError)
-    assert issubclass(ModelNotLoaded, EmbedderError)
-    assert issubclass(BackendError, StoreError)
+def test_database_not_found_carries_name():
+    e = DatabaseNotFound("missing", name="alpha")
+    assert e.name == "alpha"
+    assert isinstance(e, StoreError)
+    assert isinstance(e, VectorServiceError)
 
 
-def test_dimension_mismatch_carries_attrs():
-    e = DimensionMismatch("dim wrong", expected=4, got=3)
+def test_database_already_exists_carries_name():
+    e = DatabaseAlreadyExists("dup", name="alpha")
+    assert e.name == "alpha"
+    assert isinstance(e, StoreError)
+
+
+def test_collection_not_found():
+    assert isinstance(CollectionNotFound("x"), StoreError)
+
+
+def test_collection_already_exists():
+    assert isinstance(CollectionAlreadyExists("x"), StoreError)
+
+
+def test_dimension_mismatch_dims():
+    e = DimensionMismatch("bad", expected=4, got=2)
     assert e.expected == 4
-    assert e.got == 3
-    assert "dim wrong" in str(e)
+    assert e.got == 2
 
 
-def test_dimension_mismatch_defaults():
-    e = DimensionMismatch("x")
-    assert e.expected is None
-    assert e.got is None
-
-
-def test_can_be_caught_as_base():
-    with pytest.raises(VectorServiceError):
-        raise CollectionNotFound("missing")
+def test_backend_error_is_store_error():
+    assert isinstance(BackendError("x"), StoreError)

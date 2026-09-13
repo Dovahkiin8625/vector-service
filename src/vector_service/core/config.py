@@ -87,6 +87,40 @@ class ImageEmbeddingSettings(BaseSettings):
         return v
 
 
+class MultimodalEmbeddingSettings(BaseSettings):
+    """Multimodal (text + image) embedding subsystem configuration.
+
+    Powers cross-modal retrieval: text-search-image and image-search-text.
+    Vectors from ``embed_text`` and ``embed_images`` must live in the
+    same space (typically a projection head output, e.g. 512d for
+    Chinese-CLIP). Env prefix: ``VS_MULTIMODAL_EMBEDDING__``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_MULTIMODAL_EMBEDDING__", extra="ignore")
+
+    backend: str = "chinese-clip-vit-base-patch16"
+    model_dir: str = "./models/chinese-clip-vit-base-patch16"
+    auto_download: bool = True
+    hf_repo: str = "OFA-Sys/chinese-clip-vit-base-patch16"
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    batch_size: int = Field(16, ge=1, le=512)
+
+    # Mixed text + image input limits — single cap, regardless of modality.
+    max_items_per_request: int = Field(64, ge=1, le=1024)
+    max_text_chars: int = Field(512, ge=1, le=32768)
+    max_image_bytes: int = Field(10 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    allowed_mime: list[str] = Field(
+        default_factory=lambda: ["image/jpeg", "image/png", "image/webp"]
+    )
+
+    @field_validator("device")
+    @classmethod
+    def _validate_device(cls, v: str) -> str:
+        if v not in ("auto", "cpu", "cuda"):
+            raise ValueError(f"device must be auto|cpu|cuda, got {v!r}")
+        return v
+
+
 class Settings(BaseSettings):
     # 服务
     host: str = "0.0.0.0"
@@ -128,6 +162,11 @@ class Settings(BaseSettings):
 
     # Image embedding (nested; env prefix VS_IMAGE_EMBEDDING__)
     image_embedding: ImageEmbeddingSettings = Field(default_factory=ImageEmbeddingSettings)
+
+    # Multimodal embedding (nested; env prefix VS_MULTIMODAL_EMBEDDING__)
+    multimodal_embedding: MultimodalEmbeddingSettings = Field(
+        default_factory=MultimodalEmbeddingSettings
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

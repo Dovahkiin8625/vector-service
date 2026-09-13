@@ -14,6 +14,7 @@ from vector_service.api.backend import router as backend_router
 from vector_service.api.embeddings import router as embeddings_router
 from vector_service.api.health import router as health_router
 from vector_service.api.image_embeddings import router as image_embeddings_router
+from vector_service.api.multimodal_embeddings import router as multimodal_embeddings_router
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.playground import router as playground_router
@@ -106,6 +107,16 @@ OPENAPI_TAGS = [
             "Image vectorization under `/v1`. `POST /v1/image_embeddings` "
             "returns dense vectors for a registered image embedder model "
             "from base64-encoded image inputs."
+        ),
+    },
+    {
+        "name": "multimodal_embeddings",
+        "description": (
+            "Cross-modal (text + image) vectorization under `/v1`. "
+            "`POST /v1/multimodal_embeddings` accepts a mixed list of Chinese "
+            "texts and base64-encoded images; both land in the same shared "
+            "vector space — useful for text-search-image and "
+            "image-search-text retrieval."
         ),
     },
     {
@@ -293,6 +304,7 @@ def create_app() -> FastAPI:
     app.include_router(backend_router)
     app.include_router(playground_router)
     app.include_router(image_embeddings_router)
+    app.include_router(multimodal_embeddings_router)
 
     return app
 

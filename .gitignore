@@ -4,13 +4,17 @@ __pycache__/
 .eggs/
 build/
 dist/
-.pytest_cache/
 .mypy_cache/
 .ruff_cache/
-htmlcov/
-.coverage
 *.db
 .env
 data/
 models/
 logs/
+
+# Tooling runtime artifacts (playwright MCP, etc.)
+.playwright-mcp/
+
+# Virtual environments
+.venv/
+.newvenv/

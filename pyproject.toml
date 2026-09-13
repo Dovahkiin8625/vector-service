@@ -34,8 +34,11 @@ store = [
 image-embed = [
     "open_clip_torch>=2.24",
 ]
+multimodal-embed = [
+    "transformers>=4.41",
+]
 all = [
-    "vector-service[embed,store,image-embed]",
+    "vector-service[embed,store,image-embed,multimodal-embed]",
 ]
 
 [project.scripts]

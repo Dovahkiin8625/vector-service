@@ -41,15 +41,3 @@ class RerankResponse(BaseModel):
     model: str
     results: list[RerankResultItem]
     request_id: str
-
-
-class RerankerInfo(BaseModel):
-    """One registered reranker backend."""
-
-    name: str
-
-
-class RerankModelsResponse(BaseModel):
-    """Response body for ``GET /v1/rerank/models``."""
-
-    data: list[RerankerInfo]

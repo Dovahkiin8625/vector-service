@@ -162,14 +162,16 @@ class Model(BaseModel):
 
     id: str = Field(description="Model identifier.")
     object: Literal["model"] = "model"
-    type: Literal["embedder", "reranker", "image_embedder"] = Field(
+    type: Literal["embedder", "reranker", "image_embedder", "multimodal_embedder"] = Field(
         default="embedder",
         description=(
             "Backend family. `embedder` for text embedding models (carries a "
             "`dimensions` value once loaded); `reranker` for cross-encoder "
             "rerankers (always `dimensions=null`); `image_embedder` for image "
             "embedding models (carries `dimensions` once loaded, mirroring "
-            "the text embedder)."
+            "the text embedder); `multimodal_embedder` for cross-modal "
+            "text+image models (carries `dimensions` once loaded — vectors "
+            "from both towers share the same space, e.g. 512d for Chinese-CLIP)."
         ),
     )
     owned_by: str = Field(

@@ -98,3 +98,12 @@ class ImageTooLarge(ImageDecodeError):
         super().__init__(message)
         self.got = got
         self.max = max
+
+
+class MultimodalEmbedderError(VectorServiceError):
+    """Base class for multimodal (text+image) embedding failures.
+
+    Sibling of EmbedderError / ImageEmbedderError. Carries lifecycle
+    separately so a missing multimodal model never looks like a text or
+    image embedder failure to dispatchers.
+    """

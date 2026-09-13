@@ -17,6 +17,10 @@ from vector_service.embeddings.image_registry import (
     IMAGE_EMBEDDER_REGISTRY,
     list_image_embedder_names,
 )
+from vector_service.embeddings.multimodal_registry import (
+    MULTIMODAL_EMBEDDER_REGISTRY,
+    list_multimodal_embedder_names,
+)
 from vector_service.embeddings.registry import (
     EMBEDDER_REGISTRY,
     list_embedder_names,
@@ -68,6 +72,18 @@ def list_models(request: Request):
         except Exception:
             dim = None
         models.append(Model(id=name, type="image_embedder", dimensions=dim))
+    multimodal_embedder = getattr(request.app.state, "multimodal_embedder", None)
+    for name in list_multimodal_embedder_names():
+        effective = (
+            multimodal_embedder
+            if (multimodal_embedder and multimodal_embedder.model_name == name)
+            else None
+        )
+        try:
+            dim = effective.dim if effective else None
+        except Exception:
+            dim = None
+        models.append(Model(id=name, type="multimodal_embedder", dimensions=dim))
     return ModelList(data=models)
 
 
@@ -100,10 +116,19 @@ def get_model(model_id: str, request: Request):
             else None
         )
         return Model(id=model_id, type="image_embedder", dimensions=dim)
+    if model_id in MULTIMODAL_EMBEDDER_REGISTRY:
+        multimodal_embedder = getattr(request.app.state, "multimodal_embedder", None)
+        dim = (
+            multimodal_embedder.dim
+            if (multimodal_embedder and multimodal_embedder.model_name == model_id)
+            else None
+        )
+        return Model(id=model_id, type="multimodal_embedder", dimensions=dim)
     registered = (
         sorted(EMBEDDER_REGISTRY)
         + sorted(list_reranker_names())
         + sorted(IMAGE_EMBEDDER_REGISTRY)
+        + sorted(MULTIMODAL_EMBEDDER_REGISTRY)
     )
     raise HTTPException(status_code=404, detail={"error": {
         "code": "model_not_found",
