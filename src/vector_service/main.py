@@ -1,4 +1,5 @@
 """FastAPI application factory."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -12,7 +13,9 @@ from vector_service import __version__
 from vector_service.api.backend import router as backend_router
 from vector_service.api.embeddings import router as embeddings_router
 from vector_service.api.health import router as health_router
+from vector_service.api.image_embeddings import router as image_embeddings_router
 from vector_service.api.management import router as management_router
+from vector_service.api.models import router as models_router
 from vector_service.api.playground import router as playground_router
 from vector_service.api.rerank import router as rerank_router
 from vector_service.core.errors import (
@@ -80,11 +83,38 @@ OPENAPI_TAGS = [
         ),
     },
     {
+        "name": "model",
+        "description": (
+            "Model registry endpoints shared between the embeddings and "
+            "rerank subsystems. `GET /v1/models` lists every registered "
+            "backend (embedders and rerankers) under a single shape — "
+            "discriminate with the `type` field. "
+            "`GET /v1/models/{id}` looks up a single backend by id."
+        ),
+    },
+    {
         "name": "embeddings",
         "description": (
             "OpenAI-compatible text embedding endpoints under `/v1`. "
-            "`POST /v1/embeddings` returns dense vectors; `GET /v1/models` "
-            "lists registered embedder backends."
+            "`POST /v1/embeddings` returns dense vectors for a registered "
+            "embedder model."
+        ),
+    },
+    {
+        "name": "image_embeddings",
+        "description": (
+            "Image vectorization under `/v1`. `POST /v1/image_embeddings` "
+            "returns dense vectors for a registered image embedder model "
+            "from base64-encoded image inputs."
+        ),
+    },
+    {
+        "name": "rerank",
+        "description": (
+            "Cross-encoder reranking. `POST /v1/rerank` takes a query "
+            "and a list of documents and returns documents reordered "
+            "by relevance. Registered reranker backends are listed via "
+            "`GET /v1/models` (filter by `type=reranker`)."
         ),
     },
     {
@@ -102,15 +132,6 @@ OPENAPI_TAGS = [
         "description": (
             "Backend introspection escape hatch (debug builds only). "
             "`POST /backend/raw/call` is hidden from the public schema."
-        ),
-    },
-    {
-        "name": "rerank",
-        "description": (
-            "Cross-encoder reranking. `POST /v1/rerank` takes a query "
-            "and a list of documents and returns documents reordered "
-            "by relevance. Use `GET /v1/rerank/models` to list available "
-            "reranker backends."
         ),
     },
 ]
@@ -152,13 +173,15 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DatabaseNotFound)
     async def _db_not_found(request: Request, exc: DatabaseNotFound):
-        return _err("database_not_found", str(exc), 404,
-                    {"name": getattr(exc, "name", None)})
+        return _err(
+            "database_not_found", str(exc), 404, {"name": getattr(exc, "name", None)}
+        )
 
     @app.exception_handler(DatabaseAlreadyExists)
     async def _db_exists(request: Request, exc: DatabaseAlreadyExists):
-        return _err("database_exists", str(exc), 409,
-                    {"name": getattr(exc, "name", None)})
+        return _err(
+            "database_exists", str(exc), 409, {"name": getattr(exc, "name", None)}
+        )
 
     @app.exception_handler(CollectionNotFound)
     async def _coll_not_found(request: Request, exc: CollectionNotFound):
@@ -170,8 +193,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DimensionMismatch)
     async def _dim_mismatch(request: Request, exc: DimensionMismatch):
-        return _err("dimension_mismatch", str(exc), 422,
-                    {"expected": exc.expected, "got": exc.got})
+        return _err(
+            "dimension_mismatch",
+            str(exc),
+            422,
+            {"expected": exc.expected, "got": exc.got},
+        )
 
     @app.exception_handler(BackendError)
     async def _backend_err(request: Request, exc: BackendError):
@@ -213,11 +240,19 @@ def create_app() -> FastAPI:
         # Routes raise HTTPException with detail={"error": {...}}; rewrap
         # into the canonical error envelope so clients see one shape.
         detail = exc.detail
-        if isinstance(detail, dict) and "error" in detail and isinstance(detail["error"], dict):
+        if (
+            isinstance(detail, dict)
+            and "error" in detail
+            and isinstance(detail["error"], dict)
+        ):
             inner = detail["error"]
             extras = {k: v for k, v in inner.items() if k not in ("code", "message")}
-            return _err(inner.get("code", "error"), inner.get("message", str(exc.detail)),
-                        exc.status_code, extras)
+            return _err(
+                inner.get("code", "error"),
+                inner.get("message", str(exc.detail)),
+                exc.status_code,
+                extras,
+            )
         return _err("error", str(detail), exc.status_code, exc=exc)
 
     @app.exception_handler(RequestValidationError)
@@ -236,9 +271,7 @@ def create_app() -> FastAPI:
                 loc = ".".join(str(p) for p in e.get("loc", []) if p != "body")
                 err_type = e.get("type", "invalid")
                 raw_msg = e.get("msg", "")
-                first_msg = (
-                    f"{loc}: {raw_msg}" if loc else f"{err_type}: {raw_msg}"
-                )
+                first_msg = f"{loc}: {raw_msg}" if loc else f"{err_type}: {raw_msg}"
         return _err(
             "invalid_request",
             first_msg or "validation error",
@@ -253,11 +286,13 @@ def create_app() -> FastAPI:
         return _err("internal", str(exc) or "internal error", 500, exc=exc)
 
     app.include_router(health_router)
+    app.include_router(models_router)
     app.include_router(embeddings_router)
+    app.include_router(rerank_router)
     app.include_router(management_router)
     app.include_router(backend_router)
     app.include_router(playground_router)
-    app.include_router(rerank_router)
+    app.include_router(image_embeddings_router)
 
     return app
 
@@ -267,6 +302,7 @@ app = create_app()
 
 def run() -> None:
     from vector_service.core.config import get_settings
+
     s = get_settings()
     uvicorn.run(
         "vector_service.main:app",
