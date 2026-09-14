@@ -27,6 +27,16 @@ def _dir_has_model(p: Path) -> bool:
     return (p / "config.json").exists() or any(p.glob("*.bin")) or any(p.glob("*.safetensors"))
 
 
+def _release_cuda_cache() -> None:
+    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
+    try:
+        import torch  # local import: torch is optional
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
     dim = 768
     model_name = "openclip-vit-l-14"
@@ -46,6 +56,12 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         self._model_dir = Path(s.model_dir)
         self._model = None
         self._preprocess = None
+
+    @staticmethod
+    def _release_cuda_cache() -> None:
+        # Module-level helper kept as a method too so callers can invoke
+        # ``self._release_cuda_cache()`` without touching globals.
+        _release_cuda_cache()
 
     @staticmethod
     def _resolve_device(requested: str) -> str:
@@ -68,6 +84,30 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         if self._model is not None:
             return
         self._load_internal()
+
+    def unload(self) -> None:
+        """Release the OpenCLIP model + preprocess transform.
+
+        Idempotent. We null out the model and preprocess references so
+        the next inference call triggers a fresh ``_load_internal``
+        via ``_ensure_loaded`` (mirrors the text-embedder contract).
+        """
+        model = self._model
+        self._model = None
+        self._preprocess = None
+        if model is not None:
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+            # Drop the module's __dict__ so wrapped tensors become
+            # unreachable and the CUDA caching allocator can reclaim
+            # them. We swallow any errors: unload must never raise.
+            try:
+                model.__dict__.clear()
+            except Exception:
+                pass
+        self._release_cuda_cache()
 
     def _load_internal(self) -> None:
         # Ensure the local model_dir exists so open_clip can use it as a

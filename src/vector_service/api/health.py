@@ -57,48 +57,57 @@ def _image_embedder_loaded(request: Request) -> bool:
 
 @router.get("/readyz")
 async def readyz(request: Request):
-    """Readiness: text embedder loaded AND image embedder loaded AND store reachable."""
+    """Readiness: process alive AND vector store reachable.
+
+    Models are loaded on demand (default ``auto_load=false``); a fresh
+    process is still ``ready`` even when every family is unloaded —
+    inference will return 503 ``*_unavailable`` until an operator
+    calls ``POST /v1/models/{id}/load``. The response body keeps
+    per-family load status for observability so a single probe
+    surfaces both the store health and the model roster state.
+    """
+    store = getattr(request.app.state, "store", None)
     embedder = getattr(request.app.state, "embedder", None)
     image_embedder = getattr(request.app.state, "image_embedder", None)
-    store = getattr(request.app.state, "store", None)
-    embedder_ok = _embedder_loaded(embedder)
-    image_ok = _image_embedder_loaded(request)
-    if store is None:
-        body = (
-            '{"status":"not_ready","store":"down","embedder":"'
-            + ("loaded" if embedder_ok else "not_loaded")
-            + '","image_embedder":"'
-            + ("loaded" if image_ok else "not_loaded")
-            + '","reranker":"'
-            + ("ready" if _reranker_loaded(request) else "not_loaded")
-            + '"}'
-        )
-        return Response(content=body, status_code=503, media_type="application/json")
-    # Probe the store with a cheap list call. Fail open if it errors so
-    # the service still serves embeddings during transient store outages.
-    store_ok = True
-    try:
-        store.list_databases()
-    except Exception:
-        store_ok = False
 
-    overall_ok = embedder_ok and image_ok and store_ok
-    if overall_ok:
-        status = "ready"
-    elif (embedder_ok and image_ok) and not store_ok:
-        status = "degraded"
-    else:
-        status = "not_ready"
-    store_state = "ok" if store_ok else "down"
-    embedder_state = "loaded" if embedder_ok else "not_loaded"
-    image_state = "loaded" if image_ok else "not_loaded"
+    # Probe the store with a cheap list call. Fail open if it errors
+    # so /readyz stays informative during transient outages.
+    store_ok = False
+    if store is not None:
+        try:
+            store.list_databases()
+            store_ok = True
+        except Exception:
+            store_ok = False
+
+    embedder_state = "loaded" if _embedder_loaded(embedder) else "not_loaded"
+    image_state = "loaded" if _image_embedder_loaded(request) else "not_loaded"
     reranker_state = "ready" if _reranker_loaded(request) else "not_loaded"
-    code = 200 if overall_ok else 503
+    mm_state = (
+        "loaded"
+        if getattr(request.app.state, "multimodal_embedder", None)
+        and getattr(
+            getattr(request.app.state, "multimodal_embedder", None), "_model", None
+        ) is not None
+        else "not_loaded"
+    )
+
+    if store is None:
+        status = "not_ready"
+        code = 503
+    elif store_ok:
+        status = "ready"
+        code = 200
+    else:
+        status = "degraded"
+        code = 503
+
     body = (
         '{"status":"' + status
-        + '","store":"' + store_state
+        + '","store":"' + ("ok" if store_ok else "down")
         + '","embedder":"' + embedder_state
         + '","image_embedder":"' + image_state
+        + '","multimodal_embedder":"' + mm_state
         + '","reranker":"' + reranker_state
         + '"}'
     )

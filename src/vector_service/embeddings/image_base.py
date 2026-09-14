@@ -41,6 +41,14 @@ class ImageEmbedder(ABC):
         probes can observe it. May raise ``ModelNotLoadedForImages``.
         """
 
+    def unload(self) -> None:
+        """Release the loaded model and any associated resources.
+
+        Mirrors ``Embedder.unload``: idempotent, default no-op.
+        Subclasses that hold native resources (GPU weights, native
+        handles) should override to release them.
+        """
+
     @abstractmethod
     def embed_images(self, images: list[ImageInput]) -> list[list[float]]:
         """Embed a batch of images. Return one vector per input, in order."""

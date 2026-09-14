@@ -52,8 +52,23 @@ class _FakeStore:
         pass
 
 
+def _enable_auto_load():
+    """Flip every family's auto_load to True so the lifespan mirrors
+    the legacy eager-load behaviour these regression tests were
+    written against."""
+    from vector_service.core.config import get_settings
+
+    s = get_settings()
+    s.embedding_auto_load = True
+    s.reranker.auto_load = True
+    s.image_embedding.auto_load = True
+    s.multimodal_embedding.auto_load = True
+    return s
+
+
 @pytest.fixture
 def patched_lifespan_deps(monkeypatch):
+    _enable_auto_load()
     img_embedder = _RecordingImageEmbedder()
     text_embedder = _FakeTextEmbedder()
     fake_store = _FakeStore()
@@ -107,6 +122,12 @@ def test_readyz_reports_image_embedder_loaded(patched_lifespan_deps):
 
 
 def test_readyz_reports_image_embedder_not_loaded_on_failure(monkeypatch):
+    """A failed image-embedder load is logged but does NOT 503 /readyz.
+
+    /readyz gates only on the vector store now; per-family load state
+    is surfaced via the response body.
+    """
+    _enable_auto_load()
     img = _RecordingImageEmbedder(raise_on_load=ModelNotLoadedForImages("disk full"))
     text_embedder = _FakeTextEmbedder()
     fake_store = _FakeStore()
@@ -129,9 +150,11 @@ def test_readyz_reports_image_embedder_not_loaded_on_failure(monkeypatch):
 
     with TestClient(app) as client:
         r = client.get("/readyz")
-        assert r.status_code == 503
+        assert r.status_code == 200
         body = r.json()
+        assert body["status"] == "ready"
         assert body["image_embedder"] == "not_loaded"
+        assert body["store"] == "ok"
 
 
 def test_lifespan_fails_open_on_unexpected_image_embedder_exception(monkeypatch):
@@ -157,6 +180,7 @@ def test_lifespan_fails_open_on_unexpected_image_embedder_exception(monkeypatch)
     img = _BoomEmbedder()
     text_embedder = _FakeTextEmbedder()
     fake_store = _FakeStore()
+    _enable_auto_load()
 
     monkeypatch.setattr(lifespan_mod, "build_embedder", lambda s: text_embedder)
     monkeypatch.setattr(lifespan_mod, "build_store", lambda s: fake_store)
@@ -177,8 +201,9 @@ def test_lifespan_fails_open_on_unexpected_image_embedder_exception(monkeypatch)
     # App must come up despite the unexpected exception.
     with TestClient(app) as client:
         r = client.get("/readyz")
-        assert r.status_code == 503
+        assert r.status_code == 200
         body = r.json()
+        assert body["status"] == "ready"
         assert body["image_embedder"] == "not_loaded"
         assert body["embedder"] == "loaded"  # text embedder still works
         assert body["store"] == "ok"

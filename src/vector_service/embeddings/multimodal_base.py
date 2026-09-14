@@ -41,6 +41,16 @@ class MultimodalEmbedder(ABC):
         fail-open path uniform across all sub-models).
         """
 
+    def unload(self) -> None:
+        """Release the loaded model and any associated resources.
+
+        Mirrors ``Embedder.unload``: idempotent, default no-op.
+        Multimodal models typically hold a single underlying
+        network that services both text and image towers — the
+        default implementation leaves those alone; subclasses with
+        native resources should override.
+        """
+
     @abstractmethod
     def embed_text(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts. Return one vector per input, in order."""

@@ -54,6 +54,20 @@ async def create_embeddings(body: EmbeddingRequest, request: Request):
     settings = request.app.state.settings
     embedder = request.app.state.embedder
 
+    # Strict no-load: when lifespan left ``app.state.embedder`` as
+    # ``None`` (default when ``VS_EMBEDDING_AUTO_LOAD`` is off), reject
+    # inference outright so operators see a deterministic 503 instead of
+    # an opaque AttributeError from a missing instance.
+    if embedder is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "code": "embedder_unavailable",
+            "message": (
+                f"text embedder is not loaded; "
+                f"call POST /v1/models/{body.model}/load first"
+            ),
+            "model": body.model,
+        }})
+
     # 校验 model
     try:
         get_embedder_class(body.model)

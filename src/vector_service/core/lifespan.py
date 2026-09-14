@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import time
 from typing import TYPE_CHECKING
 
 from vector_service.core.config import Settings, get_settings
@@ -14,6 +15,7 @@ from vector_service.core.errors import (
 )
 from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
+from vector_service.core.model_lifecycle import attach_default_slots
 from vector_service.embeddings.image_base import ImageEmbedder
 from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.embeddings.multimodal_base import MultimodalEmbedder
@@ -73,8 +75,10 @@ async def lifespan(app: "FastAPI"):
         vector_store_backend=settings.vector_store_backend,
     ).set(1)
 
-    embedder = build_embedder(settings)
-    store = build_store(settings)
+    app.state.settings = settings
+    app.state.startup_ts = time.time()
+    app.state.store = build_store(settings)
+    store = app.state.store
 
     # Eagerly open the vector-store connection so /readyz can report a
     # truthful state. If Milvus is unreachable at startup we still want
@@ -89,92 +93,117 @@ async def lifespan(app: "FastAPI"):
     except Exception as e:
         log.warning("store_connect_failed", backend=getattr(store, "backend_name", "?"), error=str(e))
 
-    # Eagerly load the embedder so the first user request isn't held up
-    # by model download + weight load + warmup. A failed load is logged
-    # and surfaced via /readyz (503), but doesn't kill the process —
-    # this lets operators inspect the state on a half-broken host.
-    try:
-        embedder.load()
-    except ModelNotLoaded as e:
-        log.error("model_load_failed", model=embedder.model_name, error=str(e))
-    else:
-        device = getattr(embedder, "_device", "unknown")
-        MODEL_LOADED.labels(kind="embedder").set(1)
-        log.info("model_loaded", model=embedder.model_name, device=device, dim=embedder.dim)
+    # Attach the per-family ``ModelSlot`` holders BEFORE any optional
+    # loads so the hot-reload routes always see the slots. With the
+    # default ``auto_load=false`` for every family the slots start
+    # empty and ``app.state.<family>`` stays ``None`` until an
+    # operator calls ``POST /v1/models/{id}/load``.
+    attach_default_slots(app, settings=settings)
+    app.state.embedder = None
+    app.state.reranker = None
+    app.state.image_embedder = None
+    app.state.multimodal_embedder = None
+    MODEL_LOADED.labels(kind="embedder").set(0)
+    MODEL_LOADED.labels(kind="reranker").set(0)
+    MODEL_LOADED.labels(kind="image_embedder").set(0)
+    MODEL_LOADED.labels(kind="multimodal_embedder").set(0)
 
-    app.state.settings = settings
-    app.state.embedder = embedder
-    app.state.store = store
+    # ---- text embedder (opt-in eager load) -----------------------
+    # ``embedding_auto_load`` defaults to ``False`` so a fresh process
+    # starts in a zero-state: no model constructed, no slot populated,
+    # /v1/embeddings returns 503. Operators trigger the load via the
+    # dashboard or ``POST /v1/models/{id}/load``. The fail-open
+    # contract from the original behaviour is preserved — a failed
+    # eager load is logged + surfaced via /readyz but does NOT kill
+    # the process.
+    if settings.embedding_auto_load:
+        try:
+            embedder = build_embedder(settings)
+            embedder.load()
+        except ModelNotLoaded as e:
+            log.error("model_load_failed", error=str(e))
+        except Exception as e:
+            log.error("model_load_unexpected", error=str(e), exception_type=type(e).__name__)
+        else:
+            app.state.embedder = embedder
+            app.state._slot_embedder.set_instance(embedder)
+            MODEL_LOADED.labels(kind="embedder").set(1)
+            device = getattr(embedder, "_device", "unknown")
+            log.info(
+                "model_loaded",
+                model=embedder.model_name, device=device, dim=embedder.dim,
+            )
 
-    # ---- reranker (loaded last; not on the /search hot path) ----
+    # ---- reranker (opt-in eager load) ---------------------------
     # Missing/invalid VS_RERANKER__BACKEND is treated as a startup
-    # error: re-raise so lifespan exits non-zero. /readyz is diagnostic
-    # only — embedder + store still gate the overall ready signal.
-    try:
-        reranker = build_reranker(settings)
-        reranker.load()
-        app.state.reranker = reranker
-        MODEL_LOADED.labels(kind="reranker").set(1)
-        log.info(
-            "reranker_loaded",
-            model=reranker.model_name,
-            backend=settings.reranker.backend,
-        )
-    except (RerankerNotLoaded, RerankerError, KeyError) as exc:
-        MODEL_LOADED.labels(kind="reranker").set(0)
-        log.error(
-            "reranker_load_failed",
-            backend=settings.reranker.backend,
-            error=str(exc),
-        )
-        raise
+    # error: re-raise so lifespan exits non-zero ONLY when auto_load
+    # is on (without auto_load the reranker simply isn't built).
+    if settings.reranker.auto_load:
+        try:
+            reranker = build_reranker(settings)
+            reranker.load()
+        except (RerankerNotLoaded, RerankerError, KeyError) as exc:
+            log.error(
+                "reranker_load_failed",
+                backend=settings.reranker.backend,
+                error=str(exc),
+            )
+            raise
+        else:
+            app.state.reranker = reranker
+            app.state._slot_reranker.set_instance(reranker)
+            MODEL_LOADED.labels(kind="reranker").set(1)
+            log.info(
+                "reranker_loaded",
+                model=reranker.model_name,
+                backend=settings.reranker.backend,
+            )
 
-    # ---- image embedder (parallel to text embedder) ----
-    # A failed image-embedder load is logged + surfaced via /readyz (503),
-    # but does NOT kill the process — same fail-open policy as the text
-    # embedder.
-    try:
-        image_embedder = build_image_embedder(settings)
-        image_embedder.load()
-        app.state.image_embedder = image_embedder
-        MODEL_LOADED.labels(kind="image_embedder").set(1)
-        log.info(
-            "image_embedder_loaded",
-            model=image_embedder.model_name,
-            device=getattr(image_embedder, "_device", "unknown"),
-            dim=image_embedder.dim,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-open: image embedder unavailable must not kill startup
-        MODEL_LOADED.labels(kind="image_embedder").set(0)
-        log.error(
-            "image_embedder_load_failed",
-            backend=settings.image_embedding.backend,
-            error=str(exc),
-            exception_type=type(exc).__name__,
-        )
+    # ---- image embedder (opt-in eager load, fail-open) ----------
+    if settings.image_embedding.auto_load:
+        try:
+            image_embedder = build_image_embedder(settings)
+            image_embedder.load()
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            log.error(
+                "image_embedder_load_failed",
+                backend=settings.image_embedding.backend,
+                error=str(exc),
+                exception_type=type(exc).__name__,
+            )
+        else:
+            app.state.image_embedder = image_embedder
+            app.state._slot_image.set_instance(image_embedder)
+            MODEL_LOADED.labels(kind="image_embedder").set(1)
+            log.info(
+                "image_embedder_loaded",
+                model=image_embedder.model_name,
+                device=getattr(image_embedder, "_device", "unknown"),
+                dim=image_embedder.dim,
+            )
 
-    # ---- multimodal embedder (cross-modal text + image) ----
-    # Same fail-open policy: a failed multimodal load is logged + surfaced
-    # via /readyz but does NOT kill the process.
-    try:
-        multimodal_embedder = build_multimodal_embedder(settings)
-        multimodal_embedder.load()
-        app.state.multimodal_embedder = multimodal_embedder
-        MODEL_LOADED.labels(kind="multimodal_embedder").set(1)
-        log.info(
-            "multimodal_embedder_loaded",
-            model=multimodal_embedder.model_name,
-            device=getattr(multimodal_embedder, "_device", "unknown"),
-            dim=multimodal_embedder.dim,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        MODEL_LOADED.labels(kind="multimodal_embedder").set(0)
-        log.error(
-            "multimodal_embedder_load_failed",
-            backend=settings.multimodal_embedding.backend,
-            error=str(exc),
-            exception_type=type(exc).__name__,
-        )
+    # ---- multimodal embedder (opt-in eager load, fail-open) -----
+    if settings.multimodal_embedding.auto_load:
+        try:
+            multimodal_embedder = build_multimodal_embedder(settings)
+            multimodal_embedder.load()
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            log.error(
+                "multimodal_embedder_load_failed",
+                backend=settings.multimodal_embedding.backend,
+                error=str(exc),
+                exception_type=type(exc).__name__,
+            )
+        else:
+            app.state.multimodal_embedder = multimodal_embedder
+            app.state._slot_multimodal.set_instance(multimodal_embedder)
+            MODEL_LOADED.labels(kind="multimodal_embedder").set(1)
+            log.info(
+                "multimodal_embedder_loaded",
+                model=multimodal_embedder.model_name,
+                device=getattr(multimodal_embedder, "_device", "unknown"),
+                dim=multimodal_embedder.dim,
+            )
 
     try:
         yield

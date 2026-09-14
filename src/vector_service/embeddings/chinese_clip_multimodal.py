@@ -89,6 +89,30 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
             return
         self._load_internal()
 
+    def unload(self) -> None:
+        """Release the Chinese-CLIP model + processor + tokenizer.
+
+        Idempotent. The text and image towers share weights inside a
+        single ``ChineseCLIPModel`` instance, so we only need to drop
+        one reference. After this returns, the next ``embed_text`` or
+        ``embed_images`` call will trigger a fresh ``_load_internal``
+        via ``_ensure_loaded``.
+        """
+        model = self._model
+        self._model = None
+        self._processor = None
+        self._tokenizer = None
+        if model is not None:
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+            try:
+                model.__dict__.clear()
+            except Exception:
+                pass
+        _release_cuda_cache()
+
     def _load_internal(self) -> None:
         self._ensure_model_dir()
 
@@ -198,3 +222,13 @@ def _check_cuda() -> str:
     except ImportError as e:
         raise ModelNotLoadedForImages(f"torch not available: {e}") from e
     raise ModelNotLoadedForImages("CUDA not available")
+
+
+def _release_cuda_cache() -> None:
+    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
+    try:
+        import torch  # local import: torch is optional
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass

@@ -17,8 +17,9 @@ from vector_service.api.image_embeddings import router as image_embeddings_route
 from vector_service.api.multimodal_embeddings import router as multimodal_embeddings_router
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
-from vector_service.api.playground import router as playground_router
+from vector_service.api.dashboard import router as dashboard_router
 from vector_service.api.rerank import router as rerank_router
+from vector_service.api.system import router as system_router
 from vector_service.core.errors import (
     BackendError,
     CollectionAlreadyExists,
@@ -300,9 +301,10 @@ def create_app() -> FastAPI:
     app.include_router(models_router)
     app.include_router(embeddings_router)
     app.include_router(rerank_router)
+    app.include_router(system_router)
     app.include_router(management_router)
     app.include_router(backend_router)
-    app.include_router(playground_router)
+    app.include_router(dashboard_router)
     app.include_router(image_embeddings_router)
     app.include_router(multimodal_embeddings_router)
 

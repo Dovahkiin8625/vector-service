@@ -38,6 +38,14 @@ class Reranker(ABC):
     def load(self) -> None:
         """Load weights / connect to backend. Idempotent."""
 
+    def unload(self) -> None:
+        """Release weights and any associated resources.
+
+        Mirrors ``Embedder.unload``: idempotent, default no-op.
+        Subclasses that load weights onto GPU should override to
+        drop references and call ``torch.cuda.empty_cache()``.
+        """
+
     @abstractmethod
     def rerank(
         self,

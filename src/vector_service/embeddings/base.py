@@ -28,6 +28,22 @@ class Embedder(ABC):
         probes can observe it. May raise `ModelNotLoaded`.
         """
 
+    def unload(self) -> None:
+        """Release the loaded model and any associated resources.
+
+        Idempotent: safe to call on a freshly constructed instance
+        that has never been ``load()``ed, and safe to call twice.
+        Called by the ``POST /v1/models/{id}/unload`` route via
+        ``ModelSlot.unload()``. The default implementation is a
+        no-op so subclasses that don't hold native resources
+        (test stubs, pure-Python embedders, …) don't need to
+        override. Subclasses that load weights onto GPU should
+        override to drop references and call
+        ``torch.cuda.empty_cache()``; the call must not require
+        CUDA at runtime — the service may be running on CPU-only
+        hosts.
+        """
+
     @abstractmethod
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of documents. Return one vector per input."""

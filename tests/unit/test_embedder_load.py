@@ -128,6 +128,24 @@ def test_bge_m3_load_propagates_model_not_loaded(monkeypatch, tmp_path):
 # ---- 3. lifespan wiring ---------------------------------------------------
 
 
+def _settings_with_auto_load():
+    """Build a Settings instance with every family's auto_load flipped on.
+
+    The lifespan tests below mirror the legacy eager-load behaviour; the
+    production default is now ``auto_load=False``, so we have to opt back
+    in via the Settings instance that ``get_settings()`` returns inside
+    lifespan.
+    """
+    from vector_service.core.config import get_settings
+
+    settings = get_settings()
+    settings.embedding_auto_load = True
+    settings.reranker.auto_load = True
+    settings.image_embedding.auto_load = True
+    settings.multimodal_embedding.auto_load = True
+    return settings
+
+
 class _RecordingEmbedder(Embedder):
     """Records whether `load()` ran and lets a test inject a failure.
 
@@ -183,6 +201,14 @@ def test_lifespan_calls_embedder_load(monkeypatch):
     avoid standing up Milvus or a real model."""
     from vector_service.core import lifespan as lifespan_mod
 
+    _settings_with_auto_load()
+
+    embedder = _RecordingEmbedder()
+    """The real `lifespan()` must invoke `embedder.load()` exactly once
+    during startup. We monkeypatch `build_store` + `build_embedder` to
+    avoid standing up Milvus or a real model."""
+    from vector_service.core import lifespan as lifespan_mod
+
     embedder = _RecordingEmbedder()
     fake_store = type("S", (), {
         "backend_name": "fake",
@@ -216,9 +242,12 @@ def test_lifespan_calls_embedder_load(monkeypatch):
 
 def test_lifespan_keeps_app_up_when_load_fails(monkeypatch):
     """If `embedder.load()` raises `ModelNotLoaded`, the process must
-    still come up; `MODEL_LOADED` stays 0; /readyz reports 503."""
+    still come up; `MODEL_LOADED` stays 0; /readyz still returns 200
+    (model load state is no longer a readyz gate)."""
     from vector_service.core import lifespan as lifespan_mod
     from vector_service.core.metrics import MODEL_LOADED
+
+    _settings_with_auto_load()
 
     try:
         MODEL_LOADED.remove("embedder")
@@ -254,10 +283,13 @@ def test_lifespan_keeps_app_up_when_load_fails(monkeypatch):
 
     with TestClient(app) as client:
         assert embedder.load_called == 1
-        # /readyz must reflect the failed load.
+        # /readyz must NOT 503 when only model load fails — the gate
+        # moved to "store reachable". Body still surfaces the failed
+        # load so operators see the model status.
         r = client.get("/readyz")
-        assert r.status_code == 503
+        assert r.status_code == 200
         body = r.json()
+        assert body["status"] == "ready"
         assert body["embedder"] == "not_loaded"
         assert body["store"] == "ok"
         # MODEL_LOADED gauge must NOT have been bumped.
@@ -268,6 +300,8 @@ def test_lifespan_keeps_app_up_when_load_fails(monkeypatch):
 def test_readyz_reports_loaded_after_successful_lifespan(monkeypatch):
     """After a successful load, /readyz reports embedder=loaded and 200."""
     from vector_service.core import lifespan as lifespan_mod
+
+    _settings_with_auto_load()
 
     embedder = _RecordingEmbedder()
     fake_store = type("S", (), {
@@ -309,6 +343,8 @@ def test_readyz_503_when_store_list_raises_even_after_load(monkeypatch):
     """A working embedder but a broken store must still yield 503, with
     embedder=loaded and store=down."""
     from vector_service.core import lifespan as lifespan_mod
+
+    _settings_with_auto_load()
 
     embedder = _RecordingEmbedder()
     image_embedder = type("IE", (), {

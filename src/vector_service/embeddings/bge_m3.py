@@ -54,6 +54,27 @@ class BGEM3Embedder(Embedder):
             return
         self._load_internal()
 
+    def unload(self) -> None:
+        """Release the loaded backend and free CUDA cache if applicable.
+
+        Idempotent: safe to call before ``load`` or twice in a row.
+        After this returns the next ``embed_documents`` / ``embed_query``
+        call will lazily trigger a fresh ``load`` via ``_ensure_loaded``.
+        """
+        impl = self._impl
+        self._impl = None
+        if impl is not None:
+            # Drop the inner model's reference first so GC + the CUDA
+            # caching allocator can reclaim VRAM promptly.
+            impl_attr = getattr(impl, "_model", None)
+            if impl_attr is not None:
+                try:
+                    impl_attr.to("cpu")
+                except Exception:
+                    pass
+            impl.__dict__.clear()
+        self._release_cuda_cache()
+
     def _load_internal(self) -> None:
         self._ensure_model_dir()
         try:
@@ -76,6 +97,16 @@ class BGEM3Embedder(Embedder):
         except Exception as e:  # 预热失败不致命
             import structlog
             structlog.get_logger(__name__).warning("bge_m3_warmup_failed", error=str(e))
+
+    @staticmethod
+    def _release_cuda_cache() -> None:
+        """Best-effort CUDA cache flush; safe on CPU-only hosts."""
+        try:
+            import torch  # local import: torch is an optional dep
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def _ensure_model_dir(self) -> None:
         s = self._settings

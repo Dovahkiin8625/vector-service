@@ -539,6 +539,15 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
 
     op_label = "upsert"
     if body.texts is not None:
+        if embedder is None:
+            raise HTTPException(503, detail={"error": {
+                "code": "embedder_unavailable",
+                "message": (
+                    "text embedder is not loaded; "
+                    "call POST /v1/models/{id}/load first"
+                ),
+                "text_count": len(body.texts),
+            }})
         loop = asyncio.get_running_loop()
         try:
             vectors = await loop.run_in_executor(None, embedder.embed_documents, body.texts)
@@ -665,6 +674,14 @@ async def search(db: str, name: str, body: SearchRequest, request: Request):
 
     image_query = body.query_image is not None
     if body.query_text is not None:
+        if embedder is None:
+            raise HTTPException(503, detail={"error": {
+                "code": "embedder_unavailable",
+                "message": (
+                    "text embedder is not loaded; "
+                    "call POST /v1/models/{id}/load first"
+                ),
+            }})
         loop = asyncio.get_running_loop()
         try:
             qvec = await loop.run_in_executor(None, embedder.embed_query, body.query_text)

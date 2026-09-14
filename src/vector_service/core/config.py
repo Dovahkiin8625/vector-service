@@ -22,6 +22,13 @@ class RerankerSettings(BaseSettings):
         ..., description="Reranker backend name; must exist in RERANKER_REGISTRY."
     )
 
+    # Eager-load on startup. When False (default) the lifespan skips
+    # constructing AND loading the reranker — ``app.state.reranker``
+    # stays ``None`` until ``POST /v1/models/{id}/load`` is called.
+    # Operators who want the legacy behaviour can set
+    # ``VS_RERANKER__AUTO_LOAD=true``.
+    auto_load: bool = False
+
     # Model identity
     model_name: str = "BAAI/bge-reranker-v2-m3"
     model_dir: str = "./models/bge-reranker-v2-m3"
@@ -65,6 +72,10 @@ class ImageEmbeddingSettings(BaseSettings):
     backend: str = "openclip-vit-l-14"
     model_dir: str = "./models/openclip-vit-l-14"
     auto_download: bool = True
+    # Eager-load on startup. Default False: the lifespan does not
+    # construct or load the image embedder — operators trigger loading
+    # explicitly via ``POST /v1/models/{id}/load``.
+    auto_load: bool = False
     # OpenCLIP weights are fetched by open_clip itself (not via
     # huggingface_hub). The download_source / hf_repo fields are kept for
     # future embedders that DO use HF directly; default values are
@@ -101,6 +112,10 @@ class MultimodalEmbeddingSettings(BaseSettings):
     backend: str = "chinese-clip-vit-base-patch16"
     model_dir: str = "./models/chinese-clip-vit-base-patch16"
     auto_download: bool = True
+    # Eager-load on startup. Default False: the lifespan does not
+    # construct or load the multimodal embedder until operators call
+    # ``POST /v1/models/{id}/load``.
+    auto_load: bool = False
     hf_repo: str = "OFA-Sys/chinese-clip-vit-base-patch16"
     device: Literal["auto", "cpu", "cuda"] = "auto"
     batch_size: int = Field(16, ge=1, le=512)
@@ -134,6 +149,13 @@ class Settings(BaseSettings):
     embedding_backend: str = "bge-m3"
     embedding_model_dir: Path = Path("./models/bge-m3")
     embedding_auto_download: bool = True
+    # Eager-load on startup. Default False: the lifespan does not
+    # construct or load the text embedder until operators call
+    # ``POST /v1/models/{id}/load`` from the dashboard or an external
+    # orchestrator. Set ``VS_EMBEDDING_AUTO_LOAD=true`` to opt back into
+    # the eager-load behaviour (required for ``/readyz`` to report
+    # ``embedder: loaded`` at boot).
+    embedding_auto_load: bool = False
     embedding_device: str = "auto"  # auto | cpu | cuda
     embedding_batch_size: int = Field(32, ge=1, le=512)
     embedding_max_length: int = Field(512, ge=1, le=8192)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
-from vector_service.core.config import Settings, get_settings
+from vector_service.core.config import RerankerSettings, Settings, get_settings
 from vector_service.core.errors import RerankerNotLoaded
 from vector_service.rerankers.base import Reranker, ScoredHit
 
@@ -56,13 +56,41 @@ def _resolve_device(device: str) -> str:
         return "cpu"
 
 
+def _release_cuda_cache() -> None:
+    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
+    try:
+        import torch  # local import: torch is optional
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 class CrossEncoderReranker(Reranker):
     """sentence-transformers CrossEncoder reranker."""
 
     model_name = "bge-reranker-v2-m3"
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        s = (settings or get_settings()).reranker
+    def __init__(self, settings: Settings | RerankerSettings | None = None) -> None:
+        # Two call sites feed us different shapes:
+        #   1. Lifespan eager-load passes the full ``Settings`` (lifespan.py
+        #      builds the reranker with the root config so it can also pass
+        #      it to embedders/multimodal embedders).
+        #   2. The hot-load route ``POST /v1/models/{id}/load`` passes the
+        #      ``RerankerSettings`` block directly (the family table in
+        #      ``api/models.py`` resolves nested blocks).
+        # Unwrap the full Settings when needed so both paths work without
+        # requiring the caller to know which form to send. We duck-type
+        # on ``.reranker`` rather than ``isinstance`` so test stubs that
+        # mimic ``RerankerSettings`` are accepted too.
+        if settings is None:
+            s = get_settings().reranker
+        elif hasattr(settings, "reranker") and not hasattr(settings, "device"):
+            # Likely the full Settings wrapper (has nested .reranker).
+            s = settings.reranker
+        else:
+            # Already the reranker block.
+            s = settings
         self._device: str = _resolve_device(s.device)
         self._batch_size: int = s.batch_size
         self._max_length: int = s.max_length
@@ -101,6 +129,31 @@ class CrossEncoderReranker(Reranker):
                 raise RerankerNotLoaded(
                     f"warmup failed for {self.model_name}: {exc}"
                 ) from exc
+
+    def unload(self) -> None:
+        """Release the CrossEncoder and free CUDA cache if applicable.
+
+        Idempotent. The underlying ``CrossEncoder`` exposes a
+        ``model`` attribute (the underlying transformer); we move it to
+        CPU so the CUDA caching allocator can reclaim VRAM, then drop
+        the reference. Subsequent ``rerank`` calls will lazily reload
+        via ``_ensure_loaded``.
+        """
+        with self._lock:
+            impl = self._impl
+            self._impl = None
+        if impl is not None:
+            try:
+                inner = getattr(impl, "model", None)
+                if inner is not None:
+                    inner.to("cpu")
+            except Exception:
+                pass
+            try:
+                impl.__dict__.clear()
+            except Exception:
+                pass
+        _release_cuda_cache()
 
     def _ensure_model_dir(self) -> None:
         """Download weights if needed; otherwise raise ``RerankerNotLoaded``."""

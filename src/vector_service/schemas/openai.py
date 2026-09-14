@@ -190,6 +190,18 @@ class Model(BaseModel):
             "once the corresponding embedder is initialized at startup."
         ),
     )
+    loaded: bool = Field(
+        default=False,
+        description=(
+            "`true` when an instance of this model is currently held on "
+            "the running process (``app.state.<family>``) and ready to "
+            "serve inference. Always populated for every model type — "
+            "for rerankers, where ``dimensions`` is permanently `null`, "
+            "this is the only signal that the backend has the model "
+            "loaded. The dashboard's 已加载 / 卸载 buttons are keyed off "
+            "this field."
+        ),
+    )
 
 
 class ModelList(BaseModel):
@@ -207,6 +219,7 @@ class ModelList(BaseModel):
                         "owned_by": "vector-service",
                         "created": 0,
                         "dimensions": 1024,
+                        "loaded": True,
                     },
                     {
                         "id": "bge-reranker-v2-m3",
@@ -215,6 +228,7 @@ class ModelList(BaseModel):
                         "owned_by": "vector-service",
                         "created": 0,
                         "dimensions": None,
+                        "loaded": False,
                     },
                 ],
             }
@@ -223,3 +237,60 @@ class ModelList(BaseModel):
 
     object: Literal["list"] = "list"
     data: list[Model]
+
+
+# ---- Hot load / unload --------------------------------------------------
+#
+# Both endpoints share the same shape so clients can dispatch on
+# ``status`` alone. ``dimensions`` mirrors the field on :class:`Model`:
+# ``None`` for rerankers, populated once the corresponding embedder is
+# actually loaded.
+
+
+class ModelLoadResponse(BaseModel):
+    """Response of `POST /v1/models/{model_id}/load`."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "bge-m3",
+                "type": "embedder",
+                "status": "loaded",
+                "dimensions": 1024,
+            }
+        }
+    )
+
+    id: str = Field(description="Model id that was loaded.")
+    type: Literal["embedder", "reranker", "image_embedder", "multimodal_embedder"] = Field(
+        description="Model family the loaded instance belongs to."
+    )
+    status: Literal["loaded"] = "loaded"
+    dimensions: int | None = Field(
+        default=None,
+        description=(
+            "Embedding dimensionality once the model is initialised; "
+            "`null` for rerankers. Idempotent re-loads of the same id "
+            "return the existing dimensions."
+        ),
+    )
+
+
+class ModelUnloadResponse(BaseModel):
+    """Response of `POST /v1/models/{model_id}/unload`."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "bge-m3",
+                "type": "embedder",
+                "status": "unloaded",
+            }
+        }
+    )
+
+    id: str = Field(description="Model id that was unloaded.")
+    type: Literal["embedder", "reranker", "image_embedder", "multimodal_embedder"] = Field(
+        description="Model family the unloaded instance belonged to."
+    )
+    status: Literal["unloaded"] = "unloaded"
