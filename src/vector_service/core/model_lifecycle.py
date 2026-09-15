@@ -219,8 +219,6 @@ def attach_default_slots(app, *, settings) -> None:
     only meaningful inside one event loop. Keeping them on ``app.state``
     matches the convention used by ``app.state.embedder`` etc.
     """
-    from vector_service.core.model_lifecycle import ModelSlot
-
     app.state._slot_embedder = ModelSlot("embedder")
     app.state._slot_image = ModelSlot("image_embedder")
     app.state._slot_multimodal = ModelSlot("multimodal_embedder")
