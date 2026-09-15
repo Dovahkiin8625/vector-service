@@ -25,7 +25,11 @@ from vector_service.core.errors import (
 )
 from vector_service.core.logging import get_logger
 from vector_service.embeddings.image_base import ImageInput
-from vector_service.embeddings.image_decoding import decode_image
+from vector_service.embeddings.image_decoding import (
+    decode_batch_or_422,
+    decode_image,
+    fail_envelope_422,
+)
 from vector_service.embeddings.multimodal_registry import (
     get_multimodal_embedder_class,
 )
@@ -45,33 +49,13 @@ def _decode_images(
     payloads, *, max_bytes: int, allowed_mime: set[str]
 ) -> list[ImageInput]:
     """Decode every image payload; raise 422 with failed_indices on any failure."""
-    decoded = []
-    failed = []
-    for i, p in enumerate(payloads):
-        try:
-            decoded.append(decode_image(p.data, p.mime, max_bytes=max_bytes, allowed_mime=allowed_mime))
-        except UnsupportedMime as e:
-            failed.append((i, "unsupported_mime", str(e), {"got": e.got, "allowed": e.allowed}))
-        except ImageTooLarge as e:
-            failed.append((i, "image_too_large", str(e), {"got": e.got, "max": e.max}))
-        except ImageDecodeError as e:
-            failed.append((i, "image_decode_failed", str(e), {}))
-    if failed:
-        code = failed[0][1]
-        if not all(f[1] == code for f in failed):
-            code = "image_decode_failed"  # mixed failures collapse
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {
-                "code": code,
-                "message": failed[0][2],
-                "failed_indices": [f[0] for f in failed],
-                "failures": [
-                    {"index": f[0], "code": f[1], "message": f[2], **f[3]}
-                    for f in failed
-                ],
-            }},
-        )
+    decoded, failures = decode_batch_or_422(
+        payloads,
+        extract=lambda p: (p.data, p.mime),
+        max_bytes=max_bytes, allowed_mime=allowed_mime,
+    )
+    if failures:
+        raise HTTPException(status_code=422, detail=fail_envelope_422(failures))
     return decoded
 
 
@@ -184,20 +168,33 @@ async def create_multimodal_embeddings(
     loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
+    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
 
     try:
-        if text_payloads:
-            text_vecs = await loop.run_in_executor(
-                None, embedder.embed_text, text_payloads
+        try:
+            if text_payloads:
+                text_vecs = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, embedder.embed_text, text_payloads
+                    ),
+                    timeout=timeout_s,
+                )
+                for idx, vec in zip(text_indices, text_vecs):
+                    out_vectors[idx] = vec
+            if decoded_images:
+                image_vecs = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, embedder.embed_images, decoded_images
+                    ),
+                    timeout=timeout_s,
+                )
+                for idx, vec in zip(image_indices, image_vecs):
+                    out_vectors[idx] = vec
+        except asyncio.TimeoutError:
+            status = "timeout"
+            raise MultimodalEmbedderError(
+                f"multimodal embedder {body.model!r} did not finish within {timeout_s}s"
             )
-            for idx, vec in zip(text_indices, text_vecs):
-                out_vectors[idx] = vec
-        if decoded_images:
-            image_vecs = await loop.run_in_executor(
-                None, embedder.embed_images, decoded_images
-            )
-            for idx, vec in zip(image_indices, image_vecs):
-                out_vectors[idx] = vec
     except (MultimodalEmbedderError, ModelNotLoadedForImages) as e:
         status = "error"
         raise HTTPException(

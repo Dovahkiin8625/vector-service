@@ -19,7 +19,11 @@ from vector_service.core.metrics import (
     IMAGE_EMBEDDING_INPUTS_TOTAL,
     IMAGE_EMBEDDING_REQUESTS_TOTAL,
 )
-from vector_service.embeddings.image_decoding import decode_image
+from vector_service.embeddings.image_decoding import (
+    decode_batch_or_422,
+    decode_image,
+    fail_envelope_422,
+)
 from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.image_embeddings import (
@@ -35,37 +39,13 @@ log = get_logger(__name__)
 
 def _decode_all(items, *, max_bytes, allowed_mime):
     """Decode every input; raise a 422 with failed_indices on any failure."""
-    decoded = []
-    failed = []
-    for i, item in enumerate(items):
-        try:
-            decoded.append(decode_image(
-                item.data, item.mime,
-                max_bytes=max_bytes, allowed_mime=allowed_mime,
-            ))
-        except UnsupportedMime as e:
-            failed.append((i, "unsupported_mime", str(e), {"got": e.got, "allowed": e.allowed}))
-        except ImageTooLarge as e:
-            failed.append((i, "image_too_large", str(e), {"got": e.got, "max": e.max}))
-        except ImageDecodeError as e:
-            failed.append((i, "image_decode_failed", str(e), {}))
-    if failed:
-        # All errors in one batch share the same code? Pick the first and aggregate.
-        code = failed[0][1]
-        if not all(f[1] == code for f in failed):
-            code = "image_decode_failed"  # mixed failures collapse to generic
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {
-                "code": code,
-                "message": failed[0][2],
-                "failed_indices": [f[0] for f in failed],
-                "failures": [
-                    {"index": f[0], "code": f[1], "message": f[2], **f[3]}
-                    for f in failed
-                ],
-            }},
-        )
+    decoded, failures = decode_batch_or_422(
+        items,
+        extract=lambda item: (item.data, item.mime),
+        max_bytes=max_bytes, allowed_mime=allowed_mime,
+    )
+    if failures:
+        raise HTTPException(status_code=422, detail=fail_envelope_422(failures))
     return decoded
 
 
@@ -136,8 +116,18 @@ async def create_image_embeddings(body: ImageEmbeddingRequest, request: Request)
     loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
+    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
     try:
-        vectors = await loop.run_in_executor(None, embedder.embed_images, decoded)
+        try:
+            vectors = await asyncio.wait_for(
+                loop.run_in_executor(None, embedder.embed_images, decoded),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            status = "timeout"
+            raise ImageEmbedderError(
+                f"image embedder {body.model!r} did not finish within {timeout_s}s"
+            )
     except (ImageEmbedderError, ModelNotLoadedForImages) as e:
         status = "error"
         raise HTTPException(status_code=503, detail={"error": {

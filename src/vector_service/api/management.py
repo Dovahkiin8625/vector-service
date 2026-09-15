@@ -49,7 +49,11 @@ from vector_service.core.metrics import (
     STORE_OP_DURATION_SECONDS,
     STORE_VECTORS_TOTAL,
 )
-from vector_service.embeddings.image_decoding import decode_image
+from vector_service.embeddings.image_decoding import (
+    decode_batch_or_422,
+    decode_image,
+    fail_envelope_422,
+)
 from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.management import (
@@ -255,37 +259,15 @@ def _decode_images_batch(request: Request, b64s: list[str], mimes: list[str]):
     """Decode a list of images; on any failure raise 422 with the same
     envelope shape used by ``POST /v1/image_embeddings``.
     """
-    decoded = []
-    failed: list[tuple[int, str, str, dict]] = []
-    for i, (b64, mime) in enumerate(zip(b64s, mimes)):
-        try:
-            decoded.append(decode_image(
-                b64, mime,
-                max_bytes=request.app.state.settings.image_embedding.max_image_bytes,
-                allowed_mime=set(request.app.state.settings.image_embedding.allowed_mime),
-            ))
-        except UnsupportedMime as e:
-            failed.append((i, "unsupported_mime", str(e), {"got": e.got, "allowed": e.allowed}))
-        except ImageTooLarge as e:
-            failed.append((i, "image_too_large", str(e), {"got": e.got, "max": e.max}))
-        except ImageDecodeError as e:
-            failed.append((i, "image_decode_failed", str(e), {}))
-    if failed:
-        code = failed[0][1]
-        if not all(f[1] == code for f in failed):
-            code = "image_decode_failed"  # mixed failures collapse to generic
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {
-                "code": code,
-                "message": failed[0][2],
-                "failed_indices": [f[0] for f in failed],
-                "failures": [
-                    {"index": f[0], "code": f[1], "message": f[2], **f[3]}
-                    for f in failed
-                ],
-            }},
-        )
+    settings = request.app.state.settings.image_embedding
+    decoded, failures = decode_batch_or_422(
+        list(zip(b64s, mimes)),
+        extract=lambda pair: (pair[0], pair[1]),
+        max_bytes=settings.max_image_bytes,
+        allowed_mime=set(settings.allowed_mime),
+    )
+    if failures:
+        raise HTTPException(status_code=422, detail=fail_envelope_422(failures))
     return decoded
 
 
@@ -536,6 +518,7 @@ async def get_collection(db: str, name: str, request: Request):
 async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request: Request):
     store = request.app.state.store
     embedder = request.app.state.embedder
+    settings = getattr(request.app.state, "settings", None)
 
     op_label = "upsert"
     if body.texts is not None:
@@ -549,8 +532,17 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
                 "text_count": len(body.texts),
             }})
         loop = asyncio.get_running_loop()
+        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
         try:
-            vectors = await loop.run_in_executor(None, embedder.embed_documents, body.texts)
+            try:
+                vectors = await asyncio.wait_for(
+                    loop.run_in_executor(None, embedder.embed_documents, body.texts),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise EmbedderError(
+                    f"embedder did not finish within {timeout_s}s"
+                )
         except (EmbedderError, ModelNotLoaded) as e:
             raise HTTPException(503, detail={"error": {
                 "code": "embedder_unavailable",
@@ -568,10 +560,19 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
         image_embedder = _resolve_image_embedder_or_404(request, body.model)
         decoded = _decode_images_batch(request, body.images, body.image_mimes)
         loop = asyncio.get_running_loop()
+        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
         try:
-            vectors = await loop.run_in_executor(
-                None, image_embedder.embed_images, decoded,
-            )
+            try:
+                vectors = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, image_embedder.embed_images, decoded,
+                    ),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise ImageEmbedderError(
+                    f"image embedder did not finish within {timeout_s}s"
+                )
         except (ImageEmbedderError, ModelNotLoadedForImages) as e:
             raise HTTPException(503, detail={"error": {
                 "code": "image_embedder_unavailable",
@@ -671,6 +672,7 @@ async def get_vectors(db: str, name: str, body: GetVectorsRequest, request: Requ
 async def search(db: str, name: str, body: SearchRequest, request: Request):
     store = request.app.state.store
     embedder = request.app.state.embedder
+    settings = getattr(request.app.state, "settings", None)
 
     image_query = body.query_image is not None
     if body.query_text is not None:
@@ -683,8 +685,17 @@ async def search(db: str, name: str, body: SearchRequest, request: Request):
                 ),
             }})
         loop = asyncio.get_running_loop()
+        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
         try:
-            qvec = await loop.run_in_executor(None, embedder.embed_query, body.query_text)
+            try:
+                qvec = await asyncio.wait_for(
+                    loop.run_in_executor(None, embedder.embed_query, body.query_text),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise EmbedderError(
+                    f"embedder did not finish within {timeout_s}s"
+                )
         except (EmbedderError, ModelNotLoaded) as e:
             raise HTTPException(503, detail={"error": {
                 "code": "embedder_unavailable",
@@ -702,10 +713,19 @@ async def search(db: str, name: str, body: SearchRequest, request: Request):
             request, body.query_image, body.query_image_mime, index=0,
         )
         loop = asyncio.get_running_loop()
+        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
         try:
-            qvec = await loop.run_in_executor(
-                None, image_embedder.embed_query_image, qimg,
-            )
+            try:
+                qvec = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, image_embedder.embed_query_image, qimg,
+                    ),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                raise ImageEmbedderError(
+                    f"image embedder did not finish within {timeout_s}s"
+                )
         except (ImageEmbedderError, ModelNotLoadedForImages) as e:
             raise HTTPException(503, detail={"error": {
                 "code": "image_embedder_unavailable",
