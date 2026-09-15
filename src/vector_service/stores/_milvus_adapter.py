@@ -18,10 +18,19 @@ Two pymilvus subsystems are in play:
 The adapter enforces its own locking for ``using_database`` because
 pymilvus alias / client state is process-global; concurrent FastAPI
 worker threads must not stomp on each other.
+
+Schema-cache invariants:
+- ``has_collection`` and ``describe_collection`` are read for every
+  upsert/get/delete/search — Milvus schema is immutable after
+  ``create_collection``, so the cache TTL is set well above the
+  expected re-deploy cadence (5 minutes). create_collection /
+  drop_collection / drop_database actively invalidate the affected
+  entries on success or failure.
 """
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 from pymilvus import (
@@ -41,6 +50,14 @@ from vector_service.core.errors import (
     DimensionMismatch,
     StoreError,
 )
+
+# TTL for ``has_collection`` / ``describe_collection`` caches. Milvus
+# schema is immutable after ``create_collection`` completes, so the
+# only writers to a cached key are the create/drop hooks inside this
+# adapter; we still keep a TTL as a defence-in-depth measure (e.g.
+# if an operator runs ``ALTER TABLE`` directly against the backend
+# outside this service).
+_SCHEMA_CACHE_TTL_S = 300.0
 
 # pymilvus error codes (stable across 2.4.x; see pymilvus/exception.py)
 _ERR_DB_NOT_FOUND = 800
@@ -96,6 +113,13 @@ class MilvusAdapter:
         self._client: MilvusClient | None = None
         self._lock = threading.Lock()
         self._orm_connected = False
+        # Schema cache: ``(database, collection)`` → ``(expires_at, value)``.
+        # Reads happen on every upsert/get/delete/search; writes happen
+        # only inside ``create_collection`` / ``drop_collection`` /
+        # ``drop_database`` (invalidation). Guarded by ``self._lock`` so
+        # concurrent FastAPI workers cannot observe a half-updated entry.
+        self._schema_cache: dict[tuple[str, str], tuple[float, Any]] = {}
+        self._has_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
     # ------------------------------------------------------------------
     # connection lifecycle
@@ -269,12 +293,47 @@ class MilvusAdapter:
             ) from e
 
     def has_collection(self, database: str, name: str) -> bool:
+        """``has_collection`` with a TTL cache.
+
+        Milvus collection metadata does not change between
+        ``create_collection`` and ``drop_collection``; reading it on
+        every upsert/get/delete/search call was responsible for the
+        N+1 RPC pattern that dominated the request path. Caching
+        here drops those RPCs to zero on the hot path. Cache is
+        invalidated by :meth:`_invalidate_collection`.
+        """
+        key = (database, name)
+        now = time.monotonic()
+        with self._lock:
+            cached = self._has_cache.get(key)
+            if cached is not None and cached[0] > now:
+                return cached[1]
         self._ensure_connected()
         self._using_db(database)
         try:
-            return bool(self._client.has_collection(name))
+            present = bool(self._client.has_collection(name))
         except Exception:
-            return False
+            present = False
+        with self._lock:
+            self._has_cache[key] = (now + _SCHEMA_CACHE_TTL_S, present)
+        return present
+
+    def _invalidate_collection(self, database: str, name: str) -> None:
+        """Drop cached metadata for ``(database, name)``."""
+        key = (database, name)
+        with self._lock:
+            self._has_cache.pop(key, None)
+            self._schema_cache.pop(key, None)
+
+    def _invalidate_database(self, database: str) -> None:
+        """Drop cached metadata for every collection in ``database``."""
+        with self._lock:
+            for key in list(self._has_cache):
+                if key[0] == database:
+                    self._has_cache.pop(key, None)
+            for key in list(self._schema_cache):
+                if key[0] == database:
+                    self._schema_cache.pop(key, None)
 
     def create_collection(
         self,
@@ -353,9 +412,17 @@ class MilvusAdapter:
                 collection_name=name, schema=schema, index_params=ip,
             )
         except Exception as e:
+            # Drop any cache entry the prior ``has_collection`` check
+            # may have populated: even on failure we may have
+            # implicitly created metadata that subsequent reads would
+            # observe inconsistently.
+            self._invalidate_collection(database, name)
             raise BackendError(
                 f"create_collection failed for {database!r}/{name!r}: {e}"
             ) from e
+        # Successful create: cache will be re-populated lazily by the
+        # next has_collection / describe_collection read.
+        self._invalidate_collection(database, name)
 
     def drop_collection(self, database: str, name: str) -> None:
         self._ensure_connected()
@@ -367,9 +434,11 @@ class MilvusAdapter:
         try:
             self._client.drop_collection(name)
         except Exception as e:
+            self._invalidate_collection(database, name)
             raise BackendError(
                 f"drop_collection failed for {database!r}/{name!r}: {e}"
             ) from e
+        self._invalidate_collection(database, name)
 
     def describe_collection(
         self, database: str, name: str,
@@ -386,6 +455,12 @@ class MilvusAdapter:
             "indexes": [{"field_name", "metric_type", "index_type", "params"}],
         }``
         """
+        key = (database, name)
+        now = time.monotonic()
+        with self._lock:
+            cached = self._schema_cache.get(key)
+            if cached is not None and cached[0] > now:
+                return cached[1]
         self._ensure_connected()
         self._using_db(database)
         if not self.has_collection(database, name):
@@ -454,7 +529,7 @@ class MilvusAdapter:
         except Exception:
             pass
 
-        return {
+        result = {
             "primary_field": primary_field,
             "vector_field": vector_field_name,
             "dim": int(vector_dim or 0),
@@ -462,6 +537,11 @@ class MilvusAdapter:
             "count": count,
             "fields": fields_out,
         }
+        with self._lock:
+            self._schema_cache[key] = (
+                time.monotonic() + _SCHEMA_CACHE_TTL_S, result,
+            )
+        return result
 
     def upsert(
         self,
@@ -541,12 +621,14 @@ class MilvusAdapter:
         try:
             self._ensure_loaded(collection)
             res = self._client.delete(collection, ids=list(ids))
-            # Force visibility for callers that immediately read back
-            # (Milvus writes are eventually consistent).
-            try:
-                self._client.refresh_load(collection)
-            except Exception:
-                pass
+            # NOTE: previously called ``refresh_load`` here to make the
+            # delete visible to immediate read-back, but on large
+            # collections ``refresh_load`` is a segment-wide reload
+            # that can stall for seconds and dominates p99 latency.
+            # Milvus writes are eventually consistent; callers that
+            # need immediate read-after-delete should pass
+            # ``force_refresh=true`` via the higher-level store API
+            # (not yet exposed) or rely on Milvus's own load state.
         except (CollectionNotFound, StoreError):
             raise
         except Exception as e:

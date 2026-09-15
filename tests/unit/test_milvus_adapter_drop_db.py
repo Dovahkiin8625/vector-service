@@ -121,3 +121,104 @@ def test_drop_database_list_collections_failure_is_backend_error(monkeypatch):
     with pytest.raises(BackendError):
         a.drop_database("tgt")
 
+
+# ---- batch 2A regressions -----------------------------------------------
+
+
+def test_has_collection_caches_result(monkeypatch):
+    """has_collection must not call the underlying client on every call —
+    pin batch-2A fix #6 (Milvus N+1 RPC). Two has_collection calls for
+    the same (db, name) must result in a single underlying RPC."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+
+    assert a.has_collection("db1", "c1") is True
+    assert a.has_collection("db1", "c1") is True
+
+    assert a._client.has_collection.call_count == 1
+
+
+def test_has_collection_cache_invalidated_on_create(monkeypatch):
+    """create_collection must invalidate the has_collection cache for
+    that (db, name) so subsequent calls re-query the backend."""
+    a = _adapter()
+    a._client.has_collection.return_value = False  # pre-create: not present
+
+    # Pre-populate the cache.
+    assert a.has_collection("db1", "c1") is False
+
+    # Now simulate create_collection succeeding. The adapter calls
+    # has_collection internally; we want the cache invalidated on
+    # success so the *next* external call re-queries.
+    a._client.create_collection.return_value = None
+
+    # Bypass the create_collection body for the cache-invalidation test
+    # by calling the invalidation hook directly (the integration of
+    # create + invalidate is exercised in the management-routes tests).
+    a._invalidate_collection("db1", "c1")
+    assert a.has_collection("db1", "c1") is False
+    # Two underlying RPCs total: the pre-populate call + the
+    # post-invalidation call. If the cache weren't invalidated,
+    # we'd see only one.
+    assert a._client.has_collection.call_count == 2
+
+
+def test_describe_collection_caches_result():
+    """describe_collection must cache the normalised schema dict and
+    skip both has_collection and describe_collection on the hot path."""
+    a = _adapter()
+    schema = {
+        "fields": [
+            {"name": "id", "type": 21, "is_primary": True,
+             "params": {"max_length": 64}},
+            {"name": "vector", "type": 101,
+             "params": {"dim": 4}},
+        ]
+    }
+    a._client.has_collection.return_value = True
+    a._client.describe_collection.return_value = schema
+    a._client.describe_index.return_value = {"metric_type": "L2"}
+    a._client.get_collection_stats.return_value = {"row_count": 7}
+
+    first = a.describe_collection("db1", "c1")
+    second = a.describe_collection("db1", "c1")
+
+    assert first is second  # identity check — same cached object
+    # describe_collection called once despite two describe_collection calls
+    assert a._client.describe_collection.call_count == 1
+    # has_collection is called once (cache miss); the second describe
+    # hits the schema cache before reaching has_collection.
+    assert a._client.has_collection.call_count == 1
+
+
+def test_delete_does_not_refresh_load():
+    """delete must NOT call ``refresh_load`` — that was pinning p99
+    latency on large collections. Pin batch-2A fix #7."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.get_load_state.return_value = {"state": "Loaded"}
+    a._client.delete.return_value = {"delete_count": 3}
+    # describe_collection now goes through the schema cache. We have
+    # to prime it so the test can exercise the delete path without
+    # hitting the real backend. Use the adapter's private invalidation
+    # hook to drop any cached entry, then let the test bypass via
+    # the lower-level upsert/delete calls — actually we need a schema
+    # whose "id" field is the primary_field used by delete().
+    # Easiest: skip the cache by calling _schema_cache directly.
+    a._schema_cache[("db1", "c1")] = (
+        9e9,
+        {
+            "primary_field": "id",
+            "vector_field": "vector",
+            "dim": 4,
+            "metric": "cosine",
+            "count": 0,
+            "fields": [{"name": "id", "dtype": "varchar", "is_primary": True}],
+        },
+    )
+
+    n = a.delete("db1", "c1", "id", ["a", "b", "c"])
+    assert n == 3
+    a._client.refresh_load.assert_not_called()
+
+

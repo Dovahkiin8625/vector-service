@@ -164,6 +164,10 @@ class MilvusStore(VectorStore):
 
     @property
     def backend(self) -> Any:
+        # Kept for backward compatibility with the original
+        # ``/backend/raw`` debug introspection endpoint. No callers
+        # in the current codebase reach into ``store.backend.*``; the
+        # proxy here just delegates to ``self._adapter``.
         return _MilvusBackendProxy(self._adapter)
 
     # ------------------------------------------------------------------
