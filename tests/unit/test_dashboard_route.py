@@ -166,3 +166,76 @@ def test_dashboard_renders_per_model_not_per_family():
         "stale 'm.dimensions != null' load-state check still present — "
         "rerankers would always show as 未加载"
     )
+
+
+# ---------------------------------------------------------------------------
+# Similarity debug panels (text / image / multimodal)
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_exposes_similarity_panels():
+    """The three similarity endpoints must each have a matching dashboard panel.
+
+    Pins the nav-item ``data-view`` strings, the ``panel-`` ids, and the
+    key form-control / button ids used by the JS handlers. If any id
+    drifts, the corresponding JS click handler will silently no-op — so
+    we anchor on both sides.
+    """
+    from vector_service.api.dashboard import DASHBOARD_HTML
+
+    # ---- nav-items (model group) -----------------------------------
+    assert 'data-view="text-similarity"' in DASHBOARD_HTML, "text-similarity nav-item missing"
+    assert 'data-view="image-similarity"' in DASHBOARD_HTML, "image-similarity nav-item missing"
+    assert 'data-view="mm-similarity"' in DASHBOARD_HTML, "mm-similarity nav-item missing"
+    assert ">文本相似度<" in DASHBOARD_HTML, "nav label '文本相似度' missing"
+    assert ">图像相似度<" in DASHBOARD_HTML, "nav label '图像相似度' missing"
+    assert ">图文相似度<" in DASHBOARD_HTML, "nav label '图文相似度' missing"
+
+    # ---- panel containers ------------------------------------------
+    assert 'id="panel-text-similarity"' in DASHBOARD_HTML, "panel-text-similarity missing"
+    assert 'id="panel-image-similarity"' in DASHBOARD_HTML, "panel-image-similarity missing"
+    assert 'id="panel-mm-similarity"' in DASHBOARD_HTML, "panel-mm-similarity missing"
+
+    # ---- per-panel endpoint pills ----------------------------------
+    assert "/v1/text_similarity" in DASHBOARD_HTML, "POST /v1/text_similarity pill missing"
+    assert "/v1/image_similarity" in DASHBOARD_HTML, "POST /v1/image_similarity pill missing"
+    assert "/v1/multimodal_similarity" in DASHBOARD_HTML, "POST /v1/multimodal_similarity pill missing"
+
+    # ---- form-control ids used by the JS handlers ------------------
+    assert 'id="text-sim-model"' in DASHBOARD_HTML
+    assert 'id="text-sim-metric"' in DASHBOARD_HTML
+    assert 'id="text-sim-query"' in DASHBOARD_HTML
+    assert 'id="text-sim-docs"' in DASHBOARD_HTML
+    assert 'id="btn-text-sim"' in DASHBOARD_HTML
+    assert 'id="btn-text-sim-refresh-models"' in DASHBOARD_HTML
+    assert 'id="text-sim-results"' in DASHBOARD_HTML
+
+    assert 'id="image-sim-model"' in DASHBOARD_HTML
+    assert 'id="image-sim-metric"' in DASHBOARD_HTML
+    assert 'id="image-sim-file"' in DASHBOARD_HTML
+    assert 'id="image-sim-docs"' in DASHBOARD_HTML
+    assert 'id="btn-image-sim"' in DASHBOARD_HTML
+    assert 'id="btn-image-sim-refresh-models"' in DASHBOARD_HTML
+    assert 'id="image-sim-results"' in DASHBOARD_HTML
+
+    assert 'id="mm-sim-model"' in DASHBOARD_HTML
+    assert 'id="mm-sim-metric"' in DASHBOARD_HTML
+    assert 'id="mm-sim-query"' in DASHBOARD_HTML
+    assert 'id="mm-sim-docs"' in DASHBOARD_HTML
+    assert 'id="btn-mm-sim"' in DASHBOARD_HTML
+    assert 'id="btn-mm-sim-refresh-models"' in DASHBOARD_HTML
+    assert 'id="mm-sim-results"' in DASHBOARD_HTML
+
+    # ---- JS handlers wired up --------------------------------------
+    assert "refreshTextSimModels" in DASHBOARD_HTML, "refreshTextSimModels handler missing"
+    assert "refreshImageSimModels" in DASHBOARD_HTML, "refreshImageSimModels handler missing"
+    assert "refreshMmSimModels" in DASHBOARD_HTML, "refreshMmSimModels handler missing"
+    assert "renderSimResults" in DASHBOARD_HTML, "renderSimResults helper missing"
+
+    # ---- activateView labels & refresh branches --------------------
+    assert "'text-similarity'" in DASHBOARD_HTML, "labels map missing text-similarity entry"
+    assert "'image-similarity'" in DASHBOARD_HTML, "labels map missing image-similarity entry"
+    assert "'mm-similarity'" in DASHBOARD_HTML, "labels map missing mm-similarity entry"
+    assert "view === 'text-similarity'" in DASHBOARD_HTML, "activateView missing text-similarity branch"
+    assert "view === 'image-similarity'" in DASHBOARD_HTML, "activateView missing image-similarity branch"
+    assert "view === 'mm-similarity'" in DASHBOARD_HTML, "activateView missing mm-similarity branch"

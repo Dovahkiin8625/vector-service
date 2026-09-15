@@ -139,6 +139,12 @@ vector-service
 | `http://127.0.0.1:8080/readyz` | 嵌入器加载 + Milvus 可达 |
 | `http://127.0.0.1:8080/metrics` | Prometheus |
 
+![Dashboard 总览首页](docs/dashboard-overview.png)
+*Dashboard 默认落地页：KPI 总览 + 模型注册表 + 向量库状态 + 机器指标 + GPU 设备卡。*
+
+![文本相似度调试面板](docs/dashboard-text-similarity.png)
+*新加的「文本相似度」调试面板（侧栏 模型 → 文本相似度）：左选模型 + 度量，中间填查询与候选（按行拆分），底部按所选度量排序展示 `result-row` 列表。*
+
 ---
 
 ## 项目结构

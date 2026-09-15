@@ -19,6 +19,7 @@ from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
 from vector_service.api.rerank import router as rerank_router
+from vector_service.api.similarity import router as similarity_router
 from vector_service.api.system import router as system_router
 from vector_service.core.errors import (
     BackendError,
@@ -27,8 +28,10 @@ from vector_service.core.errors import (
     DatabaseAlreadyExists,
     DatabaseNotFound,
     DimensionMismatch,
+    ModelNotLoadedForSimilarity,
     RerankerError,
     RerankerNotLoaded,
+    SimilarityError,
     VectorServiceError,
 )
 from vector_service.core.lifespan import lifespan
@@ -127,6 +130,22 @@ OPENAPI_TAGS = [
             "and a list of documents and returns documents reordered "
             "by relevance. Registered reranker backends are listed via "
             "`GET /v1/models` (filter by `type=reranker`)."
+        ),
+    },
+    {
+        "name": "similarity",
+        "description": (
+            "Pairwise similarity over already-loaded embedders. "
+            "`POST /v1/text_similarity` scores a query text against "
+            "candidate texts; "
+            "`POST /v1/image_similarity` scores a query image against "
+            "candidate images; "
+            "`POST /v1/multimodal_similarity` scores a query against "
+            "candidates where each item may be text or image "
+            "(Chinese-CLIP shared space — text↔image is valid). "
+            "All three share the metric literal `cosine | ip | l2` "
+            "(matching the vector-store schemas) and return results "
+            "sorted most-similar-first."
         ),
     },
     {
@@ -241,6 +260,25 @@ def create_app() -> FastAPI:
             exc=exc,
         )
 
+    @app.exception_handler(ModelNotLoadedForSimilarity)
+    async def _similarity_not_loaded(request: Request, exc: ModelNotLoadedForSimilarity):
+        return _err(
+            "similarity_unavailable",
+            str(exc) or "similarity target model not loaded",
+            503,
+            exc=exc,
+        )
+
+    @app.exception_handler(SimilarityError)
+    async def _similarity_error(request: Request, exc: SimilarityError):
+        log.warning("similarity_error", error=str(exc))
+        return _err(
+            "similarity_error",
+            str(exc) or "similarity call failed",
+            503,
+            exc=exc,
+        )
+
     @app.exception_handler(VectorServiceError)
     async def _vs_error_handler(request: Request, exc: VectorServiceError):
         # 兜底：未被上面具体 handler 命中的业务异常
@@ -307,6 +345,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(image_embeddings_router)
     app.include_router(multimodal_embeddings_router)
+    app.include_router(similarity_router)
 
     return app
 

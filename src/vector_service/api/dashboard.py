@@ -1421,6 +1421,30 @@ DASHBOARD_HTML_BODY = """
             </svg>
             <span>重排</span>
           </div>
+          <div class="nav-item" data-view="text-similarity">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 6h6M3 10h6"/>
+              <path d="M11 4l3 3-3 3M14 7H7" stroke-dasharray="2 2"/>
+            </svg>
+            <span>文本相似度</span>
+          </div>
+          <div class="nav-item" data-view="image-similarity">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="1.5" y="4" width="6" height="6" rx="1"/>
+              <rect x="8.5" y="6" width="6" height="4" rx="1"/>
+              <path d="M7.5 7h1" stroke-dasharray="1.5 1.5"/>
+            </svg>
+            <span>图像相似度</span>
+          </div>
+          <div class="nav-item" data-view="mm-similarity">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M2 5h5M2 8h5M2 11h3"/>
+              <rect x="9" y="4" width="6" height="6" rx="1"/>
+              <circle cx="11.5" cy="6.5" r="1"/>
+              <path d="M9 10l1.5-1 1.5 1 2-1.5"/>
+            </svg>
+            <span>图文相似度</span>
+          </div>
         </div>
       </div>
 
@@ -1627,7 +1651,6 @@ DASHBOARD_HTML_BODY = """
           <div class="model-grid" id="models-grid"></div>
         </div>
         <div class="empty hint">错误码速查：<code>409 model_busy</code>（同族并发 load/unload）/ <code>409 conflict_loaded</code>（同族不同 id，已加载）/ <code>409 not_loaded</code>（unload 空 slot）/ <code>503 model_load_failed</code>（权重下载/初始化失败）/ <code>404 model_not_found</code>（id 未注册）。</div>
-        </div>
         <div class="empty hint">点击列表中的模型可发起 <code>GET /v1/models/{id}</code> 并在底部报文面板查看响应。</div>
       </div>
 
@@ -1766,6 +1789,184 @@ DASHBOARD_HTML_BODY = """
         </div>
 
         <div class="empty hint">文本项仅支持中文（Chinese-CLIP 训练集）。base64 字符串不带 <code>data:</code> URI 前缀；MIME 必须与服务端 <code>VS_MULTIMODAL_EMBEDDING__ALLOWED_MIME</code> 一致。</div>
+      </div>
+
+      <!-- ===================== 文本相似度 ===================== -->
+      <div class="panel" id="panel-text-similarity">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">已注册的文本嵌入后端 <span class="pill accent">GET /v1/models · type=embedder</span></h3>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-text-sim-refresh-models">刷新</button>
+          </div>
+          <div class="list" id="text-sim-models-list"><div class="empty">点击"刷新"加载已注册的文本嵌入模型。</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">计算文本相似度 <span class="pill accent">POST /v1/text_similarity</span></h3>
+          </div>
+          <div class="row split">
+            <div class="row">
+              <label>模型</label>
+              <select id="text-sim-model"></select>
+            </div>
+            <div class="row">
+              <label>度量 <span class="hint">cosine / ip 越高越好 · l2 越低越好</span></label>
+              <select id="text-sim-metric">
+                <option value="cosine">cosine（默认）</option>
+                <option value="ip">ip</option>
+                <option value="l2">l2</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <label>查询文本 <span class="hint">单条字符串</span></label>
+            <textarea id="text-sim-query" rows="2">无线鼠标</textarea>
+          </div>
+          <div class="row">
+            <label>候选文档 <span class="hint">每行一条；服务端按行拆分</span></label>
+            <textarea id="text-sim-docs" rows="5">蓝牙鼠标
+机械键盘
+蓝牙耳机
+游戏手柄</textarea>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-text-sim">计算相似度</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h3 class="section-title">结果</h3></div>
+          <div id="text-sim-results"><div class="empty">尚无结果。点击"计算相似度"查看响应。</div></div>
+        </div>
+
+        <div class="empty hint">候选文档按行拆分；服务端会先调用 <code>embed_documents</code> 一次性嵌入查询与全部候选，再按所选度量计算两两分数。</div>
+      </div>
+
+      <!-- ===================== 图像相似度 ===================== -->
+      <div class="panel" id="panel-image-similarity">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">已注册的图像嵌入后端 <span class="pill accent">GET /v1/models · type=image_embedder</span></h3>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-image-sim-refresh-models">刷新</button>
+          </div>
+          <div class="list" id="image-sim-models-list"><div class="empty">点击"刷新"加载已注册的图像嵌入模型。</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">计算图像相似度 <span class="pill accent">POST /v1/image_similarity</span></h3>
+          </div>
+          <div class="row split">
+            <div class="row">
+              <label>模型</label>
+              <select id="image-sim-model"></select>
+            </div>
+            <div class="row">
+              <label>度量 <span class="hint">cosine / ip 越高越好 · l2 越低越好</span></label>
+              <select id="image-sim-metric">
+                <option value="cosine">cosine（默认）</option>
+                <option value="ip">ip</option>
+                <option value="l2">l2</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row" id="image-sim-single-row">
+            <label>查询图片 <span class="hint">本地文件 → 自动 base64；MIME 自动从文件类型推断</span></label>
+            <input type="file" id="image-sim-file" accept="image/png,image/jpeg,image/webp" />
+          </div>
+
+          <div class="row split" id="image-sim-mime-row">
+            <div class="row">
+              <label>MIME <span class="hint">留空 = 使用文件自身 type</span></label>
+              <select id="image-sim-mime">
+                <option value="">（自动）</option>
+                <option value="image/png">image/png</option>
+                <option value="image/jpeg">image/jpeg</option>
+                <option value="image/webp">image/webp</option>
+              </select>
+            </div>
+            <div class="row">
+              <label>&nbsp;</label>
+              <div id="image-sim-file-info" style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">尚未选择文件。</div>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>候选图片 <span class="hint">JSON 数组，每项 <code>{"data":"&lt;base64&gt;","mime":"image/png"}</code></span></label>
+            <textarea id="image-sim-docs" rows="6" placeholder='[{"data":"<base64>","mime":"image/png"}]'>[]</textarea>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="btn-image-sim">计算相似度</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h3 class="section-title">结果</h3></div>
+          <div id="image-sim-results"><div class="empty">尚无结果。点击"计算相似度"查看响应。</div></div>
+        </div>
+
+        <div class="empty hint">候选图片按 JSON 数组提交；查询走文件上传以便快速验证。base64 字符串不带 <code>data:</code> URI 前缀。</div>
+      </div>
+
+      <!-- ===================== 图文相似度 ===================== -->
+      <div class="panel" id="panel-mm-similarity">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">已注册的图文嵌入后端 <span class="pill accent">GET /v1/models · type=multimodal_embedder</span></h3>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-mm-sim-refresh-models">刷新</button>
+          </div>
+          <div class="list" id="mm-sim-models-list"><div class="empty">点击"刷新"加载已注册的图文嵌入模型。</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">计算图文相似度 <span class="pill accent">POST /v1/multimodal_similarity</span></h3>
+          </div>
+          <div class="row split">
+            <div class="row">
+              <label>模型</label>
+              <select id="mm-sim-model"></select>
+            </div>
+            <div class="row">
+              <label>度量 <span class="hint">cosine / ip 越高越好 · l2 越低越好</span></label>
+              <select id="mm-sim-metric">
+                <option value="cosine">cosine（默认）</option>
+                <option value="ip">ip</option>
+                <option value="l2">l2</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>查询项 <span class="hint">单条 JSON：<code>{"text":"..."}</code> 或 <code>{"image":{"data":"&lt;base64&gt;","mime":"image/png"}}</code></span></label>
+            <textarea id="mm-sim-query" rows="2">{"text": "一只猫"}</textarea>
+          </div>
+
+          <div class="row">
+            <label>候选项 <span class="hint">JSON 数组，每项与查询同构（text xor image）；跨模态有效（中文 ↔ 图）</span></label>
+            <textarea id="mm-sim-docs" rows="5">[{"text": "狗"}, {"image": {"data": "<base64>", "mime": "image/png"}}]</textarea>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="btn-mm-sim">计算相似度</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h3 class="section-title">结果</h3></div>
+          <div id="mm-sim-results"><div class="empty">尚无结果。点击"计算相似度"查看响应。</div></div>
+        </div>
+
+        <div class="empty hint">文本项仅支持中文（Chinese-CLIP 训练集）；查询与候选可以混合模态，因为 Chinese-CLIP 文本塔与图像塔在同一共享空间。</div>
       </div>
 
       <!-- ===================== 数据库 ===================== -->
@@ -2469,6 +2670,9 @@ function activateView(view) {
     'image-embeddings': { cat: '模型', sub: '图像嵌入' },
     'multimodal-embeddings': { cat: '模型', sub: '图文嵌入' },
     'rerank': { cat: '模型', sub: '重排' },
+    'text-similarity': { cat: '模型', sub: '文本相似度' },
+    'image-similarity': { cat: '模型', sub: '图像相似度' },
+    'mm-similarity': { cat: '模型', sub: '图文相似度' },
     'databases': { cat: '向量库', sub: '数据库' },
     'collections': { cat: '向量库', sub: '集合' },
     'vectors': { cat: '向量库', sub: '向量' },
@@ -2489,6 +2693,9 @@ function activateView(view) {
   else if (view === 'image-embeddings') { refreshImageModels(); }
   else if (view === 'multimodal-embeddings') { refreshMultimodalModels(); }
   else if (view === 'rerank') { refreshRerankModels(); }
+  else if (view === 'text-similarity') { refreshTextSimModels(); }
+  else if (view === 'image-similarity') { refreshImageSimModels(); }
+  else if (view === 'mm-similarity') { refreshMmSimModels(); }
   else if (view === 'databases') { refreshDatabases(); }
   else if (view === 'collections') { refreshDatabases().then(refreshCollectionsInActive); }
   else if (view === 'vectors') { refreshDatabases().then(refreshCollectionsInActive); }
@@ -3641,6 +3848,271 @@ $('#btn-mm-emb').addEventListener('click', async function () {
     renderMmEmbResults(rr.payload);
   } catch (e) {
     $('#mm-emb-results').innerHTML =
+      '<div class="empty error">请求失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+});
+
+/* ============ Similarity panels ============
+   Three debug panels (text / image / multimodal) that share the same
+   result-row layout. The endpoints always return results sorted
+   most-similar-first (cosine/ip desc, l2 asc), so rank == position+1. */
+
+function renderSimResults(rootId, payload, labels) {
+  var root = $('#' + rootId);
+  if (!root) return;
+  if (!payload || !Array.isArray(payload.results)) {
+    root.innerHTML = '<div class="empty">响应中未包含 results 数组。</div>';
+    return;
+  }
+  var head =
+    '<dl class="traffic-section" style="margin-bottom:12px;">' +
+      '<dt>模型</dt><dd>' + escapeHtml(payload.model || '') + '</dd>' +
+      '<dt>度量</dt><dd>' + escapeHtml(payload.metric || '') + '</dd>' +
+      '<dt>命中数</dt><dd>' + payload.results.length + '</dd>' +
+    '</dl>';
+  if (!payload.results.length) {
+    root.innerHTML = head + '<div class="empty">无结果。</div>';
+    return;
+  }
+  var rows = payload.results.map(function (r, i) {
+    var label = (labels && labels[r.index]) || ('#' + r.index);
+    var truncated = label.length > 120 ? label.slice(0, 120) + '…' : label;
+    var score = (typeof r.score === 'number') ? r.score.toFixed(4) : String(r.score);
+    return '<div class="result-row">' +
+      '<span class="result-rank">#' + (i + 1) + '</span>' +
+      '<span class="result-idx">idx=' + r.index + '</span>' +
+      '<span class="result-score">' + score + '</span>' +
+      '<span class="result-doc" title="' + escapeHtml(label) + '">' + escapeHtml(truncated) + '</span>' +
+    '</div>';
+  }).join('');
+  root.innerHTML = head + rows;
+}
+
+/* ---- text similarity ---- */
+async function refreshTextSimModels() {
+  var sel = $('#text-sim-model');
+  var list = $('#text-sim-models-list');
+  if (!sel || !list) return;
+  var prev = sel.value;
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    var rr = await api('GET', '/v1/models', null);
+    var data = (rr.payload && rr.payload.data) || [];
+    var embedders = data.filter(function (m) { return m.type === 'embedder'; });
+    sel.innerHTML = '';
+    if (!embedders.length) {
+      var o = document.createElement('option');
+      o.value = ''; o.textContent = '（暂无 embedder）';
+      sel.appendChild(o);
+      list.innerHTML = '<div class="empty">未注册任何 embedder。</div>';
+      return;
+    }
+    embedders.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.id + (m.loaded ? ' · 已加载' : '');
+      sel.appendChild(opt);
+    });
+    if (prev && Array.from(sel.options).some(function (o) { return o.value === prev; })) sel.value = prev;
+    list.innerHTML = embedders.map(function (m) {
+      return '<div class="list-item">' +
+        '<span class="name">' + escapeHtml(m.id) + '</span>' +
+        '<span class="meta">' + (m.loaded ? '已加载' : '未加载') +
+        (m.dimensions ? ' · ' + m.dimensions + ' 维' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty error">加载失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
+$('#btn-text-sim-refresh-models').addEventListener('click', refreshTextSimModels);
+
+$('#btn-text-sim').addEventListener('click', async function () {
+  var model = $('#text-sim-model').value;
+  if (!model) { alert('请先选择文本嵌入模型（点击上方"刷新"加载）。'); return; }
+  var query = $('#text-sim-query').value.trim();
+  if (!query) { alert('查询文本不能为空。'); return; }
+  var docsRaw = $('#text-sim-docs').value;
+  var documents = docsRaw.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+  if (!documents.length) { alert('候选文档不能为空（每行一条）。'); return; }
+  var metric = $('#text-sim-metric').value;
+
+  $('#text-sim-results').innerHTML = '<div class="empty">请求中…</div>';
+  try {
+    var rr = await api('POST', '/v1/text_similarity', {
+      model: model, query: query, documents: documents, metric: metric,
+    });
+    renderSimResults('text-sim-results', rr.payload, documents);
+  } catch (e) {
+    $('#text-sim-results').innerHTML =
+      '<div class="empty error">请求失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+});
+
+/* ---- image similarity ---- */
+async function refreshImageSimModels() {
+  var sel = $('#image-sim-model');
+  var list = $('#image-sim-models-list');
+  if (!sel || !list) return;
+  var prev = sel.value;
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    var rr = await api('GET', '/v1/models', null);
+    var data = (rr.payload && rr.payload.data) || [];
+    var embedders = data.filter(function (m) { return m.type === 'image_embedder'; });
+    sel.innerHTML = '';
+    if (!embedders.length) {
+      var o = document.createElement('option');
+      o.value = ''; o.textContent = '（暂无 image_embedder）';
+      sel.appendChild(o);
+      list.innerHTML = '<div class="empty">未注册任何 image_embedder。</div>';
+      return;
+    }
+    embedders.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.id + (m.loaded ? ' · 已加载' : '');
+      sel.appendChild(opt);
+    });
+    if (prev && Array.from(sel.options).some(function (o) { return o.value === prev; })) sel.value = prev;
+    list.innerHTML = embedders.map(function (m) {
+      return '<div class="list-item">' +
+        '<span class="name">' + escapeHtml(m.id) + '</span>' +
+        '<span class="meta">' + (m.loaded ? '已加载' : '未加载') +
+        (m.dimensions ? ' · ' + m.dimensions + ' 维' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty error">加载失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
+$('#btn-image-sim-refresh-models').addEventListener('click', refreshImageSimModels);
+$('#image-sim-file').addEventListener('change', function () {
+  var f = $('#image-sim-file').files[0];
+  var info = $('#image-sim-file-info');
+  if (!f) { info.textContent = '尚未选择文件。'; return; }
+  info.textContent = f.name + ' · ' + f.type + ' · ' + (f.size / 1024).toFixed(1) + ' KB';
+});
+
+$('#btn-image-sim').addEventListener('click', async function () {
+  var model = $('#image-sim-model').value;
+  if (!model) { alert('请先选择图像嵌入模型（点击上方"刷新"加载）。'); return; }
+  var f = $('#image-sim-file').files[0];
+  if (!f) { alert('请选择一张查询图片。'); return; }
+  var data, mime;
+  try {
+    var r = await readFileAsBase64(f);
+    data = r.data; mime = r.mime;
+  } catch (e) {
+    alert('读取文件失败：' + (e && e.message || String(e))); return;
+  }
+  var mimeOverride = $('#image-sim-mime').value;
+  if (mimeOverride) mime = mimeOverride;
+  if (!mime) { alert('无法识别图片 MIME 类型，请在右侧下拉框手动选择。'); return; }
+
+  var docsRaw = $('#image-sim-docs').value.trim() || '[]';
+  var documents;
+  try {
+    documents = safeParse(docsRaw);
+    if (!Array.isArray(documents) || !documents.length) {
+      alert('候选图片必须是包含至少一项 {"data","mime"} 的 JSON 数组。'); return;
+    }
+  } catch (_e) {
+    alert('候选图片 JSON 解析失败。'); return;
+  }
+  var metric = $('#image-sim-metric').value;
+
+  $('#image-sim-results').innerHTML = '<div class="empty">请求中…</div>';
+  try {
+    var rr = await api('POST', '/v1/image_similarity', {
+      model: model,
+      query: { data: data, mime: mime },
+      documents: documents,
+      metric: metric,
+    });
+    renderSimResults('image-sim-results', rr.payload,
+      documents.map(function (_d, i) { return '#' + i; }));
+  } catch (e) {
+    $('#image-sim-results').innerHTML =
+      '<div class="empty error">请求失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+});
+
+/* ---- multimodal similarity ---- */
+async function refreshMmSimModels() {
+  var sel = $('#mm-sim-model');
+  var list = $('#mm-sim-models-list');
+  if (!sel || !list) return;
+  var prev = sel.value;
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    var rr = await api('GET', '/v1/models', null);
+    var data = (rr.payload && rr.payload.data) || [];
+    var embedders = data.filter(function (m) { return m.type === 'multimodal_embedder'; });
+    sel.innerHTML = '';
+    if (!embedders.length) {
+      var o = document.createElement('option');
+      o.value = ''; o.textContent = '（暂无 multimodal_embedder）';
+      sel.appendChild(o);
+      list.innerHTML = '<div class="empty">未注册任何 multimodal_embedder。</div>';
+      return;
+    }
+    embedders.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.id + (m.loaded ? ' · 已加载' : '');
+      sel.appendChild(opt);
+    });
+    if (prev && Array.from(sel.options).some(function (o) { return o.value === prev; })) sel.value = prev;
+    list.innerHTML = embedders.map(function (m) {
+      return '<div class="list-item">' +
+        '<span class="name">' + escapeHtml(m.id) + '</span>' +
+        '<span class="meta">' + (m.loaded ? '已加载' : '未加载') +
+        (m.dimensions ? ' · ' + m.dimensions + ' 维' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty error">加载失败：' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
+$('#btn-mm-sim-refresh-models').addEventListener('click', refreshMmSimModels);
+
+$('#btn-mm-sim').addEventListener('click', async function () {
+  var model = $('#mm-sim-model').value;
+  if (!model) { alert('请先选择图文嵌入模型（点击上方"刷新"加载）。'); return; }
+  var queryRaw = $('#mm-sim-query').value.trim();
+  var query;
+  try { query = safeParse(queryRaw); }
+  catch (_e) { alert('查询项 JSON 解析失败。'); return; }
+  if (!query || (query.text == null && query.image == null)) {
+    alert('查询项必须是包含 text 或 image 之一的 JSON 对象。'); return;
+  }
+
+  var docsRaw = $('#mm-sim-docs').value.trim() || '[]';
+  var documents;
+  try {
+    documents = safeParse(docsRaw);
+    if (!Array.isArray(documents) || !documents.length) {
+      alert('候选项必须是非空 JSON 数组。'); return;
+    }
+  } catch (_e) {
+    alert('候选项 JSON 解析失败。'); return;
+  }
+
+  var metric = $('#mm-sim-metric').value;
+
+  $('#mm-sim-results').innerHTML = '<div class="empty">请求中…</div>';
+  try {
+    var rr = await api('POST', '/v1/multimodal_similarity', {
+      model: model,
+      query: query,
+      documents: documents,
+      metric: metric,
+    });
+    renderSimResults('mm-sim-results', rr.payload,
+      documents.map(function (d, i) { return d.text ? ('#' + i + ' · text · ' + d.text) : '#' + i + ' · image'; }));
+  } catch (e) {
+    $('#mm-sim-results').innerHTML =
       '<div class="empty error">请求失败：' + escapeHtml(e.message || String(e)) + '</div>';
   }
 });

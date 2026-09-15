@@ -117,3 +117,23 @@ class ModelNotLoadedForMultimodal(MultimodalEmbedderError):
     a missing multimodal model must not look like an image-embedder
     failure to dispatchers or HTTP envelopes.
     """
+
+
+class SimilarityError(VectorServiceError):
+    """Base class for similarity-computation failures.
+
+    Sibling of ``EmbedderError`` / ``RerankerError``. Similarity wraps an
+    embedder call but has its own error codes (``similarity_unavailable``,
+    ``similarity_error``), so a similarity failure must not be misrouted
+    into the embedder envelope.
+    """
+
+
+class ModelNotLoadedForSimilarity(SimilarityError):
+    """Similarity target model is not loaded.
+
+    Distinct from the per-family ``ModelNotLoaded*`` exceptions: similarity
+    can target text / image / multimodal embedders, and a missing model
+    must surface with the similarity error code so clients can tell which
+    subsystem raised.
+    """
