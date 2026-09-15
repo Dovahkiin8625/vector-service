@@ -9,6 +9,7 @@ from PIL import Image
 
 from vector_service.core.config import ImageEmbeddingSettings
 from vector_service.core.errors import ModelNotLoadedForImages
+from vector_service.embeddings import _common
 from vector_service.embeddings.image_base import ImageEmbedder, ImageInput
 
 
@@ -19,22 +20,6 @@ def _create_model_and_transforms(name: str, pretrained: str, **kwargs):
     import open_clip  # lazy
 
     return open_clip.create_model_and_transforms(name, pretrained=pretrained, **kwargs)
-
-
-def _dir_has_model(p: Path) -> bool:
-    if not p.exists():
-        return False
-    return (p / "config.json").exists() or any(p.glob("*.bin")) or any(p.glob("*.safetensors"))
-
-
-def _release_cuda_cache() -> None:
-    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
-    try:
-        import torch  # local import: torch is optional
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
 
 
 class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
@@ -58,22 +43,8 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         self._preprocess = None
 
     @staticmethod
-    def _release_cuda_cache() -> None:
-        # Module-level helper kept as a method too so callers can invoke
-        # ``self._release_cuda_cache()`` without touching globals.
-        _release_cuda_cache()
-
-    @staticmethod
     def _resolve_device(requested: str) -> str:
-        if requested == "cuda":
-            return _check_cuda()
-        if requested == "cpu":
-            return "cpu"
-        # auto
-        try:
-            return _check_cuda()
-        except Exception:
-            return "cpu"
+        return _common.resolve_device(requested)
 
     def _ensure_loaded(self):
         if self._model is not None:
@@ -107,7 +78,7 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
                 model.__dict__.clear()
             except Exception:
                 pass
-        self._release_cuda_cache()
+        _common.release_cuda_cache()
 
     def _load_internal(self) -> None:
         # Ensure the local model_dir exists so open_clip can use it as a
@@ -120,7 +91,7 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
         # network call.
         os.environ.setdefault("OPEN_CLIP_DOWNLOAD_PATH", str(self._model_dir))
 
-        if not _dir_has_model(self._model_dir) and not self._settings.auto_download:
+        if not _common.dir_has_model(self._model_dir) and not self._settings.auto_download:
             raise ModelNotLoadedForImages(
                 f"model dir {self._model_dir} has no OpenCLIP weights and auto_download is off"
             )
@@ -164,14 +135,3 @@ class OpenCLIPVitL14ImageEmbedder(ImageEmbedder):
 
     def embed_query_image(self, image: ImageInput) -> list[float]:
         return self.embed_images([image])[0]
-
-
-def _check_cuda() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError as e:
-        raise ModelNotLoadedForImages(f"torch not available: {e}") from e
-    raise ModelNotLoadedForImages("CUDA not available")

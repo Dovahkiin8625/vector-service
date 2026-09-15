@@ -5,6 +5,7 @@ from pathlib import Path
 
 from vector_service.core.config import Settings, get_settings
 from vector_service.core.errors import EmbedderError, ModelNotLoaded
+from vector_service.embeddings import _common
 from vector_service.embeddings.base import Embedder
 
 _QUERY_PREFIX = "为这个句子生成表示以用于检索："
@@ -28,15 +29,7 @@ class BGEM3Embedder(Embedder):
 
     @staticmethod
     def _resolve_device(requested: str) -> str:
-        if requested == "cuda":
-            return _check_cuda()
-        if requested == "cpu":
-            return "cpu"
-        # auto
-        try:
-            return _check_cuda()
-        except ModelNotLoaded:
-            return "cpu"
+        return _common.resolve_device(requested)
 
     def _ensure_loaded(self) -> "_BGEBackend":
         if self._impl is not None:
@@ -73,7 +66,7 @@ class BGEM3Embedder(Embedder):
                 except Exception:
                     pass
             impl.__dict__.clear()
-        self._release_cuda_cache()
+        _common.release_cuda_cache()
 
     def _load_internal(self) -> None:
         self._ensure_model_dir()
@@ -98,21 +91,11 @@ class BGEM3Embedder(Embedder):
             import structlog
             structlog.get_logger(__name__).warning("bge_m3_warmup_failed", error=str(e))
 
-    @staticmethod
-    def _release_cuda_cache() -> None:
-        """Best-effort CUDA cache flush; safe on CPU-only hosts."""
-        try:
-            import torch  # local import: torch is an optional dep
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
     def _ensure_model_dir(self) -> None:
         s = self._settings
         self._model_dir.mkdir(parents=True, exist_ok=True)
         # 判断是否已有必需文件（粗略）
-        if _dir_has_model(self._model_dir):
+        if _common.dir_has_model(self._model_dir):
             return
         if not s.embedding_auto_download:
             raise ModelNotLoaded(
@@ -144,29 +127,6 @@ class BGEM3Embedder(Embedder):
     def embed_query(self, text: str) -> list[float]:
         impl = self._ensure_loaded()
         return impl.encode([_QUERY_PREFIX + text], is_query=True)[0]
-
-
-def _check_cuda() -> str:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError as e:
-        raise ModelNotLoaded(f"torch not available: {e}")
-    raise ModelNotLoaded("CUDA not available")
-
-
-def _dir_has_model(p: Path) -> bool:
-    if not p.exists():
-        return False
-    # 至少有 config.json 或 model.safetensors / model.onnx
-    if (p / "config.json").exists():
-        return True
-    if any(p.glob("*.onnx")):
-        return True
-    if any(p.glob("*.safetensors")) or any(p.glob("pytorch_model.bin")):
-        return True
-    return False
 
 
 class _BGEBackend:

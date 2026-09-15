@@ -18,6 +18,7 @@ from pathlib import Path
 from PIL import Image
 
 from vector_service.core.errors import ModelNotLoadedForImages
+from vector_service.embeddings import _common
 from vector_service.embeddings.image_base import ImageInput
 from vector_service.embeddings.multimodal_base import MultimodalEmbedder
 
@@ -33,18 +34,6 @@ def _create_model_and_processor(repo_dir: str, **kwargs):
     model = ChineseCLIPModel.from_pretrained(repo_dir, **kwargs)
     processor = ChineseCLIPProcessor.from_pretrained(repo_dir)
     return model, processor, processor.tokenizer
-
-
-def _dir_has_model(p: Path) -> bool:
-    if not p.exists():
-        return False
-    return (
-        (p / "config.json").exists()
-        or (p / "preprocessor_config.json").exists()
-        or any(p.glob("*.safetensors"))
-        or any(p.glob("pytorch_model.bin"))
-        or any(p.glob("*.bin"))
-    )
 
 
 class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
@@ -70,14 +59,7 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
 
     @staticmethod
     def _resolve_device(requested: str) -> str:
-        if requested == "cuda":
-            return _check_cuda()
-        if requested == "cpu":
-            return "cpu"
-        try:
-            return _check_cuda()
-        except Exception:
-            return "cpu"
+        return _common.resolve_device(requested)
 
     def _ensure_loaded(self):
         if self._model is not None:
@@ -111,12 +93,12 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
                 model.__dict__.clear()
             except Exception:
                 pass
-        _release_cuda_cache()
+        _common.release_cuda_cache()
 
     def _load_internal(self) -> None:
         self._ensure_model_dir()
 
-        if not _dir_has_model(self._model_dir) and not self._settings.auto_download:
+        if not _common.dir_has_model(self._model_dir) and not self._settings.auto_download:
             raise ModelNotLoadedForImages(
                 f"model dir {self._model_dir} has no Chinese-CLIP weights and auto_download is off"
             )
@@ -152,7 +134,7 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
         ``auto_download=false`` and place weights manually.
         """
         self._model_dir.mkdir(parents=True, exist_ok=True)
-        if _dir_has_model(self._model_dir):
+        if _common.dir_has_model(self._model_dir):
             return
         if not self._settings.auto_download:
             return
@@ -211,24 +193,3 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
             features = self._model.get_image_features(pixel_values=tensor)
         vec = features.pooler_output  # already projected to 512d
         return [list(map(float, row)) for row in vec.cpu().tolist()]
-
-
-def _check_cuda() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError as e:
-        raise ModelNotLoadedForImages(f"torch not available: {e}") from e
-    raise ModelNotLoadedForImages("CUDA not available")
-
-
-def _release_cuda_cache() -> None:
-    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
-    try:
-        import torch  # local import: torch is optional
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass

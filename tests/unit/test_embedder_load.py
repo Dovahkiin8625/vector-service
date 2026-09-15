@@ -56,7 +56,7 @@ def test_bge_m3_load_calls_backend_init_and_warmup(monkeypatch, tmp_path):
             return [[0.0] * 4 for _ in texts]
 
     monkeypatch.setattr(
-        "vector_service.embeddings.bge_m3._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     monkeypatch.setattr(
         "vector_service.embeddings.bge_m3._TorchBackend", _FakeBackend
@@ -93,7 +93,7 @@ def test_bge_m3_load_is_idempotent(monkeypatch, tmp_path):
             return [[0.0] * 4 for _ in texts]
 
     monkeypatch.setattr(
-        "vector_service.embeddings.bge_m3._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     monkeypatch.setattr(
         "vector_service.embeddings.bge_m3._TorchBackend", _FakeBackend
@@ -111,7 +111,7 @@ def test_bge_m3_load_propagates_model_not_loaded(monkeypatch, tmp_path):
     embedder = BGEM3Embedder(settings=s)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
-        "vector_service.embeddings.bge_m3._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
 
     def _boom(*a, **kw):

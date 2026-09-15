@@ -76,7 +76,7 @@ def _install_open_clip_stub(monkeypatch, encode_return=None):
     )
     # Avoid hitting HuggingFace: pretend the model dir already has weights.
     monkeypatch.setattr(
-        "vector_service.embeddings.openclip_vit_l14._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     return encode_calls
 
@@ -99,7 +99,7 @@ def _make_idempotent_stub(monkeypatch):
         _create,
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.openclip_vit_l14._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     return create_calls
 
@@ -145,7 +145,7 @@ def test_openclip_load_propagates_model_not_loaded_for_images(monkeypatch, tmp_p
         "vector_service.embeddings.openclip_vit_l14._create_model_and_transforms", _boom
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.openclip_vit_l14._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
 
     s = _FakeImageSettings(model_dir=str(tmp_path))
@@ -174,7 +174,7 @@ def test_embed_images_returns_one_vector_per_input(monkeypatch, tmp_path):
         "vector_service.embeddings.openclip_vit_l14._create_model_and_transforms", _create
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.openclip_vit_l14._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
 
     s = _FakeImageSettings(model_dir=str(tmp_path))
@@ -204,7 +204,7 @@ def test_embed_query_image_equals_embed_images_of_one(monkeypatch, tmp_path):
         "vector_service.embeddings.openclip_vit_l14._create_model_and_transforms", _create
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.openclip_vit_l14._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
 
     s = _FakeImageSettings(model_dir=str(tmp_path))

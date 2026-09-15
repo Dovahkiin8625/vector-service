@@ -6,64 +6,11 @@ from typing import TYPE_CHECKING
 
 from vector_service.core.config import RerankerSettings, Settings, get_settings
 from vector_service.core.errors import RerankerNotLoaded
+from vector_service.embeddings import _common
 from vector_service.rerankers.base import Reranker, ScoredHit
 
 if TYPE_CHECKING:  # pragma: no cover
     from sentence_transformers import CrossEncoder
-
-
-def _dir_has_model(path: str) -> bool:
-    """True if ``path`` already contains usable model files.
-
-    Checks for any of ``config.json``, ``tokenizer_config.json``,
-    ``model.safetensors``, ``pytorch_model.bin``, or ``model.onnx``.
-    This matches the same convention used by ``BGEM3Embedder``.
-    """
-    import os
-
-    if not os.path.isdir(path):
-        return False
-    markers = {
-        "config.json",
-        "tokenizer_config.json",
-        "model.safetensors",
-        "pytorch_model.bin",
-        "model.onnx",
-    }
-    try:
-        present = set(os.listdir(path))
-    except OSError:
-        return False
-    return bool(markers & present)
-
-
-def _resolve_device(device: str) -> str:
-    """Map ``auto|cpu|cuda`` to a concrete torch device string.
-
-    Mirrors ``BGEM3Embedder._resolve_device``: on ``auto``, try CUDA
-    first; if import or probing fails, fall back to CPU.
-    """
-    if device == "cpu":
-        return "cpu"
-    if device == "cuda":
-        return "cuda"
-    # auto
-    try:
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
-def _release_cuda_cache() -> None:
-    """Best-effort CUDA cache flush; safe on CPU-only hosts."""
-    try:
-        import torch  # local import: torch is optional
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
 
 
 class CrossEncoderReranker(Reranker):
@@ -91,7 +38,7 @@ class CrossEncoderReranker(Reranker):
         else:
             # Already the reranker block.
             s = settings
-        self._device: str = _resolve_device(s.device)
+        self._device: str = _common.resolve_device(s.device)
         self._batch_size: int = s.batch_size
         self._max_length: int = s.max_length
         self._model_dir: str = s.model_dir
@@ -153,11 +100,11 @@ class CrossEncoderReranker(Reranker):
                 impl.__dict__.clear()
             except Exception:
                 pass
-        _release_cuda_cache()
+        _common.release_cuda_cache()
 
     def _ensure_model_dir(self) -> None:
         """Download weights if needed; otherwise raise ``RerankerNotLoaded``."""
-        if _dir_has_model(self._model_dir):
+        if _common.dir_has_model(self._model_dir):
             return
         if not self._auto_download:
             raise RerankerNotLoaded(
@@ -185,7 +132,7 @@ class CrossEncoderReranker(Reranker):
             snapshot_download(
                 self._hf_repo, local_dir=self._model_dir
             )
-        if not _dir_has_model(self._model_dir):  # pragma: no cover
+        if not _common.dir_has_model(self._model_dir):  # pragma: no cover
             raise RerankerNotLoaded(
                 f"download completed but {self._model_dir!r} still lacks "
                 f"required files"

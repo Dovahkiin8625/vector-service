@@ -93,7 +93,7 @@ def _install_chinese_clip_stub(monkeypatch, dim=512):
         _create_model_and_processor,
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.chinese_clip_multimodal._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     return encode_calls
 
@@ -131,7 +131,7 @@ def _make_idempotent_stub(monkeypatch):
         _create,
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.chinese_clip_multimodal._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
     return create_calls
 
@@ -190,7 +190,7 @@ def test_chinese_clip_load_propagates_model_not_loaded(monkeypatch, tmp_path):
         "vector_service.embeddings.chinese_clip_multimodal._create_model_and_processor", _boom
     )
     monkeypatch.setattr(
-        "vector_service.embeddings.chinese_clip_multimodal._dir_has_model", lambda p: True
+        "vector_service.embeddings._common.dir_has_model", lambda p: True
     )
 
     s = _FakeMultimodalSettings(model_dir=str(tmp_path))
