@@ -27,3 +27,6 @@ logs/
 
 # --- Superpowers plugin state (skills live under the plugin path; local state is per-machine) ---
 .superpowers/
+
+# --- Claude tooling artifacts (worktrees, caches, etc.) ---
+.claude/
