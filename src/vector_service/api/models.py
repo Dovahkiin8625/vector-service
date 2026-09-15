@@ -201,31 +201,31 @@ def get_model(model_id: str, request: Request):
 # ``Embedder(settings: Settings)``. All other families take a nested
 # block (``image_embedding``, ``multimodal_embedding``, ``reranker``).
 # Order is the priority for ``_resolve_family`` — embedder beats
-# reranker when the same id is registered in both.
-_FAMILY_TABLE: dict[str, tuple[str, str, str | None, Callable[[str], Any], str]] = {
+# reranker when the same id is registered in both. Each entry is
+# ``(slot_attr, settings_attr, class_lookup, state_attr)``: the
+# slot attribute on ``app.state``, the nested settings block (or
+# ``None`` to pass the whole ``Settings``), the registry-lookup
+# callable, and the legacy ``app.state.<family>`` mirror name.
+_FAMILY_TABLE: dict[str, tuple[str, str | None, Callable[[str], Any], str]] = {
     "embedder": (
-        "EMBEDDER_REGISTRY",
         "_slot_embedder",
         None,
         get_embedder_class,
         "embedder",
     ),
     "image_embedder": (
-        "IMAGE_EMBEDDER_REGISTRY",
         "_slot_image",
         "image_embedding",
         get_image_embedder_class,
         "image_embedder",
     ),
     "multimodal_embedder": (
-        "MULTIMODAL_EMBEDDER_REGISTRY",
         "_slot_multimodal",
         "multimodal_embedding",
         get_multimodal_embedder_class,
         "multimodal_embedder",
     ),
     "reranker": (
-        "RERANKER_REGISTRY",
         "_slot_reranker",
         "reranker",
         get_reranker_class,
@@ -273,7 +273,7 @@ def _resolve_family(request: Request, model_id: str) -> tuple[str, ModelSlot, ty
     registries = _family_registries()
     for family in ("embedder", "image_embedder", "multimodal_embedder", "reranker"):
         if model_id in registries[family]:
-            _, slot_attr, settings_attr, class_lookup, state_attr = _FAMILY_TABLE[family]
+            slot_attr, settings_attr, class_lookup, state_attr = _FAMILY_TABLE[family]
             cls = class_lookup(model_id)
             slot = getattr(request.app.state, slot_attr, None)
             if slot is None:

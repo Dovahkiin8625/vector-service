@@ -114,8 +114,25 @@ async def create_embeddings(body: EmbeddingRequest, request: Request):
     loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
+    # Per-request inference timeout. We use ``getattr`` with a default
+    # so legacy ``_FakeSettings`` test doubles that pre-date the field
+    # continue to work without modification.
+    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
     try:
-        vectors = await loop.run_in_executor(None, embedder.embed_documents, texts)
+        try:
+            vectors = await asyncio.wait_for(
+                loop.run_in_executor(None, embedder.embed_documents, texts),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            status = "timeout"
+            # Reuse ``EmbedderError`` so the existing 503 mapping still
+            # triggers; we surface the timeout via the message rather
+            # than a brand-new code so clients can rely on the
+            # established ``embedder_unavailable`` contract.
+            raise EmbedderError(
+                f"embedder {body.model!r} did not finish within {timeout_s}s"
+            )
     except (EmbedderError, ModelNotLoaded) as e:
         status = "error"
         raise HTTPException(status_code=503, detail={"error": {

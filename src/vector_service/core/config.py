@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     embedding_max_texts_per_request: int = Field(256, ge=1)
     embedding_max_chars_per_text: int = Field(8192, ge=1)
     embedding_hf_repo: str = "BAAI/bge-m3"
+    # Kept for backwards compatibility with external configuration files
+    # and the BGE-M3 design plan. Currently unused — BGE-M3 has no
+    # ONNX code path; see ``bge_m3.py`` for why the CPU backend stays
+    # on PyTorch int8. Documented but not read.
     embedding_onnx_repo: str = "BAAI/bge-m3-onnx"
     embedding_ms_repo: str = "BAAI/bge-m3"
     # 权重下载来源：huggingface | modelscope

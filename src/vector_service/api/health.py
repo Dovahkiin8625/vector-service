@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from vector_service.core.metrics import get_content_type, render_metrics
 
@@ -102,16 +102,15 @@ async def readyz(request: Request):
         status = "degraded"
         code = 503
 
-    body = (
-        '{"status":"' + status
-        + '","store":"' + ("ok" if store_ok else "down")
-        + '","embedder":"' + embedder_state
-        + '","image_embedder":"' + image_state
-        + '","multimodal_embedder":"' + mm_state
-        + '","reranker":"' + reranker_state
-        + '"}'
-    )
-    return Response(content=body, status_code=code, media_type="application/json")
+    body = {
+        "status": status,
+        "store": "ok" if store_ok else "down",
+        "embedder": embedder_state,
+        "image_embedder": image_state,
+        "multimodal_embedder": mm_state,
+        "reranker": reranker_state,
+    }
+    return JSONResponse(content=body, status_code=code)
 
 
 @router.get("/metrics", response_class=PlainTextResponse)

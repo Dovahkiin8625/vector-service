@@ -90,27 +90,25 @@ async def rerank(req: RerankRequest, request: Request) -> RerankResponse:
 
     # ---- inference -------------------------------------------------
     RERANK_REQUESTS_TOTAL.labels(model, "received").inc()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
+    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
     try:
-        hits = await loop.run_in_executor(
-            None, reranker.rerank, req.query, req.documents, top_n
-        )
+        try:
+            hits = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, reranker.rerank, req.query, req.documents, top_n
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            RERANK_REQUESTS_TOTAL.labels(model, "timeout").inc()
+            raise RerankerError(
+                f"reranker {model!r} did not finish within {timeout_s}s"
+            )
     except RerankerError:
         RERANK_REQUESTS_TOTAL.labels(model, "error").inc()
         raise
-    except Exception as exc:  # defensive wrap
-        RERANK_REQUESTS_TOTAL.labels(model, "error").inc()
-        log.warning(
-            "rerank_failed",
-            model=model,
-            n_docs=n_docs,
-            top_n=top_n,
-            error_type=type(exc).__name__,
-            error=str(exc),
-            request_id=request_id_var.get(),
-        )
-        raise RerankerError(str(exc) or "rerank failed") from exc
 
     dt = time.perf_counter() - t0
     RERANK_DURATION_SECONDS.labels(model).observe(dt)

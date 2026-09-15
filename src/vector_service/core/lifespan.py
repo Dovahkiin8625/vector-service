@@ -10,8 +10,6 @@ from vector_service.core.errors import (
     ImageEmbedderError,
     ModelNotLoaded,
     ModelNotLoadedForImages,
-    RerankerError,
-    RerankerNotLoaded,
 )
 from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
@@ -97,7 +95,10 @@ async def lifespan(app: "FastAPI"):
     # loads so the hot-reload routes always see the slots. With the
     # default ``auto_load=false`` for every family the slots start
     # empty and ``app.state.<family>`` stays ``None`` until an
-    # operator calls ``POST /v1/models/{id}/load``.
+    # operator calls ``POST /v1/models/{id}/load``. The ``None`` mirror
+    # attributes below are explicit so legacy fixtures (and routes
+    # that still read ``app.state.<family>``) see a deterministic
+    # attribute instead of raising ``AttributeError``.
     attach_default_slots(app, settings=settings)
     app.state.embedder = None
     app.state.reranker = None
@@ -135,20 +136,22 @@ async def lifespan(app: "FastAPI"):
             )
 
     # ---- reranker (opt-in eager load) ---------------------------
-    # Missing/invalid VS_RERANKER__BACKEND is treated as a startup
-    # error: re-raise so lifespan exits non-zero ONLY when auto_load
-    # is on (without auto_load the reranker simply isn't built).
+    # All four model families share the same fail-open contract: a
+    # failed eager load is logged + surfaced via /readyz but does NOT
+    # kill the process. K8s can keep the pod in service and route
+    # around it via /readyz, which is strictly better than exiting
+    # with a non-zero code for one of four backends.
     if settings.reranker.auto_load:
         try:
             reranker = build_reranker(settings)
             reranker.load()
-        except (RerankerNotLoaded, RerankerError, KeyError) as exc:
+        except Exception as exc:  # noqa: BLE001 — fail-open, all families share policy
             log.error(
                 "reranker_load_failed",
                 backend=settings.reranker.backend,
                 error=str(exc),
+                exception_type=type(exc).__name__,
             )
-            raise
         else:
             app.state.reranker = reranker
             app.state._slot_reranker.set_instance(reranker)
@@ -208,5 +211,33 @@ async def lifespan(app: "FastAPI"):
     try:
         yield
     finally:
-        store.close()
+        # Always release any model instances we managed to construct
+        # before shutdown — covers both a clean shutdown (yield returns)
+        # and a startup failure where one of the four families raised
+        # before the others had a chance to load. Without this, an
+        # early reranker raise after the text embedder was already on
+        # GPU would leak GPU memory until process death.
+        for slot_attr in (
+            "_slot_embedder",
+            "_slot_reranker",
+            "_slot_image",
+            "_slot_multimodal",
+        ):
+            slot = getattr(app.state, slot_attr, None)
+            if slot is None:
+                continue
+            try:
+                if slot.get() is not None:
+                    slot.unload()
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                log.warning(
+                    "shutdown_unload_failed",
+                    kind=slot.kind,
+                    error=str(exc),
+                    exception_type=type(exc).__name__,
+                )
+        try:
+            store.close()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("store_close_failed", error=str(exc))
         log.info("shutdown")
