@@ -7,7 +7,7 @@ import pytest
 import torch
 from PIL import Image as _PILImage
 
-from vector_service.core.errors import ModelNotLoadedForImages
+from vector_service.core.errors import ModelNotLoadedForMultimodal
 from vector_service.embeddings.image_base import ImageInput
 from vector_service.embeddings.multimodal_base import MultimodalEmbedder
 
@@ -195,7 +195,7 @@ def test_chinese_clip_load_propagates_model_not_loaded(monkeypatch, tmp_path):
 
     s = _FakeMultimodalSettings(model_dir=str(tmp_path))
     e = ChineseCLIPMultimodalEmbedder(settings=s)  # type: ignore[arg-type]
-    with pytest.raises(ModelNotLoadedForImages):
+    with pytest.raises(ModelNotLoadedForMultimodal):
         e.load()
 
 

@@ -107,3 +107,13 @@ class MultimodalEmbedderError(VectorServiceError):
     separately so a missing multimodal model never looks like a text or
     image embedder failure to dispatchers.
     """
+
+
+class ModelNotLoadedForMultimodal(MultimodalEmbedderError):
+    """Multimodal model failed to load at startup or is no longer available.
+
+    Sibling of ``ModelNotLoadedForImages``. The multimodal embedder shares
+    the image decoder pipeline but has its own weight file + lifecycle, so
+    a missing multimodal model must not look like an image-embedder
+    failure to dispatchers or HTTP envelopes.
+    """

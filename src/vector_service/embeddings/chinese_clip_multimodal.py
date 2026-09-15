@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from vector_service.core.errors import ModelNotLoadedForImages
+from vector_service.core.errors import ModelNotLoadedForMultimodal
 from vector_service.embeddings import _common
 from vector_service.embeddings.image_base import ImageInput
 from vector_service.embeddings.multimodal_base import MultimodalEmbedder
@@ -99,7 +99,7 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
         self._ensure_model_dir()
 
         if not _common.dir_has_model(self._model_dir) and not self._settings.auto_download:
-            raise ModelNotLoadedForImages(
+            raise ModelNotLoadedForMultimodal(
                 f"model dir {self._model_dir} has no Chinese-CLIP weights and auto_download is off"
             )
 
@@ -109,7 +109,7 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
             self._processor = processor
             self._tokenizer = tokenizer
         except Exception as e:
-            raise ModelNotLoadedForImages(
+            raise ModelNotLoadedForMultimodal(
                 f"failed to load Chinese-CLIP ViT-B/16: {e}"
             ) from e
 
@@ -140,7 +140,7 @@ class ChineseCLIPMultimodalEmbedder(MultimodalEmbedder):
             return
         repo = self._settings.hf_repo
         if not repo:
-            raise ModelNotLoadedForImages(
+            raise ModelNotLoadedForMultimodal(
                 "no hf_repo configured and model dir is empty"
             )
         from huggingface_hub import snapshot_download  # lazy
