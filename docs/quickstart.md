@@ -91,4 +91,5 @@ vector-service
 - API 用法：[api.md](api.md)
 - 嵌入/重排子系统详细参数与错误码：[embedding-subsystems.md](embedding-subsystems.md)
 - 模型热加载与生命周期：[model-lifecycle.md](model-lifecycle.md)
+- 知识库摄取管线（Docling → 分片 → 嵌入 → 写入）：[ingest-pipeline.md](ingest-pipeline.md)
 - 跑测试：[testing.md](testing.md)

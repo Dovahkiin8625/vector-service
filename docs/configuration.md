@@ -12,8 +12,22 @@
 | `VS_IMAGE_EMBEDDING__*` | 图像嵌入（OpenCLIP） |
 | `VS_MULTIMODAL_EMBEDDING__*` | 跨模态嵌入（Chinese-CLIP） |
 | `VS_RERANKER__*` | 重排序（BGE-Reranker-v2-M3） |
+| `VS_PARSER__*` | 文档解析（Docling） |
+| `VS_CHUNKING__*` | 文本分片（RecursiveChunker） |
 | `VS_MILVUS_*` | 向量库连接 |
 | `VS_VECTOR_STORE_BACKEND` | 向量库后端选择（目前只支持 `milvus`） |
+
+## 解析器与分片器
+
+| 变量 | 默认 | 含义 |
+|------|------|------|
+| `VS_PARSER__AUTO_LOAD` | `false` | 启动时自动加载 Docling converter |
+| `VS_PARSER__AUTO_DOWNLOAD` | `true` | 首次使用时按需下载 Docling 模型 |
+| `VS_PARSER__MAX_FILE_SIZE_MB` | `100` | `/v1/parse` 与 `/v1/ingest` 单文件上限 |
+| `VS_CHUNKING__DEFAULT_CHUNK_SIZE` | `500` | 默认 chunk token 数 |
+| `VS_CHUNKING__DEFAULT_CHUNK_OVERLAP` | `75` | 默认 chunk 重叠 token 数 |
+
+> Docling 体积较大（PyTorch + 模型权重），建议按需懒加载（`AUTO_LOAD=false`），首次调用 `/v1/parse` 时再加载。
 
 ## 关键开关速查
 
@@ -26,10 +40,12 @@
 | `VS_IMAGE_EMBEDDING__AUTO_LOAD` | `false` | 进程启动时是否自动加载图像嵌入器 |
 | `VS_MULTIMODAL_EMBEDDING__AUTO_LOAD` | `false` | 进程启动时是否自动加载跨模态嵌入器 |
 | `VS_RERANKER__AUTO_LOAD` | `false` | 进程启动时是否自动加载 reranker |
+| `VS_PARSER__AUTO_LOAD` | `false` | 进程启动时是否自动加载 Docling converter |
 | `VS_EMBEDDING_AUTO_DOWNLOAD` | `true` | 首次启动自动下载模型权重 |
 | `VS_IMAGE_EMBEDDING__AUTO_DOWNLOAD` | `true` | 首次启动自动下载 OpenCLIP 权重 |
 | `VS_MULTIMODAL_EMBEDDING__AUTO_DOWNLOAD` | `true` | 首次启动自动下载 Chinese-CLIP 权重 |
 | `VS_RERANKER__AUTO_DOWNLOAD` | `true` | 首次启动自动下载 BGE-Reranker 权重 |
+| `VS_PARSER__AUTO_DOWNLOAD` | `true` | 首次使用 Docling 时按需下载 |
 
 > **生产默认行为**：所有模型族 `AUTO_LOAD=false`，启动时不构造、不加载。详见 [model-lifecycle.md](model-lifecycle.md)。
 

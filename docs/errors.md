@@ -43,4 +43,9 @@
 | `conflict_loaded` | 同族已加载了不同 id | 409 |
 | `model_load_failed` | load 路由的 factory 或实例 `load()` 抛异常 | 503 |
 | `not_loaded` | 对一个空 slot 做 unload | 409 |
+| `unsupported_mime` | `/v1/parse` 或 `/v1/ingest` 上传了不支持的 MIME | 415 |
+| `file_too_large` | 上传文件超过 `VS_PARSER__MAX_FILE_SIZE_MB` | 413 |
+| `parse_failed` | Docling 解析失败 | 500 |
+| `parser_unavailable` | Docling converter 未就绪 / 推理失败 | 503 |
+| `chunk_failed` | 分片器内部错误 | 500 |
 | `internal` | 未捕获异常 | 500 |

@@ -2,7 +2,7 @@
 
 所有端点的请求/响应模型用 Pydantic 校验，定义在 `src/vector_service/schemas/`。非 2xx 响应统一信封见 [errors.md](errors.md)。
 
-> 各推理端点的详细参数、配置项和错误码见 [embedding-subsystems.md](embedding-subsystems.md)；向量库端点的 schema/upsert/search 规则见 [vector-store.md](vector-store.md)；模型热加载/卸载端点见 [model-lifecycle.md](model-lifecycle.md)。
+> 各推理端点的详细参数、配置项和错误码见 [embedding-subsystems.md](embedding-subsystems.md)；向量库端点的 schema/upsert/search 规则见 [vector-store.md](vector-store.md)；模型热加载/卸载端点见 [model-lifecycle.md](model-lifecycle.md)；摄取管线（Docling → 分片 → 嵌入 → 写入）见 [ingest-pipeline.md](ingest-pipeline.md)。
 
 ## Health / Metrics
 
@@ -67,6 +67,16 @@
 |------|------|------|
 | `GET` | `/backend/raw` | 返回当前 backend 名称与 URI |
 | `POST` | `/backend/raw/call` | debug-only 透传调底层 store 方法（`VS_DEBUG=true` 时启用，否则 404） |
+
+## 摄取管线（知识库）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/parse` | 文件 → Markdown + 元数据 |
+| `POST` | `/v1/chunk` | Markdown → chunks（含 token 数 / 章节 / 页码） |
+| `POST` | `/v1/ingest` | 一体化：文件 → 解析 → 分片 → 嵌入 → Milvus（失败原子回滚） |
+
+请求 / 响应 / collection schema 详见 [ingest-pipeline.md](ingest-pipeline.md)。
 
 ## 调用示例
 

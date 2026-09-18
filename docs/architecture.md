@@ -8,15 +8,19 @@ client ──HTTP──▶ vector-service ──gRPC──▶ Milvus server
                   ├─ OpenCLIP 图像嵌入
                   ├─ Chinese-CLIP 跨模态嵌入
                   ├─ BGE-Reranker 重排序
+                  ├─ Docling 文档解析
+                  ├─ 递归 markdown 分片
                   └─ Milvus store 客户端（pymilvus 直连）
 ```
 
-`vector-service` 自己的职责有四块：
+`vector-service` 自己的职责有五块：
 
 1. **文本嵌入**：用 BGE-M3 把文本变成 `list[float]`。
 2. **图像嵌入**：用 OpenCLIP 把 base64 图片变成 `list[float]`。
 3. **跨模态嵌入**：用 Chinese-CLIP 同时支持中文文本与图片，输出同一空间向量。
 4. **向量库 CRUD**：通过 `pymilvus` 直接对 Milvus 做 database / collection / 向量管理。
+5. **知识库摄取管线**（Docling → 分片 → 嵌入 → 写入）：把任意文档一键转成可检索的 chunks。
+   详见 [ingest-pipeline.md](ingest-pipeline.md)。
 
 ## 源码结构
 
@@ -61,12 +65,19 @@ vector-service/
 │   │   ├── base.py             # Reranker ABC
 │   │   ├── cross_encoder.py    # BGE-Reranker-v2-M3
 │   │   └── registry.py         # RERANKER_REGISTRY
+│   ├── parsers/                # 文档解析（Docling + passthrough）
+│   │   ├── base.py             # DocumentParser ABC
+│   │   ├── docling_parser.py   # Docling 单例：PDF/DOCX/PPTX/HTML
+│   │   └── markdown_parser.py  # Markdown/Text passthrough
+│   ├── chunking/               # 文本分片
+│   │   └── recursive_chunker.py  # 递归 markdown-aware 分片器
 │   ├── schemas/                # Pydantic 请求/响应模型
 │   │   ├── openai.py           # Embedding / EmbeddingResponse / Model
 │   │   ├── image_embeddings.py
 │   │   ├── multimodal_embeddings.py
 │   │   ├── rerank.py
 │   │   ├── management.py       # database/collection/vector CRUD
+│   │   ├── ingest.py           # /v1/parse · /v1/chunk · /v1/ingest
 │   │   └── errors.py           # ErrorEnvelope
 │   └── stores/                 # 向量库抽象与实现
 │       ├── base.py             # VectorStore ABC
@@ -84,6 +95,7 @@ vector-service/
 │   ├── api.md
 │   ├── embedding-subsystems.md
 │   ├── vector-store.md
+│   ├── ingest-pipeline.md
 │   ├── model-lifecycle.md
 │   ├── errors.md
 │   ├── testing.md
@@ -98,3 +110,4 @@ vector-service/
 - **新增嵌入器**（文本 / 图像 / 跨模态）：在 `embeddings/` 下新建适配文件，并在对应的 `*_registry.py` 注册。详见 [extending.md](extending.md)。
 - **新增 reranker**：在 `rerankers/` 下实现 `Reranker` ABC 并在 `RERANKER_REGISTRY` 注册。
 - **新增向量库后端**：在 `stores/` 下实现 `VectorStore` 接口，并在 `stores/registry.py::build_store()` 加分支。
+- **新增文档解析器**：在 `parsers/` 下实现 `DocumentParser.parse_bytes()`，在 `parsers/base.py` 注册。详见 [extending.md](extending.md)。

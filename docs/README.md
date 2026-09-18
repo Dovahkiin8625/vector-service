@@ -7,15 +7,16 @@
 | 文档 | 内容 |
 |------|------|
 | [quickstart.md](quickstart.md) | 5 分钟跑起来：前置条件、配 `.env`、起 Milvus、装依赖、起服务 |
-| [architecture.md](architecture.md) | 架构定位、四块职责、源码目录树 |
-| [configuration.md](configuration.md) | `VS_*` 环境变量清单与子系统配置块（文本嵌入 / 图像嵌入 / 跨模态嵌入 / reranker / Milvus） |
-| [api.md](api.md) | 全部 HTTP 端点表（Health / Model registry / 嵌入 / 重排 / 向量库管理 / Backend 诊断）+ 调用示例 |
+| [architecture.md](architecture.md) | 架构定位、五块职责、源码目录树 |
+| [configuration.md](configuration.md) | `VS_*` 环境变量清单与子系统配置块（文本嵌入 / 图像嵌入 / 跨模态嵌入 / reranker / Milvus / 解析器 / 分片器） |
+| [api.md](api.md) | 全部 HTTP 端点表（Health / Model registry / 嵌入 / 重排 / 向量库管理 / 摄取管线 / Backend 诊断）+ 调用示例 |
 | [embedding-subsystems.md](embedding-subsystems.md) | 4 个推理子系统的详细文档：BGE-M3 文本嵌入、OpenCLIP 图像嵌入、Chinese-CLIP 跨模态嵌入、BGE-Reranker 重排 |
 | [vector-store.md](vector-store.md) | Milvus 数据库 CRUD：collection schema、upsert/search 规则、`/backend/raw` 诊断 |
+| [ingest-pipeline.md](ingest-pipeline.md) | Docling 解析 + 递归 markdown 分片 + 一体化摄取（`/v1/parse` · `/v1/chunk` · `/v1/ingest`）|
 | [model-lifecycle.md](model-lifecycle.md) | 模型热加载 / 热卸载：默认不加载策略、`load` / `unload` 端点、dashboard 面板、错误码、实现细节 |
 | [errors.md](errors.md) | 统一错误信封结构 + 错误码清单 |
 | [testing.md](testing.md) | 单元测试与 contract 测试、运行命令、目录组织 |
-| [extending.md](extending.md) | 如何新增文本嵌入器 / 图像嵌入器 / 跨模态嵌入器 / reranker / 向量库后端 |
+| [extending.md](extending.md) | 如何新增文本嵌入器 / 图像嵌入器 / 跨模态嵌入器 / reranker / 向量库后端 / 解析器 |
 
 ## 截图
 
