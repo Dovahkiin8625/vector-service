@@ -868,6 +868,27 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 8px; }
 
+/* ============ Knowledge Base panels ============
+   parse / chunk / ingest 面板共享 .response 样式；额外需要细节块。 */
+.kb-result {
+  display: flex; flex-wrap: wrap; gap: 18px;
+  padding: 12px 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-bottom: 8px;
+}
+.kb-result .stat { display: flex; flex-direction: column; gap: 2px; min-width: 80px; }
+.kb-result .stat .key {
+  font-family: var(--mono); font-size: 11px;
+  color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.kb-result .stat .val {
+  font-family: var(--mono); font-size: 18px; font-weight: 600;
+  color: var(--text); font-feature-settings: "tnum" 1;
+}
+.kb-result .stat .val.accent { color: var(--accent); }
+
 /* ============ Lists ============ */
 .list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
 .list-item {
@@ -1489,6 +1510,44 @@ DASHBOARD_HTML_BODY = """
               <line x1="10" y1="10" x2="13" y2="13"/>
             </svg>
             <span>检索</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="nav-group" data-group="kb">
+        <div class="nav-group-label">
+          <span>知识库</span>
+          <svg class="chev" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="3,5 6,8 9,5"/>
+          </svg>
+        </div>
+        <div class="nav-items">
+          <div class="nav-item" data-view="parse">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 2h7l3 3v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/>
+              <path d="M10 2v3h3"/>
+              <line x1="5" y1="9" x2="11" y2="9"/>
+              <line x1="5" y1="12" x2="11" y2="12"/>
+            </svg>
+            <span>文档解析</span>
+          </div>
+          <div class="nav-item" data-view="chunk">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="3" width="12" height="2.5" rx="0.5"/>
+              <rect x="2" y="7" width="12" height="2.5" rx="0.5"/>
+              <rect x="2" y="11" width="12" height="2.5" rx="0.5"/>
+              <line x1="4" y1="4.25" x2="4" y2="4.25"/>
+              <line x1="4" y1="8.25" x2="4" y2="8.25"/>
+              <line x1="4" y1="12.25" x2="4" y2="12.25"/>
+            </svg>
+            <span>文本分片</span>
+          </div>
+          <div class="nav-item" data-view="ingest">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 2v8M5 7l3 3 3-3"/>
+              <path d="M2 13h12"/>
+            </svg>
+            <span>一体化摄取</span>
           </div>
         </div>
       </div>
@@ -2236,6 +2295,169 @@ DASHBOARD_HTML_BODY = """
         </div>
       </div>
 
+      <!-- ===================== 文档解析 ===================== -->
+      <div class="panel" id="panel-parse">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">文档解析 <span class="pill accent">POST /v1/parse</span></h3>
+            <span class="section-sub">PDF / DOCX / PPTX / HTML / Markdown / TXT → Markdown + 元数据</span>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-parse-refresh-status">检查解析器状态</button>
+          </div>
+          <div class="empty hint" id="parse-status-hint" style="margin-top:8px;">
+            解析器懒加载：首次调用 /v1/parse 会自动加载 Docling 模型（首次较慢）。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">上传文件解析</h3>
+          </div>
+          <div class="row">
+            <label>选择文件 <span class="hint">支持 application/pdf, .docx, .pptx, text/markdown, text/plain, text/html</span></label>
+            <input type="file" id="parse-file" accept=".pdf,.docx,.pptx,.md,.markdown,.txt,.html,.htm,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/markdown,text/plain,text/html" />
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-parse">解析为 Markdown</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">解析结果</h3>
+          </div>
+          <div id="parse-result"><div class="empty">尚无结果。点击"解析为 Markdown"查看响应。</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">Markdown 预览</h3>
+          </div>
+          <pre class="code-pane" id="parse-markdown" style="max-height:520px;">尚无内容。</pre>
+        </div>
+      </div>
+
+      <!-- ===================== 文本分片 ===================== -->
+      <div class="panel" id="panel-chunk">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">文本分片 <span class="pill accent">POST /v1/chunk</span></h3>
+            <span class="section-sub">递归 markdown-aware 分片：header → 段落 → 句子 → 词，code block 视为原子</span>
+          </div>
+
+          <div class="row split">
+            <div class="row">
+              <label>chunk_size <span class="hint">tokens，默认 500</span></label>
+              <input type="number" id="chunk-size" min="64" max="4096" value="500" />
+            </div>
+            <div class="row">
+              <label>chunk_overlap <span class="hint">tokens，必须 < chunk_size，默认 75</span></label>
+              <input type="number" id="chunk-overlap" min="0" max="512" value="75" />
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Markdown 原文</label>
+            <textarea id="chunk-md" rows="10" placeholder="# 一级标题
+这是第一段文字...
+
+## 二级标题
+- 列表项
+- 列表项
+
+```python
+def hello(): pass
+```"></textarea>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="btn-chunk">分片</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">分片结果 <span class="pill" id="chunk-summary">—</span></h3>
+          </div>
+          <div id="chunk-results"><div class="empty">尚无结果。点击"分片"查看响应。</div></div>
+        </div>
+
+        <div class="empty hint">分片使用 tiktoken cl100k_base 计数；code block 内不分片（视为原子单元）；分片间带 chunk_overlap tokens 重叠。</div>
+      </div>
+
+      <!-- ===================== 一体化摄取 ===================== -->
+      <div class="panel" id="panel-ingest">
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">一体化摄取 <span class="pill accent">POST /v1/ingest</span></h3>
+            <span class="section-sub">上传文件 → Docling 解析 → 递归分片 → BGE-M3 嵌入 → Milvus 写入（失败原子回滚）</span>
+          </div>
+          <div class="actions">
+            <button class="btn primary" id="btn-ingest-refresh">刷新元数据</button>
+          </div>
+          <div class="empty hint" id="ingest-meta-hint" style="margin-top:8px;">
+            目标 database + collection 必须已存在（用左侧"数据库"/"集合"页创建）；embed_model 须已加载。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">上传并摄取</h3>
+          </div>
+          <div class="row split">
+            <div class="row">
+              <label>database</label>
+              <select id="ingest-db"></select>
+            </div>
+            <div class="row">
+              <label>collection</label>
+              <select id="ingest-coll"></select>
+            </div>
+          </div>
+          <div class="row split three">
+            <div class="row">
+              <label>chunk_size</label>
+              <input type="number" id="ingest-size" min="64" max="4096" value="500" />
+            </div>
+            <div class="row">
+              <label>chunk_overlap</label>
+              <input type="number" id="ingest-overlap" min="0" max="512" value="75" />
+            </div>
+            <div class="row">
+              <label>embed_model</label>
+              <select id="ingest-model"></select>
+            </div>
+          </div>
+          <div class="row">
+            <label>文件</label>
+            <input type="file" id="ingest-file" accept=".pdf,.docx,.pptx,.md,.markdown,.txt,.html,.htm" />
+          </div>
+          <details class="collapsible">
+            <summary>附加 metadata（可选，会写入每行 fields）</summary>
+            <div class="body">
+              <div class="row">
+                <label>metadata JSON <span class="hint">如 <code>{"filename":"a.pdf","title":"文档标题"}</code>；仅 title/author/filename/page_count 被接受为 scalar</span></label>
+                <textarea id="ingest-metadata" rows="3" placeholder='{"filename": "demo.pdf", "title": "示例文档"}'></textarea>
+              </div>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button class="btn primary" id="btn-ingest-upload">上传并摄取</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head">
+            <h3 class="section-title">摄取结果</h3>
+          </div>
+          <div id="ingest-result"><div class="empty">尚无结果。上传文件并点击"上传并摄取"。</div></div>
+        </div>
+
+        <div class="empty hint">上传是大文件 + Docling 解析 + 嵌入，可能耗时数十秒；底部报文面板会显示完整 HTTP 通信。</div>
+      </div>
+
       <!-- ===================== 重排 ===================== -->
       <div class="panel" id="panel-rerank">
         <div class="section">
@@ -2677,6 +2899,9 @@ function activateView(view) {
     'collections': { cat: '向量库', sub: '集合' },
     'vectors': { cat: '向量库', sub: '向量' },
     'search': { cat: '向量库', sub: '检索' },
+    'parse': { cat: '知识库', sub: '文档解析' },
+    'chunk': { cat: '知识库', sub: '文本分片' },
+    'ingest': { cat: '知识库', sub: '一体化摄取' },
   };
   var l = labels[view] || { cat: '模型', sub: '模型列表' };
   $('#crumb-cat').textContent = l.cat;
@@ -2700,6 +2925,9 @@ function activateView(view) {
   else if (view === 'collections') { refreshDatabases().then(refreshCollectionsInActive); }
   else if (view === 'vectors') { refreshDatabases().then(refreshCollectionsInActive); }
   else if (view === 'search') { refreshDatabases().then(refreshCollectionsInActive); }
+  else if (view === 'parse') { refreshParseStatus(); }
+  else if (view === 'chunk') { /* static form */ }
+  else if (view === 'ingest') { refreshIngestMeta(); }
 }
 $$('.nav-item').forEach(function (n) {
   n.addEventListener('click', function () { activateView(n.dataset.view); });
@@ -4334,6 +4562,295 @@ function startOverviewPolling() {
 function stopOverviewPolling() {
   if (overviewState.timer) { clearInterval(overviewState.timer); overviewState.timer = null; }
 }
+
+/* ============ Knowledge Base: parse / chunk / ingest ============ */
+
+/* ---- /v1/parse ---- */
+async function refreshParseStatus() {
+  var hint = $('#parse-status-hint');
+  if (!hint) return;
+  hint.innerHTML =
+    '<div class="spinner" style="display:inline-block;vertical-align:middle;"></div> ' +
+    '检查解析器状态...';
+  try {
+    var r = await fetch('/v1/parse', { method: 'OPTIONS' }).catch(function () { return null; });
+    /* OPTIONS may not be wired — fall back to probing system status. */
+    var s = await fetch('/v1/system/status').then(function (x) { return x.json(); });
+    var hasParser = s && s.parser && s.parser.loaded;
+    hint.className = 'empty hint';
+    hint.innerHTML = hasParser
+      ? '<span class="pill success">解析器已加载</span> ' + (s.parser.dimensions ? s.parser.dimensions + ' 维 / ' : '') + '首次调用 /v1/parse 将自动加载 Docling。'
+      : '<span class="pill warn">解析器未加载</span> 首次调用 /v1/parse 会自动加载 Docling（首次约 30-60s）。';
+  } catch (e) {
+    hint.className = 'empty error';
+    hint.innerHTML = '解析器状态检查失败：' + (e.message || e);
+  }
+}
+$('#btn-parse-refresh-status').addEventListener('click', refreshParseStatus);
+
+$('#btn-parse').addEventListener('click', async function () {
+  var f = $('#parse-file').files[0];
+  if (!f) { alert('请选择文件。'); return; }
+  var btn = $('#btn-parse');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 解析中...';
+  var t0 = performance.now();
+  /* Manually craft fetch with multipart so we can keep the traffic panel happy. */
+  var form = new FormData();
+  form.append('file', f, f.name);
+  var resp, text, err;
+  try {
+    resp = await fetch('/v1/parse', { method: 'POST', body: form });
+    text = await resp.text();
+  } catch (e) { err = (e && e.message) || String(e); }
+  var durationMs = Math.round(performance.now() - t0);
+  var payload = null, pretty = text;
+  if (text) {
+    try { payload = JSON.parse(text); pretty = JSON.stringify(payload, null, 2); }
+    catch (_e) { /* leave as text */ }
+  }
+  var entry = {
+    method: 'POST', url: '/v1/parse',
+    req: 'multipart/form-data · file=' + f.name + ' (' + f.size + ' B)',
+    reqHeaders: { 'Content-Type': 'multipart/form-data' },
+    status: resp ? resp.status : 0,
+    durationMs: durationMs, respSize: text ? text.length : 0,
+    respHeaders: {}, resp: pretty, error: err, payload: payload,
+    time: nowTs(),
+  };
+  appendLog(entry); appendTraffic(entry); pulseDimDots();
+  btn.disabled = false; btn.innerHTML = '解析为 Markdown';
+
+  var resultEl = $('#parse-result');
+  var mdEl = $('#parse-markdown');
+  if (err) {
+    resultEl.innerHTML = '<div class="empty error">请求失败：' + escapeHtml(err) + '</div>';
+    mdEl.textContent = '尚无内容。';
+    return;
+  }
+  if (!resp.ok) {
+    resultEl.innerHTML =
+      '<div class="empty error">HTTP ' + resp.status + ' · ' +
+      escapeHtml((payload && payload.error && payload.error.message) || text.slice(0, 200)) +
+      '</div>';
+    mdEl.textContent = '尚无内容。';
+    return;
+  }
+  /* payload: { markdown, metadata: {page_count, title, ...} } */
+  var md = (payload && payload.markdown) || '';
+  var meta = (payload && payload.metadata) || {};
+  var metaRows = Object.keys(meta).map(function (k) {
+    var v = meta[k]; if (v === null || v === undefined) v = '—';
+    return '<tr><th>' + escapeHtml(k) + '</th><td>' + escapeHtml(String(v)) + '</td></tr>';
+  }).join('');
+  resultEl.innerHTML =
+    '<div class="response"><div class="response-head">' +
+      '<span class="title">解析摘要</span>' +
+      '<span class="status-chip ok">' + resp.status + '</span>' +
+      '<span style="color:var(--text-dim);">' + md.length + ' chars · ' + durationMs + ' ms</span>' +
+    '</div>' +
+    '<table class="info-table" style="padding:0 14px;"><tbody>' + metaRows + '</tbody></table>' +
+    '</div>';
+  mdEl.textContent = md || '(空)';
+});
+
+/* ---- /v1/chunk ---- */
+$('#btn-chunk').addEventListener('click', async function () {
+  var md = $('#chunk-md').value;
+  if (!md.trim()) { alert('请填写 Markdown 原文。'); return; }
+  var cs = parseInt($('#chunk-size').value, 10) || 500;
+  var co = parseInt($('#chunk-overlap').value, 10) || 75;
+  if (co >= cs) { alert('chunk_overlap 必须 < chunk_size'); return; }
+  var body = { markdown: md, chunk_size: cs, chunk_overlap: co };
+  var r;
+  try { r = await api('POST', '/v1/chunk', body); }
+  catch (_e) { return; }
+  var payload = (r && r.payload) || {};
+  var chunks = payload.chunks || [];
+  var summary = $('#chunk-summary');
+  var totalTokens = chunks.reduce(function (s, c) { return s + (c.token_count || 0); }, 0);
+  if (summary) summary.textContent = chunks.length + ' chunks · ' + totalTokens + ' tokens';
+  var root = $('#chunk-results');
+  if (!chunks.length) {
+    root.innerHTML = '<div class="empty">响应中无 chunks 数组。</div>';
+    return;
+  }
+  root.innerHTML = chunks.map(function (c) {
+    return '<details class="collapsible" style="margin-bottom:6px;">' +
+      '<summary><span class="pill accent">#' + (c.chunk_index + 1) + '</span> ' +
+        '<span>' + escapeHtml(c.section_header || '(无章节)') + '</span>' +
+        '<span style="margin-left:auto;color:var(--text-muted);">' +
+          (c.token_count || 0) + ' tok' +
+          (c.page_number != null ? ' · p.' + c.page_number : '') +
+        '</span>' +
+      '</summary>' +
+      '<div class="body"><pre class="code-pane" style="max-height:240px;">' +
+        escapeHtml(c.text || '') +
+      '</pre></div>' +
+    '</details>';
+  }).join('');
+});
+
+/* ---- /v1/ingest ---- */
+async function refreshIngestMeta() {
+  var dbs = [];
+  try { var r = await api('GET', '/v1/databases'); dbs = (r.payload && r.payload.databases) || []; }
+  catch (_e) {}
+  var dbSel = $('#ingest-db');
+  if (dbSel) {
+    var prev = dbSel.value;
+    dbSel.innerHTML = '';
+    if (!dbs.length) {
+      var o = document.createElement('option'); o.value = ''; o.textContent = '（暂无数据库）'; dbSel.appendChild(o);
+    } else {
+      dbs.forEach(function (d) {
+        var o = document.createElement('option'); o.value = d; o.textContent = d; dbSel.appendChild(o);
+      });
+      if (prev && dbs.indexOf(prev) >= 0) dbSel.value = prev;
+    }
+  }
+  await refreshIngestCollections();
+  await refreshIngestModels();
+  var hint = $('#ingest-meta-hint');
+  if (hint) {
+    var model = $('#ingest-model').value;
+    hint.innerHTML = model
+      ? '<span class="pill success">embed_model</span> ' + escapeHtml(model) + ' 已加载；选择 database + collection 即可上传。'
+      : '<span class="pill warn">embed_model 未加载</span> 请先在「模型」页加载 embedder。';
+  }
+}
+async function refreshIngestCollections() {
+  var db = $('#ingest-db').value;
+  var sel = $('#ingest-coll');
+  if (!sel) return;
+  if (!db) { sel.innerHTML = '<option value="">（请先选 database）</option>'; return; }
+  var cols = [];
+  try {
+    var r = await api('GET', '/v1/databases/' + enc(db) + '/collections');
+    cols = (r.payload && (r.payload.collections || r.payload.data || [])) || [];
+  } catch (_e) {}
+  var prev = sel.value;
+  sel.innerHTML = '';
+  if (!cols.length) {
+    var o = document.createElement('option'); o.value = ''; o.textContent = '（暂无集合）'; sel.appendChild(o);
+  } else {
+    cols.forEach(function (c) {
+      var name = (typeof c === 'string') ? c : (c.name || c.collection_name || '');
+      var o = document.createElement('option'); o.value = name; o.textContent = name; sel.appendChild(o);
+    });
+    if (prev && Array.from(sel.options).some(function (o) { return o.value === prev; })) sel.value = prev;
+  }
+}
+async function refreshIngestModels() {
+  var sel = $('#ingest-model');
+  if (!sel) return;
+  var prev = sel.value;
+  sel.innerHTML = '';
+  try {
+    var r = await api('GET', '/v1/models');
+    var data = (r.payload && r.payload.data) || [];
+    var embedders = data.filter(function (m) { return m.type === 'embedder' && m.loaded; });
+    if (!embedders.length) {
+      var o = document.createElement('option'); o.value = ''; o.textContent = '（未加载 embedder）'; sel.appendChild(o);
+    } else {
+      embedders.forEach(function (m) {
+        var o = document.createElement('option'); o.value = m.id; o.textContent = m.id; sel.appendChild(o);
+      });
+      if (prev && Array.from(sel.options).some(function (o) { return o.value === prev; })) sel.value = prev;
+    }
+  } catch (_e) {}
+}
+$('#btn-ingest-refresh').addEventListener('click', refreshIngestMeta);
+$('#ingest-db').addEventListener('change', refreshIngestCollections);
+
+$('#btn-ingest-upload').addEventListener('click', async function () {
+  var f = $('#ingest-file').files[0];
+  if (!f) { alert('请选择文件。'); return; }
+  var db = $('#ingest-db').value;
+  var coll = $('#ingest-coll').value;
+  var model = $('#ingest-model').value;
+  if (!db || !coll || !model) {
+    alert('请确认 database / collection / embed_model 均已选择。');
+    return;
+  }
+  var cs = parseInt($('#ingest-size').value, 10) || 500;
+  var co = parseInt($('#ingest-overlap').value, 10) || 75;
+  var metaRaw = $('#ingest-metadata').value.trim();
+  var form = new FormData();
+  form.append('file', f, f.name);
+  form.append('database', db);
+  form.append('collection', coll);
+  form.append('chunk_size', String(cs));
+  form.append('chunk_overlap', String(co));
+  form.append('embed_model', model);
+  if (metaRaw) form.append('metadata', metaRaw);
+
+  var btn = $('#btn-ingest-upload');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 摄取中...';
+  var resultEl = $('#ingest-result');
+  resultEl.innerHTML =
+    '<div class="empty"><div class="spinner" style="display:inline-block;vertical-align:middle;"></div> ' +
+    '正在解析 + 分片 + 嵌入 + 写入 Milvus（首次 Docling 加载较慢，请耐心等待）...</div>';
+  var t0 = performance.now();
+  var resp, text, err;
+  try {
+    resp = await fetch('/v1/ingest', { method: 'POST', body: form });
+    text = await resp.text();
+  } catch (e) { err = (e && e.message) || String(e); }
+  var durationMs = Math.round(performance.now() - t0);
+  var payload = null, pretty = text;
+  if (text) {
+    try { payload = JSON.parse(text); pretty = JSON.stringify(payload, null, 2); }
+    catch (_e) { /* leave as text */ }
+  }
+  var reqSummary = 'multipart/form-data · file=' + f.name + ' (' + f.size + ' B)' +
+    ' · database=' + db + ' · collection=' + coll + ' · ' +
+    'chunk_size=' + cs + ' · chunk_overlap=' + co + ' · embed_model=' + model +
+    (metaRaw ? ' · metadata=' + metaRaw : '');
+  var entry = {
+    method: 'POST', url: '/v1/ingest', req: reqSummary,
+    reqHeaders: { 'Content-Type': 'multipart/form-data' },
+    status: resp ? resp.status : 0,
+    durationMs: durationMs, respSize: text ? text.length : 0,
+    respHeaders: {}, resp: pretty, error: err, payload: payload,
+    time: nowTs(),
+  };
+  appendLog(entry); appendTraffic(entry); pulseDimDots();
+  btn.disabled = false; btn.innerHTML = '上传并摄取';
+
+  if (err) {
+    resultEl.innerHTML = '<div class="empty error">请求失败：' + escapeHtml(err) + '</div>';
+    return;
+  }
+  if (!resp.ok) {
+    resultEl.innerHTML =
+      '<div class="empty error">HTTP ' + resp.status + ' · ' +
+      escapeHtml((payload && payload.error && payload.error.message) || text.slice(0, 200)) +
+      '</div>';
+    return;
+  }
+  /* payload: { doc_id, chunk_count, page_count, tokens_used? } */
+  var rows = [
+    ['doc_id', payload.doc_id],
+    ['chunk_count', payload.chunk_count],
+    ['page_count', payload.page_count != null ? payload.page_count : '—'],
+    ['tokens_used', payload.tokens_used != null ? payload.tokens_used : '—'],
+  ].map(function (r) {
+    return '<tr><th>' + escapeHtml(r[0]) + '</th><td>' + escapeHtml(String(r[1])) + '</td></tr>';
+  }).join('');
+  resultEl.innerHTML =
+    '<div class="response"><div class="response-head">' +
+      '<span class="title">摄取成功</span>' +
+      '<span class="status-chip ok">' + resp.status + '</span>' +
+      '<span style="color:var(--text-dim);">' + durationMs + ' ms</span>' +
+    '</div>' +
+    '<table class="info-table" style="padding:0 14px;"><tbody>' + rows + '</tbody></table>' +
+    '</div>' +
+    '<div class="empty hint" style="margin-top:8px;">' +
+      '现在可以在「向量库 → 集合」或「向量库 → 检索」页面以 <code>query_text</code> 方式查询该集合。' +
+    '</div>';
+});
 
 /* ============ Boot ============ */
 refreshDatabases();

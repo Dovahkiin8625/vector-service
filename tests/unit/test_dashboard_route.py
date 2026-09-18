@@ -95,7 +95,7 @@ def test_dashboard_renders_per_model_not_per_family():
     registered model — *not* one per family — and every action button
     must carry a ``data-id`` that matches the model the user sees.
     """
-    from vector_service.api.dashboard import DASHBOARD_HTML, _DASHBOARD_JS_END
+    from vector_service.api.dashboard import _DASHBOARD_JS_END, DASHBOARD_HTML
 
     # Sanity: the JS block is present and ends on the marker.
     assert _DASHBOARD_JS_END in DASHBOARD_HTML, "dashboard JS end marker missing"
@@ -239,3 +239,70 @@ def test_dashboard_exposes_similarity_panels():
     assert "view === 'text-similarity'" in DASHBOARD_HTML, "activateView missing text-similarity branch"
     assert "view === 'image-similarity'" in DASHBOARD_HTML, "activateView missing image-similarity branch"
     assert "view === 'mm-similarity'" in DASHBOARD_HTML, "activateView missing mm-similarity branch"
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base debug panels (parse / chunk / ingest)
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_exposes_knowledge_base_panels():
+    """The three KB endpoints must each have a matching dashboard panel."""
+    from vector_service.api.dashboard import DASHBOARD_HTML
+
+    # nav-items (kb group)
+    assert 'data-view="parse"' in DASHBOARD_HTML, "parse nav-item missing"
+    assert 'data-view="chunk"' in DASHBOARD_HTML, "chunk nav-item missing"
+    assert 'data-view="ingest"' in DASHBOARD_HTML, "ingest nav-item missing"
+    assert ">文档解析<" in DASHBOARD_HTML, "nav label '文档解析' missing"
+    assert ">文本分片<" in DASHBOARD_HTML, "nav label '文本分片' missing"
+    assert ">一体化摄取<" in DASHBOARD_HTML, "nav label '一体化摄取' missing"
+
+    # panel containers
+    assert 'id="panel-parse"' in DASHBOARD_HTML, "panel-parse missing"
+    assert 'id="panel-chunk"' in DASHBOARD_HTML, "panel-chunk missing"
+    assert 'id="panel-ingest"' in DASHBOARD_HTML, "panel-ingest missing"
+
+    # per-panel endpoint pills
+    assert "POST /v1/parse" in DASHBOARD_HTML, "POST /v1/parse pill missing"
+    assert "POST /v1/chunk" in DASHBOARD_HTML, "POST /v1/chunk pill missing"
+    assert "POST /v1/ingest" in DASHBOARD_HTML, "POST /v1/ingest pill missing"
+
+    # /v1/parse form-control ids
+    assert 'id="parse-file"' in DASHBOARD_HTML, "parse-file input missing"
+    assert 'id="btn-parse"' in DASHBOARD_HTML, "btn-parse button missing"
+    assert 'id="parse-result"' in DASHBOARD_HTML, "parse-result container missing"
+    assert 'id="parse-markdown"' in DASHBOARD_HTML, "parse-markdown preview missing"
+
+    # /v1/chunk form-control ids
+    assert 'id="chunk-size"' in DASHBOARD_HTML, "chunk-size input missing"
+    assert 'id="chunk-overlap"' in DASHBOARD_HTML, "chunk-overlap input missing"
+    assert 'id="chunk-md"' in DASHBOARD_HTML, "chunk-md textarea missing"
+    assert 'id="btn-chunk"' in DASHBOARD_HTML, "btn-chunk button missing"
+    assert 'id="chunk-results"' in DASHBOARD_HTML, "chunk-results container missing"
+
+    # /v1/ingest form-control ids
+    assert 'id="ingest-db"' in DASHBOARD_HTML, "ingest-db select missing"
+    assert 'id="ingest-coll"' in DASHBOARD_HTML, "ingest-coll select missing"
+    assert 'id="ingest-size"' in DASHBOARD_HTML, "ingest-size input missing"
+    assert 'id="ingest-overlap"' in DASHBOARD_HTML, "ingest-overlap input missing"
+    assert 'id="ingest-model"' in DASHBOARD_HTML, "ingest-model select missing"
+    assert 'id="ingest-file"' in DASHBOARD_HTML, "ingest-file input missing"
+    assert 'id="ingest-metadata"' in DASHBOARD_HTML, "ingest-metadata textarea missing"
+    assert 'id="btn-ingest-upload"' in DASHBOARD_HTML, "btn-ingest-upload button missing"
+    assert 'id="btn-ingest-refresh"' in DASHBOARD_HTML, "btn-ingest-refresh button missing"
+    assert 'id="ingest-result"' in DASHBOARD_HTML, "ingest-result container missing"
+
+    # JS handlers wired up
+    assert "refreshParseStatus" in DASHBOARD_HTML, "refreshParseStatus handler missing"
+    assert "refreshIngestMeta" in DASHBOARD_HTML, "refreshIngestMeta handler missing"
+    assert "refreshIngestCollections" in DASHBOARD_HTML, "refreshIngestCollections helper missing"
+    assert "refreshIngestModels" in DASHBOARD_HTML, "refreshIngestModels helper missing"
+
+    # activateView labels & refresh branches
+    assert "'parse'" in DASHBOARD_HTML, "labels map missing parse entry"
+    assert "'chunk'" in DASHBOARD_HTML, "labels map missing chunk entry"
+    assert "'ingest'" in DASHBOARD_HTML, "labels map missing ingest entry"
+    assert "view === 'parse'" in DASHBOARD_HTML, "activateView missing parse branch"
+    assert "view === 'chunk'" in DASHBOARD_HTML, "activateView missing chunk branch"
+    assert "view === 'ingest'" in DASHBOARD_HTML, "activateView missing ingest branch"
