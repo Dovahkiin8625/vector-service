@@ -98,6 +98,57 @@ class ImageEmbeddingSettings(BaseSettings):
         return v
 
 
+class ParserSettings(BaseSettings):
+    """Document-parser subsystem configuration.
+
+    Mirrors the pattern used by the embedder / reranker / image /
+    multimodal settings blocks. Env prefix: ``VS_PARSER__`` (double
+    underscore — pydantic-settings nested-field separator).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_PARSER__", extra="ignore")
+
+    #: Eager-load Docling on startup. Default ``False`` so a fresh
+    #: process stays in a zero-state (no Docling weights loaded,
+    #: /v1/parse returns 503 until either ``VS_PARSER__AUTO_LOAD=true``
+    #: is set or an operator triggers a parse that lazily initialises
+    #: the converter). Idempotent and 409-tolerant in the lifespan
+    #: handler so concurrent workers can't trip over each other.
+    auto_load: bool = False
+
+    #: Backend name — currently only ``"docling"`` is registered.
+    #: Kept as a field for forward compatibility (e.g. adding a
+    #: Marker / Unstructured backend later).
+    backend: str = "docling"
+
+    #: Soft cap on per-request upload size. Uploads above this
+    #: yield 413 from ``POST /v1/parse`` and ``POST /v1/ingest``.
+    max_file_size_mb: int = Field(100, ge=1, le=2048)
+
+
+class ChunkingSettings(BaseSettings):
+    """Chunking subsystem configuration.
+
+    The default chunk_size / chunk_overlap match the values
+    documented in the ingest API spec. Env prefix: ``VS_CHUNKING__``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_CHUNKING__", extra="ignore")
+
+    chunk_size: int = Field(500, ge=1, le=8192)
+    chunk_overlap: int = Field(75, ge=0, le=4096)
+
+    @field_validator("chunk_overlap")
+    @classmethod
+    def _overlap_lt_size(cls, v: int, info) -> int:
+        chunk_size = info.data.get("chunk_size", 500)
+        if v >= chunk_size:
+            raise ValueError(
+                f"chunk_overlap ({v}) must be < chunk_size ({chunk_size})"
+            )
+        return v
+
+
 class MultimodalEmbeddingSettings(BaseSettings):
     """Multimodal (text + image) embedding subsystem configuration.
 
@@ -193,6 +244,12 @@ class Settings(BaseSettings):
     multimodal_embedding: MultimodalEmbeddingSettings = Field(
         default_factory=MultimodalEmbeddingSettings
     )
+
+    # Parser (nested; env prefix VS_PARSER__)
+    parser: ParserSettings = Field(default_factory=ParserSettings)
+
+    # Chunking (nested; env prefix VS_CHUNKING__)
+    chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",

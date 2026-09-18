@@ -11,13 +11,16 @@ from fastapi.responses import JSONResponse
 
 from vector_service import __version__
 from vector_service.api.backend import router as backend_router
+from vector_service.api.chunk import router as chunk_router
 from vector_service.api.embeddings import router as embeddings_router
 from vector_service.api.health import router as health_router
 from vector_service.api.image_embeddings import router as image_embeddings_router
+from vector_service.api.ingest import router as ingest_router
 from vector_service.api.multimodal_embeddings import router as multimodal_embeddings_router
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
+from vector_service.api.parse import router as parse_router
 from vector_service.api.rerank import router as rerank_router
 from vector_service.api.similarity import router as similarity_router
 from vector_service.api.system import router as system_router
@@ -346,6 +349,9 @@ def create_app() -> FastAPI:
     app.include_router(image_embeddings_router)
     app.include_router(multimodal_embeddings_router)
     app.include_router(similarity_router)
+    app.include_router(parse_router)
+    app.include_router(chunk_router)
+    app.include_router(ingest_router)
 
     return app
 

@@ -21,6 +21,7 @@ from vector_service.embeddings.multimodal_registry import (
     get_multimodal_embedder_class,
 )
 from vector_service.embeddings.registry import get_embedder_class
+from vector_service.parsers.docling_parser import DoclingParser, ParserUnavailable
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import get_reranker_class
 from vector_service.stores.registry import build_store
@@ -104,6 +105,7 @@ async def lifespan(app: "FastAPI"):
     app.state.reranker = None
     app.state.image_embedder = None
     app.state.multimodal_embedder = None
+    app.state.parser = None
     MODEL_LOADED.labels(kind="embedder").set(0)
     MODEL_LOADED.labels(kind="reranker").set(0)
     MODEL_LOADED.labels(kind="image_embedder").set(0)
@@ -207,6 +209,32 @@ async def lifespan(app: "FastAPI"):
                 device=getattr(multimodal_embedder, "_device", "unknown"),
                 dim=multimodal_embedder.dim,
             )
+
+    # ---- parser (opt-in eager load, fail-open) -----------------
+    # Docling's DocumentConverter is heavy on first use (model
+    # download + layout-pipeline warmup). ``VS_PARSER__AUTO_LOAD=true``
+    # triggers an eager ``load()`` here so the first /v1/parse or
+    # /v1/ingest request doesn't pay the cold-start cost. Failures
+    # are logged + surfaced via /readyz but do NOT kill the process
+    # — the same fail-open contract used by every other family.
+    if settings.parser.auto_load:
+        try:
+            parser = DoclingParser()
+            parser.load()
+        except ParserUnavailable as exc:
+            # Docling is an optional dep; a host that hasn't
+            # installed it can still serve the rest of the API.
+            log.warning("parser_unavailable", error=str(exc))
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            log.error(
+                "parser_load_failed",
+                backend=settings.parser.backend,
+                error=str(exc),
+                exception_type=type(exc).__name__,
+            )
+        else:
+            app.state.parser = parser
+            log.info("parser_loaded", backend=settings.parser.backend)
 
     try:
         yield
