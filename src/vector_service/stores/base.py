@@ -47,6 +47,15 @@ class CollectionInfo:
     primary_field: str = "id"
     vector_field: str = "vector"
     metadata: dict = field(default_factory=dict)
+    # Per-field schema, one entry per scalar + the vector field. Each entry is
+    # a dict shaped like
+    # ``{"name", "dtype", "is_primary", "dim"?, "max_length"?, ...}``; keys
+    # beyond what the consumer needs are silently dropped at the schema
+    # boundary (Pydantic v2 ``extra='ignore'``).
+    fields: list[dict] = field(default_factory=list)
+    # Indexes built on vector fields. Each entry is
+    # ``{"field_name", "metric_type", "index_type", "params": dict}``.
+    indexes: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -140,6 +149,40 @@ class VectorStore(ABC):
     def collection_info(self, database: str, name: str) -> CollectionInfo:
         """Return metadata: at least ``dim``, ``metric``, ``count``."""
 
+    @abstractmethod
+    def create_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+        metric_type: str = "cosine",
+        index_type: str = "HNSW",
+        params: dict | None = None,
+    ) -> None:
+        """Create or rebuild a vector index on ``field_name``.
+
+        Backends that don't allow rebuilding in place (e.g. Milvus)
+        will internally drop the existing index first. Parameters
+        mirror :class:`IndexParamSpec` so a single object can be
+        forwarded between the create-time list and the runtime
+        manage endpoint.
+        """
+
+    @abstractmethod
+    def drop_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+    ) -> None:
+        """Drop the vector index on ``field_name``.
+
+        Implementations may treat a missing index as a no-op (the
+        collection is still queryable, just without acceleration).
+        """
+
     # ---- vectors ----
 
     @abstractmethod
@@ -158,8 +201,24 @@ class VectorStore(ABC):
         ``ids``)."""
 
     @abstractmethod
-    def delete(self, database: str, collection: str, primary_field: str, ids: list[str]) -> None:
-        """Delete rows by primary key."""
+    def delete(
+        self,
+        database: str,
+        collection: str,
+        primary_field: str,
+        ids: list[str] | None = None,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        """Delete rows by primary key list, or by a filter expression.
+
+        Exactly one of ``ids`` / ``filter_expr`` must be provided.
+        ``primary_field`` is required even for the filter-based path
+        so backend adapters that need to know which scalar to operate
+        on (e.g. for write-protect guards) can validate up front.
+
+        Returns the number of rows actually removed.
+        """
 
     @abstractmethod
     def get(
@@ -172,6 +231,32 @@ class VectorStore(ABC):
     ) -> list[dict]:
         """Fetch rows by primary key. Returns dicts with at least
         ``id`` and any requested ``output_fields``."""
+
+    @abstractmethod
+    def browse(
+        self,
+        database: str,
+        collection: str,
+        primary_field: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[dict]:
+        """List a slice of rows without specifying primary keys.
+
+        ``filter_expr`` is an optional backend-native boolean expression
+        (e.g. ``category == 'mouse' and price < 100`` for Milvus).
+        ``output_fields`` selects which scalar fields to materialise; when
+        ``None``, every scalar field declared on the collection is
+        returned. The vector field is never returned regardless.
+
+        Rows are returned in the backend's natural order; backends that
+        support it (Milvus) page via ``offset``. The shape of each dict
+        matches :meth:`get`:
+        ``{"id": <primary>, "vector": None, "fields": {scalar: value}}``.
+        """
 
     @abstractmethod
     def search(

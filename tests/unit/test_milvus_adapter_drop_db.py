@@ -18,7 +18,11 @@ from vector_service.core.errors import (
     CollectionNotFound,
     DatabaseNotFound,
 )
-from vector_service.stores._milvus_adapter import MilvusAdapter
+from vector_service.stores._milvus_adapter import (
+    MilvusAdapter,
+    _truncate_utf8_bytes,
+    _varchar_byte_caps,
+)
 
 
 def _adapter() -> MilvusAdapter:
@@ -177,7 +181,11 @@ def test_describe_collection_caches_result():
     }
     a._client.has_collection.return_value = True
     a._client.describe_collection.return_value = schema
-    a._client.describe_index.return_value = {"metric_type": "L2"}
+    a._client.list_indexes.return_value = ["vector"]
+    a._client.describe_index.return_value = {
+        "metric_type": "L2", "index_type": "HNSW",
+        "params": {"M": 16, "efConstruction": 200},
+    }
     a._client.get_collection_stats.return_value = {"row_count": 7}
 
     first = a.describe_collection("db1", "c1")
@@ -189,6 +197,16 @@ def test_describe_collection_caches_result():
     # has_collection is called once (cache miss); the second describe
     # hits the schema cache before reaching has_collection.
     assert a._client.has_collection.call_count == 1
+    # New: indexes are surfaced alongside fields.
+    assert "indexes" in first
+    assert first["indexes"], "describe_collection must enumerate indexes"
+    entry = first["indexes"][0]
+    assert entry["field_name"] == "vector"
+    assert entry["index_type"] == "HNSW"
+    assert entry["metric_type"] == "L2"
+    assert entry["params"]["M"] == 16
+    # L2 → "l2" on the normalised metric
+    assert first["metric"] == "l2"
 
 
 def test_delete_does_not_refresh_load():
@@ -220,5 +238,154 @@ def test_delete_does_not_refresh_load():
     n = a.delete("db1", "c1", "id", ["a", "b", "c"])
     assert n == 3
     a._client.refresh_load.assert_not_called()
+
+
+# ---- upsert varchar truncation ------------------------------------------
+
+def _prime_schema(a, fields, dim=4, vector_field="vector", primary="id"):
+    """Push a synthetic describe_collection result into the schema cache.
+
+    upsert() pulls the schema through describe_collection, which would
+    hit the real backend in this test environment. Priming the cache
+    lets the truncation path run without a live Milvus.
+    """
+    a._schema_cache[("db1", "c1")] = (
+        9e9,
+        {
+            "primary_field": primary,
+            "vector_field": vector_field,
+            "dim": dim,
+            "metric": "cosine",
+            "count": 0,
+            "fields": fields,
+            "indexes": [],
+        },
+    )
+
+
+def test_upsert_truncates_overlong_varchar(monkeypatch):
+    """Pin the regression: a value over the field's max_length must be
+    truncated before reaching pymilvus so error 1100 never surfaces."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    _prime_schema(a, [
+        {"name": "id", "dtype": "varchar", "is_primary": True, "max_length": 64},
+        {"name": "section_header", "dtype": "varchar", "max_length": 512},
+        {"name": "vector", "dtype": "float_vector", "dim": 4},
+    ])
+
+    # Spy on the adapter's structlog logger so we can assert the truncation
+    # is loud without depending on the project's logging config / caplog.
+    warnings: list[str] = []
+    from vector_service.stores import _milvus_adapter as adapter_mod
+    monkeypatch.setattr(
+        adapter_mod.log, "warning",
+        lambda msg, *a, **kw: warnings.append(msg % a if a else msg),
+    )
+
+    long_header = "x" * 600  # 600 ASCII bytes > 512 cap
+    a.upsert(
+        "db1", "c1", "id", "vector",
+        ids=["r1"], vectors=[[0.1, 0.2, 0.3, 0.4]],
+        fields=[{"section_header": long_header}],
+    )
+
+    sent = a._client.upsert.call_args.kwargs["data"]
+    assert sent[0]["section_header"] == "x" * 512
+    assert len(sent[0]["section_header"].encode("utf-8")) == 512
+    # The truncation must be loud — operators should be able to spot it.
+    assert any("section_header" in w and "truncated" in w for w in warnings)
+
+
+def test_upsert_leaves_under_cap_varchar_untouched():
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    _prime_schema(a, [
+        {"name": "id", "dtype": "varchar", "is_primary": True, "max_length": 64},
+        {"name": "section_header", "dtype": "varchar", "max_length": 512},
+        {"name": "vector", "dtype": "float_vector", "dim": 4},
+    ])
+
+    short_header = "1. Intro > 1.1 Background"  # 28 bytes
+    a.upsert(
+        "db1", "c1", "id", "vector",
+        ids=["r1"], vectors=[[0.1, 0.2, 0.3, 0.4]],
+        fields=[{"section_header": short_header}],
+    )
+    sent = a._client.upsert.call_args.kwargs["data"]
+    assert sent[0]["section_header"] == short_header
+
+
+def test_upsert_truncation_respects_utf8_boundaries():
+    """Multi-byte characters must not be split. A 512-byte cap on a
+    string of 3-byte Chinese characters yields 170 chars + possibly a
+    partial char that must be dropped, never an invalid sequence."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    _prime_schema(a, [
+        {"name": "id", "dtype": "varchar", "is_primary": True, "max_length": 64},
+        {"name": "section_header", "dtype": "varchar", "max_length": 4},
+        {"name": "vector", "dtype": "float_vector", "dim": 4},
+    ])
+
+    # 4 Chinese characters = 12 bytes — over the 4-byte cap. Truncating
+    # in the middle of a 3-byte sequence must yield valid UTF-8, so the
+    # result is either "" or exactly 1 character (the first 3 bytes).
+    a.upsert(
+        "db1", "c1", "id", "vector",
+        ids=["r1"], vectors=[[0.1, 0.2, 0.3, 0.4]],
+        fields=[{"section_header": "汉字测试"}],
+    )
+    sent = a._client.upsert.call_args.kwargs["data"]
+    val = sent[0]["section_header"]
+    # Always valid UTF-8 (round-trips through encode/decode).
+    assert val.encode("utf-8").decode("utf-8") == val
+    assert len(val.encode("utf-8")) <= 4
+    # We expect exactly one complete 3-byte char (the cap lands inside
+    # the second char's byte sequence, which is dropped).
+    assert val == "汉"
+
+
+def test_upsert_passes_non_varchar_fields_through():
+    """INT64 / FLOAT / JSON / nullable scalars must not be touched."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    _prime_schema(a, [
+        {"name": "id", "dtype": "varchar", "is_primary": True, "max_length": 64},
+        {"name": "year", "dtype": "int32"},
+        {"name": "vector", "dtype": "float_vector", "dim": 4},
+    ])
+
+    a.upsert(
+        "db1", "c1", "id", "vector",
+        ids=["r1"], vectors=[[0.1, 0.2, 0.3, 0.4]],
+        fields=[{"year": 2030}],
+    )
+    sent = a._client.upsert.call_args.kwargs["data"]
+    assert sent[0]["year"] == 2030
+
+
+# ---- helper unit tests --------------------------------------------------
+
+def test_varchar_byte_caps_filters_non_varchar_and_invalid():
+    caps = _varchar_byte_caps([
+        {"name": "id", "dtype": "varchar", "max_length": 64},
+        {"name": "section_header", "dtype": "varchar", "max_length": 512},
+        {"name": "year", "dtype": "int32"},
+        {"name": "broken", "dtype": "varchar"},  # no max_length
+        {"name": "zero", "dtype": "varchar", "max_length": 0},  # invalid
+    ])
+    assert caps == {"id": 64, "section_header": 512}
+
+
+def test_truncate_utf8_bytes_handles_ascii_and_cjk():
+    assert _truncate_utf8_bytes("hello", 100) == "hello"
+    assert _truncate_utf8_bytes("x" * 600, 512) == "x" * 512
+    # 3-byte CJK: 4 chars = 12 bytes; cap at 4 bytes keeps one full char.
+    assert _truncate_utf8_bytes("汉字测试", 4) == "汉"
+    # Cap at 0 → empty string (never an empty bytes object).
+    assert _truncate_utf8_bytes("anything", 0) == ""
+    # Cap equal to current length: untouched.
+    assert _truncate_utf8_bytes("hello", 5) == "hello"
 
 

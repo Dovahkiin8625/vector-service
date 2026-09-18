@@ -20,7 +20,7 @@ for chunk storage:
 - ``doc_id`` (VARCHAR(64)) — filter / rollback key
 - ``chunk_index`` (INT64) — sort order within a document
 - ``text`` (VARCHAR(8192)) — chunk text for retrieval
-- ``section_header`` (VARCHAR(512)) — breadcrumb context
+- ``section_header`` (VARCHAR(1024)) — breadcrumb context
 - ``page_number`` (INT64, nullable) — source page when available
 - ``title`` (VARCHAR(512), nullable) — document title
 - ``author`` (VARCHAR(512), nullable) — document author
@@ -88,7 +88,7 @@ def _ingest_scalar_fields() -> list[FieldSpec]:
         FieldSpec(name=_DOC_ID_FIELD, dtype="varchar", max_length=64),
         FieldSpec(name=_CHUNK_INDEX_FIELD, dtype="int64"),
         FieldSpec(name=_TEXT_FIELD, dtype="varchar", max_length=8192),
-        FieldSpec(name=_SECTION_HEADER_FIELD, dtype="varchar", max_length=512),
+        FieldSpec(name=_SECTION_HEADER_FIELD, dtype="varchar", max_length=1024),
         FieldSpec(name=_PAGE_NUMBER_FIELD, dtype="int64", nullable=True),
         FieldSpec(name=_TITLE_FIELD, dtype="varchar", max_length=512, nullable=True),
         FieldSpec(name=_AUTHOR_FIELD, dtype="varchar", max_length=512, nullable=True),

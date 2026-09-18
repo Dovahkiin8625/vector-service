@@ -1,308 +1,230 @@
-"""Regression test for the /dashboard route.
+"""Regression tests for the /dashboard route.
 
-The dashboard is a self-contained HTML page that replaces the old
-``/playground`` route. We pin:
+The dashboard is a Vue 3 single-page app served as:
+- GET /dashboard             -> minimal Jinja2 template
+- /static/dashboard/...      -> CSS, Vue runtime, and per-panel
+  component modules under components/*.js.
 
-- the route exists at ``/dashboard`` and returns 200,
-- the page contains the expected markers (title, signature, panels),
-- the legacy ``/playground`` URL is gone (so old bookmarks break loudly
-  instead of silently hitting a stale endpoint).
-
-The "models" panel remains the registry surface. The overview/home
-panel (``#panel-overview``) is the default landing view — it aggregates
-service, model, store, and machine metrics via ``GET /v1/system/status``.
+Tests pin the contract between route handler, template, static
+assets, and on-disk components. They read sources directly from disk
+so editing a component file in dev reflects in the next assertion.
 """
 from __future__ import annotations
+
+import pathlib
 
 from fastapi.testclient import TestClient
 
 from vector_service.main import app
 
 
-def test_dashboard_route_returns_html_with_expected_markers():
-    with TestClient(app) as client:
-        r = client.get("/dashboard")
-    assert r.status_code == 200, f"GET /dashboard returned {r.status_code}"
+# ---------------------------------------------------------------------------
+# Source loader
+# ---------------------------------------------------------------------------
+_ST = pathlib.Path("src/vector_service")
+_TPL = (_ST / "templates" / "dashboard.html").read_text(encoding="utf-8")
+_CSS = (_ST / "static" / "dashboard" / "dashboard.css").read_text(encoding="utf-8")
+# Vue's ESM browser build is shipped in latin-1; read with the
+# right codec or the inlined concat raises UnicodeDecodeError.
+_VUE = (_ST / "static" / "dashboard" / "vue.esm-browser.prod.js").read_text(encoding="latin-1")
+_COMP = sorted((_ST / "static" / "dashboard" / "components").glob("*.js"))
+_COMP_JS = "\n\n".join(p.read_text(encoding="utf-8") for p in _COMP)
+_ALL = "\n".join([_TPL, _CSS, _VUE, _COMP_JS])
+
+
+def _has(s):
+    return s in _ALL
+
+
+# ---------------------------------------------------------------------------
+# Route + template
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_route_serves_vue_template():
+    with TestClient(app) as c:
+        r = c.get("/dashboard")
+    assert r.status_code == 200
     ctype = r.headers.get("content-type", "")
-    assert ctype.startswith("text/html"), f"unexpected content-type: {ctype!r}"
+    assert ctype.startswith("text/html")
     body = r.text
-
-    # identity
-    assert "vector-service · Dashboard" in body, "page <title> not found"
-    assert "Dashboard" in body, "Dashboard brand marker missing"
-
-    # structural markers (overview panel is now the default landing view;
-    # the models registry panel remains present but is no longer active).
-    assert 'class="sidebar"' in body, "left sidebar nav missing"
-    assert 'id="panel-overview"' in body, "overview panel must exist"
-    assert '<div class="panel active" id="panel-overview"' in body, (
-        "overview panel must be the default active landing view"
-    )
-    assert 'id="panel-models"' in body, "models panel must still exist"
-    assert '<div class="panel" id="panel-models"' in body, (
-        "models panel must NOT be the active default view (overview is)"
-    )
-    assert 'id="models-grid"' in body, "models card grid placeholder missing"
-    assert 'id="dim-dots"' in body, "signature dim-dots row missing"
-
-    # Overview panel key markers
-    assert "/v1/system/status" in body, "overview panel must reference /v1/system/status endpoint"
-    assert 'id="kpi-version"' in body, "version KPI missing"
-    assert 'id="kpi-uptime"' in body, "uptime KPI missing"
-    assert 'id="kpi-models"' in body, "models KPI missing"
-    assert 'id="kpi-store"' in body, "store KPI missing"
-    assert 'id="kpi-cpu"' in body, "cpu KPI missing"
-    assert 'id="kpi-mem"' in body, "memory KPI missing"
-    assert 'id="kpi-gpu"' in body or 'id="gpu-list"' in body, "gpu section missing"
-    assert "总览首页" in body, "overview nav-item label missing"
-
-    # no stale references in shipped HTML
-    assert "playground" not in body.lower(), "stale 'playground' string found in dashboard HTML"
-    assert "class=\"kpi-grid\"" not in body, "stale .kpi-grid class still shipped"
-    assert "class=\"recent-table\"" not in body, "stale .recent-table still shipped"
-    assert "family-card" not in body, "stale 'family-card' class found in dashboard HTML"
-    assert "LIFECYCLE_FAMILIES" not in body, "stale LIFECYCLE_FAMILIES identifier in dashboard JS"
-    assert 'id="panel-lifecycle"' not in body, "stale #panel-lifecycle still shipped"
+    assert "vector-service" in body
+    assert '<div id="app">' in body
+    # The template must load Vue + the app.js entry as ES modules.
+    assert 'type="module"' in body
+    # Static assets all serve 200.
+    with TestClient(app) as c:
+        for path in [
+            "/static/dashboard/dashboard.css",
+            "/static/dashboard/vue.esm-browser.prod.js",
+            "/static/dashboard/components/app.js",
+            "/static/dashboard/components/databases.js",
+            "/static/dashboard/components/collections.js",
+            "/static/dashboard/components/modals.js",
+        ]:
+            rr = c.get(path)
+            assert rr.status_code == 200, f"{path} -> {rr.status_code}"
+    # No legacy / playground references.
+    assert "playground" not in _ALL.lower()
+    assert "LIFECYCLE_FAMILIES" not in _ALL
 
 
-def test_old_playground_route_is_gone():
-    """Old URL must 404 so users notice the rename instead of silently breaking."""
-    with TestClient(app) as client:
-        r = client.get("/playground")
-    assert r.status_code == 404, (
-        f"legacy /playground still resolves ({r.status_code}); rename was incomplete"
-    )
-
-
-def test_dashboard_router_tag_is_dashboard():
-    """The OpenAPI tag on the dashboard router is 'dashboard', not 'playground'."""
-    from vector_service.api.dashboard import router
-
-    assert "dashboard" in router.tags, (
-        f"expected dashboard router tags to include 'dashboard', got {router.tags!r}"
-    )
-    assert "playground" not in router.tags, (
-        f"stale 'playground' tag still on dashboard router: {router.tags!r}"
-    )
+def test_dashboard_app_renders_topbar_and_sidebar():
+    """Topbar, sidebar, statusbar are part of the App component."""
+    assert _has('id="led-healthz"')
+    assert _has('id="led-readyz"')
+    assert _has('id="dim-dots"')
+    assert _has('id="crumb-cat"')
+    assert _has('id="crumb-sub"')
+    assert _has('class="sidebar"')
+    assert _has('class="statusbar"')
+    # Vue uses v-for to render nav-items per view; verify the
+    # data-view binding survives.
+    assert 'data-view="overview"' in _ALL
+    assert 'data-view="browse"' in _ALL
 
 
 def test_dashboard_renders_per_model_not_per_family():
-    """Regression: load/unload + cards are keyed by model_id.
-
-    The service exposes load/unload per model_id (the slot is keyed by
-    family, but the API surface and the user-facing mental model are
-    per-id). The dashboard must therefore render one card per
-    registered model — *not* one per family — and every action button
-    must carry a ``data-id`` that matches the model the user sees.
-    """
-    from vector_service.api.dashboard import _DASHBOARD_JS_END, DASHBOARD_HTML
-
-    # Sanity: the JS block is present and ends on the marker.
-    assert _DASHBOARD_JS_END in DASHBOARD_HTML, "dashboard JS end marker missing"
-
-    # Per-model identifiers shipped to the browser.
-    assert "renderModelCard" in DASHBOARD_HTML, (
-        "renderModelCard helper missing — cards are still keyed by family"
-    )
-    assert "bindModelCardActions" in DASHBOARD_HTML, (
-        "bindModelCardActions helper missing — actions are still bound by family selector"
-    )
-    assert "data-id=" in DASHBOARD_HTML, (
-        "model cards must expose data-id for per-model load/unload buttons"
-    )
-    assert "setModelsAutoRefresh" in DASHBOARD_HTML, "auto-refresh helper missing"
-    assert "btn-models-auto-refresh" in DASHBOARD_HTML, "auto-refresh button id missing"
-    assert 'id="models-grid"' in DASHBOARD_HTML, "merged model card grid missing"
-
-    # Legacy family-keyed symbols must be gone. Use word-boundary-ish
-    # checks so the new helper names don't false-positive.
-    assert "LIFECYCLE_FAMILIES" not in DASHBOARD_HTML, (
-        "LIFECYCLE_FAMILIES still present — overview/lifecycle still grouped by family"
-    )
-    assert "renderFamilyCard" not in DASHBOARD_HTML, (
-        "renderFamilyCard still present — cards still grouped by family"
-    )
-    assert "function renderLcDetail(" not in DASHBOARD_HTML, (
-        "renderLcDetail(...) still present — lifecycle still groups by family"
-    )
-    assert "renderLcModelRow" not in DASHBOARD_HTML, (
-        "renderLcModelRow still present — lifecycle row form was not removed"
-    )
-    assert "renderLcDetails" not in DASHBOARD_HTML, (
-        "renderLcDetails still present — lifecycle details form was not removed"
-    )
-    assert "groupByFamily" not in DASHBOARD_HTML, (
-        "groupByFamily helper still present — lifecycle group form was not removed"
-    )
-    assert "function refreshLifecycle" not in DASHBOARD_HTML, (
-        "refreshLifecycle still present — lifecycle panel was not removed"
-    )
-    assert "function setLifecycleAutoRefresh" not in DASHBOARD_HTML, (
-        "setLifecycleAutoRefresh still present — auto-refresh helper was not renamed"
-    )
-    assert "lc-card-load" in DASHBOARD_HTML and "lc-card-unload" in DASHBOARD_HTML, (
-        "load/unload button classes missing"
-    )
-
-    # Busy state must be keyed by model id, not by family. We assert
-    # the JS path mutates ``modelsState.busy[id]`` so that only the
-    # affected card is dimmed during a load/unload round-trip.
-    assert "modelsState.busy[id]" in DASHBOARD_HTML, (
-        "modelsState.busy must be keyed by model id (modelsState.busy[id] = ...)"
-    )
-    assert "lifecycleState.busy" not in DASHBOARD_HTML, (
-        "lifecycleState.busy still present — rename to modelsState.busy incomplete"
-    )
-
-    # The 已加载 / 卸载 toggle must key off the explicit ``m.loaded``
-    # signal rather than ``m.dimensions != null``. ``dimensions`` is
-    # permanently ``null`` for rerankers, so dimension-based detection
-    # would silently mis-report every loaded reranker as 未加载 and
-    # leave the load button in place after a successful POST /load.
-    assert "var isLoaded = !!m.loaded;" in DASHBOARD_HTML, (
-        "renderModelCard must derive 已加载 from m.loaded, not m.dimensions"
-    )
-    assert "m.dimensions != null" not in DASHBOARD_HTML, (
-        "stale 'm.dimensions != null' load-state check still present — "
-        "rerankers would always show as 未加载"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Similarity debug panels (text / image / multimodal)
-# ---------------------------------------------------------------------------
+    """ModelsPanel emits one card per registered model with
+    per-id data binding; no legacy family-keyed symbols."""
+    models = (_ST / "static" / "dashboard" / "components" / "models.js").read_text(encoding="utf-8")
+    assert "v-for" in models and "m.id" in models
+    assert ":data-id=" in models or ':data-id="' in models
+    assert "store.models.busy[m.id]" in models
+    assert "FAMILY_LABELS" in models
+    # No legacy family grouping.
+    assert "LIFECYCLE_FAMILIES" not in _ALL
+    assert "renderFamilyCard" not in _ALL
 
 
 def test_dashboard_exposes_similarity_panels():
-    """The three similarity endpoints must each have a matching dashboard panel.
-
-    Pins the nav-item ``data-view`` strings, the ``panel-`` ids, and the
-    key form-control / button ids used by the JS handlers. If any id
-    drifts, the corresponding JS click handler will silently no-op — so
-    we anchor on both sides.
-    """
-    from vector_service.api.dashboard import DASHBOARD_HTML
-
-    # ---- nav-items (model group) -----------------------------------
-    assert 'data-view="text-similarity"' in DASHBOARD_HTML, "text-similarity nav-item missing"
-    assert 'data-view="image-similarity"' in DASHBOARD_HTML, "image-similarity nav-item missing"
-    assert 'data-view="mm-similarity"' in DASHBOARD_HTML, "mm-similarity nav-item missing"
-    assert ">文本相似度<" in DASHBOARD_HTML, "nav label '文本相似度' missing"
-    assert ">图像相似度<" in DASHBOARD_HTML, "nav label '图像相似度' missing"
-    assert ">图文相似度<" in DASHBOARD_HTML, "nav label '图文相似度' missing"
-
-    # ---- panel containers ------------------------------------------
-    assert 'id="panel-text-similarity"' in DASHBOARD_HTML, "panel-text-similarity missing"
-    assert 'id="panel-image-similarity"' in DASHBOARD_HTML, "panel-image-similarity missing"
-    assert 'id="panel-mm-similarity"' in DASHBOARD_HTML, "panel-mm-similarity missing"
-
-    # ---- per-panel endpoint pills ----------------------------------
-    assert "/v1/text_similarity" in DASHBOARD_HTML, "POST /v1/text_similarity pill missing"
-    assert "/v1/image_similarity" in DASHBOARD_HTML, "POST /v1/image_similarity pill missing"
-    assert "/v1/multimodal_similarity" in DASHBOARD_HTML, "POST /v1/multimodal_similarity pill missing"
-
-    # ---- form-control ids used by the JS handlers ------------------
-    assert 'id="text-sim-model"' in DASHBOARD_HTML
-    assert 'id="text-sim-metric"' in DASHBOARD_HTML
-    assert 'id="text-sim-query"' in DASHBOARD_HTML
-    assert 'id="text-sim-docs"' in DASHBOARD_HTML
-    assert 'id="btn-text-sim"' in DASHBOARD_HTML
-    assert 'id="btn-text-sim-refresh-models"' in DASHBOARD_HTML
-    assert 'id="text-sim-results"' in DASHBOARD_HTML
-
-    assert 'id="image-sim-model"' in DASHBOARD_HTML
-    assert 'id="image-sim-metric"' in DASHBOARD_HTML
-    assert 'id="image-sim-file"' in DASHBOARD_HTML
-    assert 'id="image-sim-docs"' in DASHBOARD_HTML
-    assert 'id="btn-image-sim"' in DASHBOARD_HTML
-    assert 'id="btn-image-sim-refresh-models"' in DASHBOARD_HTML
-    assert 'id="image-sim-results"' in DASHBOARD_HTML
-
-    assert 'id="mm-sim-model"' in DASHBOARD_HTML
-    assert 'id="mm-sim-metric"' in DASHBOARD_HTML
-    assert 'id="mm-sim-query"' in DASHBOARD_HTML
-    assert 'id="mm-sim-docs"' in DASHBOARD_HTML
-    assert 'id="btn-mm-sim"' in DASHBOARD_HTML
-    assert 'id="btn-mm-sim-refresh-models"' in DASHBOARD_HTML
-    assert 'id="mm-sim-results"' in DASHBOARD_HTML
-
-    # ---- JS handlers wired up --------------------------------------
-    assert "refreshTextSimModels" in DASHBOARD_HTML, "refreshTextSimModels handler missing"
-    assert "refreshImageSimModels" in DASHBOARD_HTML, "refreshImageSimModels handler missing"
-    assert "refreshMmSimModels" in DASHBOARD_HTML, "refreshMmSimModels handler missing"
-    assert "renderSimResults" in DASHBOARD_HTML, "renderSimResults helper missing"
-
-    # ---- activateView labels & refresh branches --------------------
-    assert "'text-similarity'" in DASHBOARD_HTML, "labels map missing text-similarity entry"
-    assert "'image-similarity'" in DASHBOARD_HTML, "labels map missing image-similarity entry"
-    assert "'mm-similarity'" in DASHBOARD_HTML, "labels map missing mm-similarity entry"
-    assert "view === 'text-similarity'" in DASHBOARD_HTML, "activateView missing text-similarity branch"
-    assert "view === 'image-similarity'" in DASHBOARD_HTML, "activateView missing image-similarity branch"
-    assert "view === 'mm-similarity'" in DASHBOARD_HTML, "activateView missing mm-similarity branch"
-
-
-# ---------------------------------------------------------------------------
-# Knowledge base debug panels (parse / chunk / ingest)
-# ---------------------------------------------------------------------------
+    """Three similarity views share the SimilarityPanel component."""
+    assert _has('data-view="text-similarity"')
+    assert _has('data-view="image-similarity"')
+    assert _has('data-view="mm-similarity"')
+    # Endpoint URLs.
+    assert "/v1/text_similarity" in _ALL
+    assert "/v1/image_similarity" in _ALL
+    assert "/v1/multimodal_similarity" in _ALL
+    # Per-kind prop dispatch.
+    assert 'kind="text"' in _ALL
+    assert 'kind="image"' in _ALL
+    assert 'kind="multimodal"' in _ALL
 
 
 def test_dashboard_exposes_knowledge_base_panels():
-    """The three KB endpoints must each have a matching dashboard panel."""
-    from vector_service.api.dashboard import DASHBOARD_HTML
+    """Knowledge base uses the KnowledgeBasePanel component switched
+    by a view prop."""
+    assert _has('data-view="parse"')
+    assert _has('data-view="chunk"')
+    assert _has('data-view="ingest"')
+    assert "POST /v1/parse" in _ALL
+    assert "POST /v1/chunk" in _ALL
+    assert "POST /v1/ingest" in _ALL
+    # Form-control ids.
+    for f in [
+        'id="parse-file"', 'id="parse-result"', 'id="parse-markdown"',
+        'id="chunk-size"', 'id="chunk-overlap"', 'id="chunk-md"',
+        'id="chunk-results"',
+        'id="ingest-db"', 'id="ingest-size"', 'id="ingest-overlap"',
+        'id="ingest-model"', 'id="ingest-file"', 'id="ingest-metadata"',
+        'id="ingest-result"',
+    ]:
+        assert _has(f), f"{f} missing"
 
-    # nav-items (kb group)
-    assert 'data-view="parse"' in DASHBOARD_HTML, "parse nav-item missing"
-    assert 'data-view="chunk"' in DASHBOARD_HTML, "chunk nav-item missing"
-    assert 'data-view="ingest"' in DASHBOARD_HTML, "ingest nav-item missing"
-    assert ">文档解析<" in DASHBOARD_HTML, "nav label '文档解析' missing"
-    assert ">文本分片<" in DASHBOARD_HTML, "nav label '文本分片' missing"
-    assert ">一体化摄取<" in DASHBOARD_HTML, "nav label '一体化摄取' missing"
 
-    # panel containers
-    assert 'id="panel-parse"' in DASHBOARD_HTML, "panel-parse missing"
-    assert 'id="panel-chunk"' in DASHBOARD_HTML, "panel-chunk missing"
-    assert 'id="panel-ingest"' in DASHBOARD_HTML, "panel-ingest missing"
+def test_dashboard_exposes_browse_panel():
+    """BrowsePanel renders the paginated table + pager."""
+    assert _has('data-view="browse"')
+    assert _has("v-show=\"store.view === 'browse'\"")
+    assert "/v1/databases/{db}/collections/{coll}/rows" in _ALL
+    for f in [
+        'id="brw-db"', 'id="brw-coll"', 'id="brw-primary"',
+        'id="brw-page-size"', 'id="brw-filter"',
+        'id="brw-output-tokens"', 'id="brw-table-wrap"', 'id="brw-pager"',
+        'id="btn-brw-query"', 'id="btn-brw-reset"',
+        'id="btn-brw-first"', 'id="btn-brw-prev"',
+        'id="btn-brw-next"', 'id="btn-brw-last"',
+        'id="brw-jump"', 'id="btn-brw-jump"',
+        'id="brw-stat-total"', 'id="brw-stat-page"', 'id="brw-stat-returned"',
+        'id="brw-pager-info"',
+    ]:
+        assert _has(f), f"{f} missing"
+    assert "const columns = computed(" in _ALL
+    assert "v-for=\"row in items\"" in _ALL or "v-for='row in items'" in _ALL
 
-    # per-panel endpoint pills
-    assert "POST /v1/parse" in DASHBOARD_HTML, "POST /v1/parse pill missing"
-    assert "POST /v1/chunk" in DASHBOARD_HTML, "POST /v1/chunk pill missing"
-    assert "POST /v1/ingest" in DASHBOARD_HTML, "POST /v1/ingest pill missing"
 
-    # /v1/parse form-control ids
-    assert 'id="parse-file"' in DASHBOARD_HTML, "parse-file input missing"
-    assert 'id="btn-parse"' in DASHBOARD_HTML, "btn-parse button missing"
-    assert 'id="parse-result"' in DASHBOARD_HTML, "parse-result container missing"
-    assert 'id="parse-markdown"' in DASHBOARD_HTML, "parse-markdown preview missing"
+def test_dashboard_exposes_create_modals():
+    """Database + collection creation forms live in modals."""
+    assert _has('id="btn-open-new-db"')
+    assert _has('id="btn-open-new-coll"')
+    assert _has('id="modal-new-db"')
+    assert _has('id="modal-new-coll"')
+    for cls in ["modal-overlay", "modal", "modal--wide", "modal-head",
+                "modal-body", "modal-foot", "modal-close", "modal-err"]:
+        assert _has(cls)
+    # Modal control flow.
+    assert "store.modals.newDb = true" in _ALL
+    assert "store.modals.newColl = true" in _ALL
+    # Form-control ids inside the modals.
+    for f in [
+        'id="new-db-name"', 'id="new-coll-name"', 'id="new-coll-primary"',
+        'id="scalars-list"', 'id="vector-card"', 'id="index-list"',
+        'id="modal-new-db-err"', 'id="modal-new-coll-err"',
+    ]:
+        assert _has(f), f"{f} missing"
 
-    # /v1/chunk form-control ids
-    assert 'id="chunk-size"' in DASHBOARD_HTML, "chunk-size input missing"
-    assert 'id="chunk-overlap"' in DASHBOARD_HTML, "chunk-overlap input missing"
-    assert 'id="chunk-md"' in DASHBOARD_HTML, "chunk-md textarea missing"
-    assert 'id="btn-chunk"' in DASHBOARD_HTML, "btn-chunk button missing"
-    assert 'id="chunk-results"' in DASHBOARD_HTML, "chunk-results container missing"
 
-    # /v1/ingest form-control ids
-    assert 'id="ingest-db"' in DASHBOARD_HTML, "ingest-db select missing"
-    assert 'id="ingest-coll"' in DASHBOARD_HTML, "ingest-coll select missing"
-    assert 'id="ingest-size"' in DASHBOARD_HTML, "ingest-size input missing"
-    assert 'id="ingest-overlap"' in DASHBOARD_HTML, "ingest-overlap input missing"
-    assert 'id="ingest-model"' in DASHBOARD_HTML, "ingest-model select missing"
-    assert 'id="ingest-file"' in DASHBOARD_HTML, "ingest-file input missing"
-    assert 'id="ingest-metadata"' in DASHBOARD_HTML, "ingest-metadata textarea missing"
-    assert 'id="btn-ingest-upload"' in DASHBOARD_HTML, "btn-ingest-upload button missing"
-    assert 'id="btn-ingest-refresh"' in DASHBOARD_HTML, "btn-ingest-refresh button missing"
-    assert 'id="ingest-result"' in DASHBOARD_HTML, "ingest-result container missing"
+def test_dashboard_exposes_index_management():
+    """Collection detail card has per-index delete + new-index form."""
+    # Index-management DOM markers (data-* attrs survive the
+    # rewrite).
+    assert 'data-new-index-field' in _ALL
+    assert 'data-new-index-metric' in _ALL
+    assert 'data-new-index-type' in _ALL
+    assert 'data-new-index-params' in _ALL
+    assert 'data-new-index-submit' in _ALL
+    # Drop-index endpoint construction.
+    assert 'index?field_name=' in _ALL
+    # Index v-for over the detail payload.
+    assert "v-for=\"ix in detailCache[db + '::' + name].indexes\"" in _ALL
 
-    # JS handlers wired up
-    assert "refreshParseStatus" in DASHBOARD_HTML, "refreshParseStatus handler missing"
-    assert "refreshIngestMeta" in DASHBOARD_HTML, "refreshIngestMeta handler missing"
-    assert "refreshIngestCollections" in DASHBOARD_HTML, "refreshIngestCollections helper missing"
-    assert "refreshIngestModels" in DASHBOARD_HTML, "refreshIngestModels helper missing"
 
-    # activateView labels & refresh branches
-    assert "'parse'" in DASHBOARD_HTML, "labels map missing parse entry"
-    assert "'chunk'" in DASHBOARD_HTML, "labels map missing chunk entry"
-    assert "'ingest'" in DASHBOARD_HTML, "labels map missing ingest entry"
-    assert "view === 'parse'" in DASHBOARD_HTML, "activateView missing parse branch"
-    assert "view === 'chunk'" in DASHBOARD_HTML, "activateView missing chunk branch"
-    assert "view === 'ingest'" in DASHBOARD_HTML, "activateView missing ingest branch"
+def test_dashboard_exposes_filter_delete():
+    """Records panel offers ids-or-filter delete modes."""
+    for f in [
+        'id="vec-del-mode"', 'id="vec-del-ids"', 'id="vec-del-ids-row"',
+        'id="vec-del-filter"', 'id="vec-del-filter-row"',
+    ]:
+        assert _has(f), f"{f} missing"
+    assert 'value="ids"' in _ALL
+    assert 'value="filter"' in _ALL
+    # JS body shapes per mode.
+    assert "body.ids = arr" in _ALL or "body.ids = ids" in _ALL
+    assert "body.filter_expr" in _ALL
+
+
+def test_dashboard_exposes_db_detail_view():
+    """Each db row is clickable to reveal a detail panel."""
+    dbs = (_ST / "static" / "dashboard" / "components" / "databases.js").read_text(encoding="utf-8")
+    assert "loadDetail" in dbs
+    assert "Object.create(null)" in dbs
+    assert "Promise.all" in dbs
+    assert "data-detail-for-db" in dbs
+
+
+# ---------------------------------------------------------------------------
+# Router + OpenAPI tag (legacy pinning)
+# ---------------------------------------------------------------------------
+
+
+def test_old_playground_route_is_gone():
+    with TestClient(app) as c:
+        r = c.get("/playground")
+    assert r.status_code == 404
+
+
+def test_dashboard_router_tag_is_dashboard():
+    from vector_service.api.dashboard import router
+    assert "dashboard" in router.tags
+    assert "playground" not in router.tags

@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from vector_service import __version__
 from vector_service.api.backend import router as backend_router
@@ -337,6 +338,16 @@ def create_app() -> FastAPI:
     async def _unhandled_handler(request: Request, exc: Exception):
         log.exception("unhandled_exception", error=str(exc))
         return _err("internal", str(exc) or "internal error", 500, exc=exc)
+
+    # Static assets for the dashboard. ``src/vector_service/static/`` is
+    # mounted at ``/static``; the dashboard template references paths
+    # like ``/static/dashboard/dashboard.css``. The directory is
+    # resolved relative to this file so the layout works regardless
+    # of the cwd the process is launched from.
+    from pathlib import Path
+    _STATIC_DIR = Path(__file__).resolve().parent / "static"
+    if _STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     app.include_router(health_router)
     app.include_router(models_router)

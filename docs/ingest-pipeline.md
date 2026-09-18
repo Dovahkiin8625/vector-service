@@ -230,9 +230,6 @@ metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选�
 | 文本分片 | `POST /v1/chunk` | Markdown 输入 → 可折叠 chunk 列表（含 token / 页码 / 章节 / 原文） |
 | 一体化摄取 | `POST /v1/ingest` | database/collection/embed_model 联动选择 + multipart 上传 → 摄取结果统计 |
 
-每个面板的请求都会进入底部 **报文** 面板（REQUEST / RESPONSE 完整内容）和右侧 **请求历史** 侧栏，
-方便调试上传大文件时的网络问题。
-
 ---
 
 ## 典型工作流（Lumos 知识库场景）

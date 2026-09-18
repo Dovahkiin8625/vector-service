@@ -57,6 +57,8 @@ from vector_service.embeddings.image_decoding import (
 from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.management import (
+    BrowseRequest,
+    BrowseResponse,
     CollectionInfoResponse,
     CreateCollectionRequest,
     CreateDatabaseRequest,
@@ -68,6 +70,8 @@ from vector_service.schemas.management import (
     GetVectorsResponse,
     GetVectorItem,
     HitResponse,
+    IndexManageRequest,
+    IndexSummary,
     SearchRequest,
     SearchResponse,
     UpsertVectorsRequest,
@@ -419,23 +423,11 @@ async def create_collection(db: str, body: CreateCollectionRequest, request: Req
     except (DatabaseNotFound, CollectionAlreadyExists, StoreError, BackendError) as e:
         raise _http_from_store_error(e)
     STORE_COLLECTIONS.labels(backend=_backend(store), database=db).inc()
-    fields = [
-        FieldSummary(
-            name=f.name,
-            dtype=("float_vector" if f.name == body.vector_field.name else f.dtype),
-            is_primary=(f.name == body.primary_field),
-            dim=(body.vector_field.dim if f.name == body.vector_field.name else None),
-        )
-        for f in body.scalar_fields
-    ]
-    fields.append(
-        FieldSummary(
-            name=body.vector_field.name,
-            dtype="float_vector",
-            is_primary=False,
-            dim=body.vector_field.dim,
-        )
-    )
+    # The store now returns the same ``fields`` / ``indexes`` payload that
+    # ``GET .../collections/{name}`` would have produced, so the POST
+    # response stays consistent with later detail calls.
+    fields = [FieldSummary(**f) for f in (info.fields or [])]
+    indexes = [IndexSummary(**i) for i in (info.indexes or [])]
     return CollectionInfoResponse(
         database=info.database,
         name=info.name,
@@ -445,6 +437,7 @@ async def create_collection(db: str, body: CreateCollectionRequest, request: Req
         primary_field=info.primary_field,
         vector_field=info.vector_field,
         fields=fields,
+        indexes=indexes,
         metadata=info.metadata,
     )
 
@@ -494,9 +487,77 @@ async def get_collection(db: str, name: str, request: Request):
         count=info.count,
         primary_field=info.primary_field,
         vector_field=info.vector_field,
-        fields=[],
+        fields=[FieldSummary(**f) for f in (info.fields or [])],
+        indexes=[IndexSummary(**i) for i in (info.indexes or [])],
         metadata=info.metadata,
     )
+
+
+# ---- index management ----
+
+@router.post(
+    "/databases/{db}/collections/{name}/index",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "Collection or database does not exist."},
+        422: {"model": ErrorEnvelope, "description": "Invalid index params (bad metric / unknown field)."},
+        503: {"model": ErrorEnvelope, "description": "Vector store unavailable."},
+    },
+    summary="Create or rebuild a vector index",
+    description=(
+        "Create a new vector index on the collection's vector field, "
+        "or replace the existing one if it already exists. Use this "
+        "endpoint to tune ``HNSW`` ``M`` / ``efConstruction`` or "
+        "switch between ``HNSW`` / ``IVF_FLAT`` / ``DISKANN`` without "
+        "re-creating the collection."
+    ),
+)
+async def create_collection_index(
+    db: str, name: str, body: IndexManageRequest, request: Request,
+):
+    store = request.app.state.store
+    try:
+        await _timed_async(
+            "index_create", _backend(store), db, store.create_index,
+            db, name,
+            field_name=body.field_name,
+            metric_type=body.metric_type,
+            index_type=body.index_type,
+            params=body.params,
+        )
+    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+        raise _http_from_store_error(e)
+    return {"rebuilt": body.field_name}
+
+
+@router.delete(
+    "/databases/{db}/collections/{name}/index",
+    responses={
+        404: {"model": ErrorEnvelope, "description": "Collection or database does not exist."},
+        422: {"model": ErrorEnvelope, "description": "Invalid field name."},
+        503: {"model": ErrorEnvelope, "description": "Vector store unavailable."},
+    },
+    summary="Drop a vector index",
+    description=(
+        "Drop the index on the named vector field. A missing index "
+        "is treated as a no-op (idempotent) so the dashboard "
+        "\"delete index\" button is safe to re-click."
+    ),
+)
+async def drop_collection_index(
+    db: str,
+    name: str,
+    field_name: str,
+    request: Request,
+):
+    store = request.app.state.store
+    try:
+        await _timed_async(
+            "index_drop", _backend(store), db, store.drop_index,
+            db, name, field_name=field_name,
+        )
+    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+        raise _http_from_store_error(e)
+    return {"dropped": field_name}
 
 
 # ---- vectors ----
@@ -616,21 +677,35 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
     "/databases/{db}/collections/{name}/vectors/delete",
     responses={
         404: {"model": ErrorEnvelope, "description": "Collection or database does not exist."},
+        422: {"model": ErrorEnvelope, "description": "Validation (XOR ids vs filter_expr, or bad filter)."},
         503: {"model": ErrorEnvelope, "description": "Vector store unavailable."},
     },
-    summary="Delete vectors by id",
+    summary="Delete vectors by id or filter expression",
+    description=(
+        "Delete rows from a collection. Provide exactly one of:\n\n"
+        "- ``ids``: explicit primary-key list.\n"
+        "- ``filter_expr``: Milvus-native boolean expression; every "
+        "matching row is removed (bulk delete).\n\n"
+        "Returns the number of rows actually deleted."
+    ),
 )
 async def delete_vectors(db: str, name: str, body: DeleteVectorsRequest, request: Request):
     store = request.app.state.store
     try:
-        await _timed_async(
+        deleted = await _timed_async(
             "delete", _backend(store), db, store.delete,
             db, name, body.primary_field, body.ids,
+            filter_expr=body.filter_expr,
         )
     except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
         raise _http_from_store_error(e)
-    STORE_VECTORS_TOTAL.labels(op="delete", backend=_backend(store), database=db).inc(len(body.ids))
-    return {"deleted": len(body.ids)}
+    # Fall back to ``len(ids)`` only when the adapter couldn't
+    # report a real count (older paths still benefit from at least
+    # the input size). Filter-based deletes always return a real
+    # count from Milvus.
+    count = int(deleted) if deleted else (len(body.ids or []))
+    STORE_VECTORS_TOTAL.labels(op="delete", backend=_backend(store), database=db).inc(count)
+    return {"deleted": count}
 
 
 @router.post(
@@ -652,6 +727,60 @@ async def get_vectors(db: str, name: str, body: GetVectorsRequest, request: Requ
     except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
         raise _http_from_store_error(e)
     return GetVectorsResponse(items=[GetVectorItem(**it) for it in items])
+
+
+@router.post(
+    "/databases/{db}/collections/{name}/rows",
+    response_model=BrowseResponse,
+    responses={
+        404: {"model": ErrorEnvelope, "description": "Collection or database does not exist."},
+        422: {"model": ErrorEnvelope, "description": "Invalid output_fields or filter expression."},
+        503: {"model": ErrorEnvelope, "description": "Vector store unavailable."},
+    },
+    summary="Browse collection rows (paginated list view)",
+    description=(
+        "List a slice of rows from a collection without specifying "
+        "primary keys. Supports offset/limit pagination, an optional "
+        "Milvus-native filter expression, and an optional list of "
+        "scalar output fields. The vector field is never returned."
+    ),
+)
+async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request):
+    store = request.app.state.store
+    # ``total`` is read from the collection's metadata so we don't
+    # have to re-issue a separate count RPC for every page turn.
+    # Collection-not-found is the same error path as the underlying
+    # browse call, so it surfaces a single 404 envelope.
+    try:
+        info = await _timed_async(
+            "coll_info", _backend(store), db, store.collection_info, db, name,
+        )
+        total = int(info.count)
+    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+        raise _http_from_store_error(e)
+    try:
+        rows = await _timed_async(
+            "browse", _backend(store), db, store.browse,
+            db, name, body.primary_field,
+            limit=body.limit,
+            offset=body.offset,
+            filter_expr=body.filter_expr,
+            output_fields=body.output_fields,
+        )
+    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+        raise _http_from_store_error(e)
+
+    items = [GetVectorItem(**r) for r in rows]
+    returned = len(items)
+    has_more = body.offset + returned < total
+    return BrowseResponse(
+        items=items,
+        total=total,
+        limit=body.limit,
+        offset=body.offset,
+        returned=returned,
+        has_more=has_more,
+    )
 
 
 @router.post(

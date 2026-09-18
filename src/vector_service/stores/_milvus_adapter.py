@@ -50,6 +50,7 @@ from vector_service.core.errors import (
     DimensionMismatch,
     StoreError,
 )
+from vector_service.core.logging import get_logger
 
 # TTL for ``has_collection`` / ``describe_collection`` caches. Milvus
 # schema is immutable after ``create_collection`` completes, so the
@@ -58,6 +59,8 @@ from vector_service.core.errors import (
 # if an operator runs ``ALTER TABLE`` directly against the backend
 # outside this service).
 _SCHEMA_CACHE_TTL_S = 300.0
+
+log = get_logger(__name__)
 
 # pymilvus error codes (stable across 2.4.x; see pymilvus/exception.py)
 _ERR_DB_NOT_FOUND = 800
@@ -440,6 +443,113 @@ class MilvusAdapter:
             ) from e
         self._invalidate_collection(database, name)
 
+    def create_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+        metric_type: str = "cosine",
+        index_type: str = "HNSW",
+        params: dict | None = None,
+    ) -> None:
+        # Milvus 2.4's create_index replaces an existing index on the
+        # same field — there's no separate "rebuild" path. We still
+        # best-effort drop the old one first so the operator's intent
+        # ("rebuild") reads correctly in the request log and any
+        # misconfigured index doesn't bleed into the new one.
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+        schema = self.describe_collection(database, collection)
+        if field_name not in {f["name"] for f in schema["fields"]}:
+            raise StoreError(
+                f"field {field_name!r} is not in the collection schema"
+            )
+        if field_name != schema.get("vector_field"):
+            raise StoreError(
+                f"create_index only supports the vector field "
+                f"{schema.get('vector_field')!r}; got {field_name!r}"
+            )
+        if metric_type not in _METRIC:
+            raise StoreError(
+                f"unsupported metric_type {metric_type!r}; expected one of {sorted(_METRIC)}"
+            )
+
+        # Drop any pre-existing index on the same field. ``drop_index``
+        # on a field with no index raises on some Milvus versions —
+        # swallow those so a fresh create path stays clean.
+        try:
+            self._client.drop_index(collection, field_name=field_name)
+        except Exception:
+            pass
+
+        try:
+            ip = self._client.prepare_index_params()
+            ip.add_index(
+                field_name=field_name,
+                index_type=index_type,
+                metric_type=_METRIC[metric_type],
+                params=dict(params or {}),
+            )
+            self._client.create_index(
+                collection_name=collection, index_params=ip,
+            )
+        except (StoreError,):
+            raise
+        except Exception as e:
+            self._invalidate_collection(database, collection)
+            raise BackendError(
+                f"create_index failed for {database!r}/{collection!r}"
+                f"/{field_name!r}: {e}"
+            ) from e
+        # Index changes don't alter the schema, but a stale describe
+        # cache would mislead a follow-up call. Invalidate to be safe.
+        self._invalidate_collection(database, collection)
+
+    def drop_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+    ) -> None:
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+        schema = self.describe_collection(database, collection)
+        if field_name not in {f["name"] for f in schema["fields"]}:
+            raise StoreError(
+                f"field {field_name!r} is not in the collection schema"
+            )
+        if field_name != schema.get("vector_field"):
+            raise StoreError(
+                f"drop_index only supports the vector field "
+                f"{schema.get('vector_field')!r}; got {field_name!r}"
+            )
+        try:
+            self._client.drop_index(collection, field_name=field_name)
+        except Exception as e:
+            # pymilvus raises when no index exists on some versions.
+            # Surface that as an idempotent success — a no-op drop
+            # is the most user-friendly behaviour for a dashboard
+            # "delete index" button.
+            msg = str(e).lower()
+            if "not found" in msg or "not exist" in msg:
+                return
+            self._invalidate_collection(database, collection)
+            raise BackendError(
+                f"drop_index failed for {database!r}/{collection!r}"
+                f"/{field_name!r}: {e}"
+            ) from e
+        self._invalidate_collection(database, collection)
+
     def describe_collection(
         self, database: str, name: str,
     ) -> dict[str, Any]:
@@ -487,6 +597,7 @@ class MilvusAdapter:
         primary_field = ""
         vector_field_name = ""
         vector_dim: int | None = None
+        vector_field_names: list[str] = []
         fields_out: list[dict[str, Any]] = []
         for f in raw.get("fields", []):
             is_primary = bool(f.get("is_primary"))
@@ -497,9 +608,17 @@ class MilvusAdapter:
                 "dtype": dtype_name,
                 "is_primary": is_primary,
             }
+            # ``nullable`` and ``default_value`` live at the field level in
+            # pymilvus's describe_collection response (not inside ``params``).
+            # Default them so they're always present in the payload — the
+            # API response model will keep the defaults through Pydantic.
+            entry["nullable"] = bool(f.get("nullable", False))
+            if "default_value" in f and f["default_value"] is not None:
+                entry["default_value"] = f["default_value"]
             params = f.get("params") or {}
             if dtype_name == "float_vector":
                 vector_field_name = f["name"]
+                vector_field_names.append(f["name"])
                 vector_dim = int(params.get("dim") or 0)
                 entry["dim"] = vector_dim
                 fields_out.append(entry)
@@ -510,15 +629,56 @@ class MilvusAdapter:
             if is_primary:
                 primary_field = f["name"]
 
-        # Index metric on the vector field
+        # Enumerate every index on every vector field. ``list_indexes`` returns
+        # the set of indexed field names; for each we call ``describe_index``
+        # to read the index type / metric / params. Failures on a single field
+        # are isolated (we just drop that field's index from the list) so one
+        # misconfigured index cannot poison the whole collection summary.
+        indexes_out: list[dict[str, Any]] = []
         metric = "cosine"
+        indexed_vector_fields: list[str] = []
         try:
-            ixinfo = self._client.describe_index(name, vector_field_name)
-            mt = ixinfo.get("metric_type") if isinstance(ixinfo, dict) else None
-            if isinstance(mt, str):
-                metric = _INV_METRIC.get(mt.upper(), mt.lower())
+            indexed_fields = self._client.list_indexes(name)
+            if isinstance(indexed_fields, list):
+                indexed_vector_fields = [
+                    f for f in indexed_fields if f in set(vector_field_names)
+                ]
         except Exception:
-            pass
+            indexed_vector_fields = []
+        for field_name in indexed_vector_fields:
+            try:
+                ixinfo = self._client.describe_index(name, field_name)
+            except Exception:
+                continue
+            if not isinstance(ixinfo, dict):
+                continue
+            entry: dict[str, Any] = {
+                "field_name": field_name,
+                "metric_type": str(ixinfo.get("metric_type", "")).upper() or "?",
+                "index_type": str(ixinfo.get("index_type", "")) or "?",
+                "params": dict(ixinfo.get("params") or {}),
+            }
+            if field_name == vector_field_name:
+                # Pin the collection-level ``metric`` to the vector field's
+                # index metric so callers see a consistent value.
+                metric = _INV_METRIC.get(
+                    entry["metric_type"].upper(), entry["metric_type"].lower(),
+                )
+            # ``describe_index`` returns one entry per index segment in some
+            # pymilvus versions; merge them under the same field_name so the
+            # shape stays one-row-per-vector-field for the API consumer.
+            existing = next(
+                (e for e in indexes_out if e["field_name"] == field_name),
+                None,
+            )
+            if existing is None:
+                indexes_out.append(entry)
+            else:
+                # Keep the first segment's type/metric as the canonical row,
+                # but union the params so operators can see all knobs.
+                merged_params = dict(existing.get("params") or {})
+                merged_params.update(entry["params"])
+                existing["params"] = merged_params
 
         # Row count
         count = 0
@@ -536,6 +696,7 @@ class MilvusAdapter:
             "metric": metric,
             "count": count,
             "fields": fields_out,
+            "indexes": indexes_out,
         }
         with self._lock:
             self._schema_cache[key] = (
@@ -578,6 +739,12 @@ class MilvusAdapter:
                 )
 
         rows: list[dict[str, Any]] = []
+        # Cap every VARCHAR value at its declared ``max_length`` (in *bytes*,
+        # not characters — Milvus counts bytes for VARCHAR). Truncating here
+        # keeps callers from hitting Milvus error 1100 mid-batch and rolling
+        # back an otherwise good upsert. Unknown / non-varchar fields are
+        # passed through unchanged.
+        varchar_caps = _varchar_byte_caps(schema["fields"])
         for i, (vid, vec) in enumerate(zip(ids, vectors)):
             row: dict[str, Any] = {primary_field: vid, vector_field: [float(x) for x in vec]}
             if fields is not None and i < len(fields):
@@ -588,7 +755,20 @@ class MilvusAdapter:
                         raise StoreError(
                             f"unknown scalar field {k!r}; declared: {sorted(schema_names)}"
                         )
-                    row[k] = v
+                    if isinstance(v, str) and k in varchar_caps:
+                        cap = varchar_caps[k]
+                        if len(v.encode("utf-8")) > cap:
+                            original_len = len(v.encode("utf-8"))
+                            row[k] = _truncate_utf8_bytes(v, cap)
+                            log.warning(
+                                "varchar field %r on row %s exceeded %d bytes "
+                                "(was %d); truncated to fit schema",
+                                k, vid, cap, original_len,
+                            )
+                        else:
+                            row[k] = v
+                    else:
+                        row[k] = v
             rows.append(row)
 
         try:
@@ -605,8 +785,17 @@ class MilvusAdapter:
         database: str,
         collection: str,
         primary_field: str,
-        ids: list[str],
+        ids: list[str] | None = None,
+        *,
+        filter_expr: str | None = None,
     ) -> int:
+        has_ids = ids is not None
+        has_filter = filter_expr is not None and filter_expr.strip() != ""
+        if has_ids == has_filter:
+            raise StoreError("provide exactly one of ids or filter_expr")
+        if has_ids and len(ids) == 0:  # type: ignore[arg-type]
+            raise StoreError("ids must be non-empty when provided")
+
         self._ensure_connected()
         self._using_db(database)
         if not self.has_collection(database, collection):
@@ -618,17 +807,16 @@ class MilvusAdapter:
             raise StoreError(
                 f"primary_field {primary_field!r} is not in the collection schema"
             )
+
+        # pymilvus 2.4's ``delete`` accepts either ``ids`` or ``filter``
+        # (mutually exclusive on its side too). Build the kwargs
+        # accordingly and let the SDK reject ambiguous calls.
         try:
             self._ensure_loaded(collection)
-            res = self._client.delete(collection, ids=list(ids))
-            # NOTE: previously called ``refresh_load`` here to make the
-            # delete visible to immediate read-back, but on large
-            # collections ``refresh_load`` is a segment-wide reload
-            # that can stall for seconds and dominates p99 latency.
-            # Milvus writes are eventually consistent; callers that
-            # need immediate read-after-delete should pass
-            # ``force_refresh=true`` via the higher-level store API
-            # (not yet exposed) or rely on Milvus's own load state.
+            if has_ids:
+                res = self._client.delete(collection, ids=list(ids))
+            else:
+                res = self._client.delete(collection, filter=filter_expr)
         except (CollectionNotFound, StoreError):
             raise
         except Exception as e:
@@ -703,6 +891,94 @@ class MilvusAdapter:
             if output_fields:
                 item["fields"] = {k: row.get(k) for k in output_fields}
             out.append(item)
+        return out
+
+    def browse(
+        self,
+        database: str,
+        collection: str,
+        primary_field: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginated, filterable list view over a collection.
+
+        Maps directly onto ``MilvusClient.query``: ``limit`` caps the
+        returned row count, ``offset`` skips that many matching rows
+        (pymilvus 2.4 supports both), and ``output_fields`` selects the
+        scalar columns to materialise. The vector column is never
+        materialised — even if the caller puts it in ``output_fields``,
+        we drop it before issuing the RPC, so a wide-vector collection
+        cannot be accidentally pulled through this path.
+        """
+        if limit < 0:
+            raise StoreError(f"limit must be >= 0, got {limit}")
+        if offset < 0:
+            raise StoreError(f"offset must be >= 0, got {offset}")
+        if limit == 0:
+            return []
+
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+        schema = self.describe_collection(database, collection)
+        schema_names = {f["name"] for f in schema["fields"]}
+        if primary_field not in schema_names:
+            raise StoreError(
+                f"primary_field {primary_field!r} is not in the collection schema"
+            )
+
+        # Resolve "all scalar fields" when the caller didn't pick any.
+        # The vector field is always excluded — a 1024-dim float vector
+        # per row would balloon responses on a wide embedder and is not
+        # what a dashboard browse view is for.
+        if output_fields is None:
+            output = [f["name"] for f in schema["fields"] if f["name"] != schema.get("vector_field")]
+        else:
+            unknown = [
+                f for f in output_fields
+                if f not in schema_names
+            ]
+            if unknown:
+                raise StoreError(
+                    f"unknown output_fields {unknown}; declared: "
+                    f"{sorted(schema_names)}"
+                )
+            output = [f for f in output_fields if f != schema.get("vector_field")]
+        # Always include the primary key in the projection so we can
+        # wrap each row into the standard ``{"id", "fields"}`` shape.
+        if primary_field not in output:
+            output = [primary_field, *output]
+
+        try:
+            self._ensure_loaded(collection)
+            kwargs: dict[str, Any] = {
+                "filter": filter_expr or "",
+                "output_fields": output,
+                "limit": int(limit),
+                "offset": int(offset),
+            }
+            rows = self._client.query(collection, **kwargs)
+        except (CollectionNotFound, StoreError):
+            raise
+        except Exception as e:
+            raise BackendError(
+                f"browse failed for {database!r}/{collection!r}: {e}"
+            ) from e
+
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get(primary_field)
+            fields = {k: v for k, v in row.items() if k != primary_field}
+            out.append({"id": pid, "fields": fields})
         return out
 
     def search(
@@ -827,3 +1103,38 @@ class MilvusAdapter:
 def _escape(s: str) -> str:
     """Escape a value for safe embedding in a Milvus filter expression."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _varchar_byte_caps(fields: list[dict[str, Any]]) -> dict[str, int]:
+    """Map ``field_name → max_length_bytes`` for every declared VARCHAR.
+
+    Built from the same dict shape ``describe_collection`` produces: only
+    varchar fields with a positive ``max_length`` are included. Used by
+    :meth:`MilvusAdapter.upsert` to truncate user values that would
+    otherwise blow past Milvus's byte cap and trigger error 1100.
+    """
+    caps: dict[str, int] = {}
+    for f in fields:
+        if f.get("dtype") != "varchar":
+            continue
+        ml = f.get("max_length")
+        if isinstance(ml, int) and ml > 0:
+            caps[f["name"]] = ml
+    return caps
+
+
+def _truncate_utf8_bytes(s: str, max_bytes: int) -> str:
+    """Truncate ``s`` to at most ``max_bytes`` UTF-8 bytes without splitting
+    a multi-byte sequence.
+
+    Surrogate-style truncation (``s.encode()[:max_bytes]``) can leave an
+    incomplete multi-byte char at the boundary, which pymilvus then rejects.
+    Decoding with ``errors="ignore"`` drops the dangling tail bytes so the
+    returned string is always valid UTF-8 and strictly under the cap.
+    """
+    if max_bytes <= 0:
+        return ""
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")

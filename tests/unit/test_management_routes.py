@@ -64,11 +64,42 @@ class FakeStore:
                            primary_field, vector_field, scalar_fields, indexes))
         if name == "dup":
             raise CollectionAlreadyExists("dup")
+        # Mirror MilvusStore: build a fields payload from the inputs the
+        # caller just gave us, and fabricate indexes from the IndexSpec list.
+        fields_payload = [
+            {
+                "name": f.name,
+                "dtype": f.dtype,
+                "is_primary": bool(f.is_primary),
+                "dim": f.dim,
+                "max_length": f.max_length,
+                "nullable": bool(f.nullable),
+                "default_value": f.default_value,
+            }
+            for f in scalar_fields
+        ]
+        fields_payload.append({
+            "name": vector_field.name,
+            "dtype": "float_vector",
+            "is_primary": False,
+            "dim": int(vector_field.dim or 0),
+        })
+        indexes_payload = [
+            {
+                "field_name": ip.field_name,
+                "metric_type": ip.metric_type,
+                "index_type": ip.index_type,
+                "params": dict(ip.params or {}),
+            }
+            for ip in (indexes or [])
+        ]
         return CollectionInfo(
             database=database, name=name, dim=vector_field.dim,
             metric=(indexes[0].metric_type if indexes else vector_field.metric_type),
             count=0, primary_field=primary_field, vector_field=vector_field.name,
             metadata={},
+            fields=fields_payload,
+            indexes=indexes_payload,
         )
 
     def drop_collection(self, database, name):
@@ -81,6 +112,19 @@ class FakeStore:
         return CollectionInfo(
             database=database, name=name, dim=4, metric="cosine", count=3,
             primary_field="id", vector_field="vector",
+            fields=[
+                {"name": "id", "dtype": "varchar", "is_primary": True,
+                 "max_length": 64, "nullable": False},
+                {"name": "category", "dtype": "varchar", "is_primary": False,
+                 "max_length": 64, "nullable": True,
+                 "default_value": "unknown"},
+                {"name": "vector", "dtype": "float_vector",
+                 "is_primary": False, "dim": 4, "nullable": False},
+            ],
+            indexes=[
+                {"field_name": "vector", "metric_type": "cosine",
+                 "index_type": "HNSW", "params": {"M": 16, "efConstruction": 200}},
+            ],
         )
 
     # vectors
@@ -89,16 +133,59 @@ class FakeStore:
         if vectors and len(vectors[0]) != 4:
             raise DimensionMismatch("bad", expected=4, got=len(vectors[0]))
 
-    def delete(self, database, collection, primary_field, ids):
-        self.calls.append(("delete", database, collection, primary_field, ids))
+    def delete(self, database, collection, primary_field, ids=None, *, filter_expr=None):
+        self.calls.append((
+            "delete", database, collection, primary_field, ids, filter_expr,
+        ))
+        if collection == "missing":
+            raise CollectionNotFound("missing")
+        # Mirror the production adapter's "return the count" contract.
+        # ids-mode returns len(ids); filter-mode returns a small
+        # canned number so tests can assert on the body shape.
+        if ids is not None:
+            return len(ids)
+        return 2
 
     def get(self, database, collection, primary_field, ids, output_fields=None):
         self.calls.append(("get", database, collection, primary_field, ids, output_fields))
         return [{"id": ids[0], "vector": None, "fields": {"x": 1}}]
 
+    def create_index(self, database, collection, *, field_name,
+                     metric_type="cosine", index_type="HNSW", params=None):
+        self.calls.append((
+            "create_index", database, collection, field_name,
+            metric_type, index_type, params or {},
+        ))
+        if collection == "missing":
+            raise CollectionNotFound("missing")
+        return None
+
+    def drop_index(self, database, collection, *, field_name):
+        self.calls.append(("drop_index", database, collection, field_name))
+        if collection == "missing":
+            raise CollectionNotFound("missing")
+        return None
+
     def search(self, database, collection, vector_field, query_vector, top_k=10, filter_expr=None, output_fields=None):
         self.calls.append(("search", database, collection, vector_field, top_k, filter_expr, output_fields))
         return [Hit(id="a", score=0.9, fields={"x": 1})]
+
+    def browse(
+        self, database, collection, primary_field,
+        *, limit=20, offset=0, filter_expr=None, output_fields=None,
+    ):
+        self.calls.append((
+            "browse", database, collection, primary_field,
+            limit, offset, filter_expr, output_fields,
+        ))
+        if collection == "missing":
+            raise CollectionNotFound("missing")
+        # Two-row default response. Tests that care about exact row
+        # counts can reach into ``self.calls`` to verify the args.
+        return [
+            {"id": f"k-{offset}", "fields": {"category": "mouse", "price": 9.9}},
+            {"id": f"k-{offset + 1}", "fields": {"category": "keyboard", "price": 99.0}},
+        ]
 
     def close(self):
         pass
@@ -259,6 +346,13 @@ def test_create_collection(client):
     assert body["primary_field"] == "id"
     assert body["vector_field"] == "vector"
     assert any(f["name"] == "vector" and f["dim"] == 4 for f in body["fields"])
+    # Indexes are now surfaced through the POST response too, so the operator
+    # immediately sees which index the create call chose.
+    assert body["indexes"], "create response should expose at least one index"
+    assert body["indexes"][0]["field_name"] == "vector"
+    assert body["indexes"][0]["index_type"] == "HNSW"
+    assert body["indexes"][0]["metric_type"] == "cosine"
+    assert body["indexes"][0]["params"] == {"M": 16, "efConstruction": 200}
 
 
 def test_create_collection_uses_index_metric(client):
@@ -302,8 +396,69 @@ def test_create_collection_schema_validation_invalid_index_target(client):
 def test_collection_info(client):
     r = client.get("/v1/databases/alpha/collections/c1")
     assert r.status_code == 200
-    assert r.json()["name"] == "c1"
-    assert r.json()["database"] == "alpha"
+    body = r.json()
+    assert body["name"] == "c1"
+    assert body["database"] == "alpha"
+    # The detail endpoint now exposes fields + indexes so the dashboard can
+    # render the collection's schema without a follow-up RPC.
+    assert body["fields"], "detail response should include fields"
+    assert any(f["name"] == "id" and f["is_primary"] for f in body["fields"])
+    assert any(f["name"] == "vector" and f["dtype"] == "float_vector" for f in body["fields"])
+    assert body["indexes"], "detail response should include indexes"
+    assert body["indexes"][0]["field_name"] == "vector"
+    assert body["indexes"][0]["index_type"] == "HNSW"
+    assert body["indexes"][0]["params"] == {"M": 16, "efConstruction": 200}
+    # Field-level attributes (max_length / nullable / default_value) must
+    # reach the wire so the dashboard can render the full schema picture.
+    primary = next(f for f in body["fields"] if f["is_primary"])
+    assert primary["max_length"] == 64
+    assert primary["nullable"] is False
+    secondary = next(f for f in body["fields"] if f["name"] == "category")
+    assert secondary["max_length"] == 64
+    assert secondary["nullable"] is True
+    assert secondary["default_value"] == "unknown"
+
+
+def test_collection_info_exposes_fields_and_indexes(client):
+    """Focused regression: GET detail must surface fields + indexes payload.
+
+    Without this, the dashboard collection row has nothing to expand into —
+    every card would render empty.
+    """
+    r = client.get("/v1/databases/alpha/collections/c1")
+    assert r.status_code == 200
+    body = r.json()
+    # Three fields: scalar primary + scalar secondary + vector field.
+    assert len(body["fields"]) == 3
+    primary = next(f for f in body["fields"] if f["is_primary"])
+    assert primary["name"] == "id" and primary["dtype"] == "varchar"
+    assert primary["max_length"] == 64
+    assert primary["nullable"] is False
+    vector_field = next(f for f in body["fields"] if f["dtype"] == "float_vector")
+    assert vector_field["dim"] == 4
+    assert vector_field["nullable"] is False
+    # Single index on the vector field.
+    assert len(body["indexes"]) == 1
+    ix = body["indexes"][0]
+    assert ix["field_name"] == "vector"
+    assert ix["index_type"] == "HNSW"
+    assert ix["metric_type"] == "cosine"
+    assert ix["params"]["M"] == 16
+    assert ix["params"]["efConstruction"] == 200
+
+
+def test_collection_info_surfaces_field_attributes(client):
+    """Pin dashboard regression: the field card must show varchar length
+    and nullability, not just dtype."""
+    r = client.get("/v1/databases/alpha/collections/c1")
+    body = r.json()
+    by_name = {f["name"]: f for f in body["fields"]}
+    assert by_name["id"]["max_length"] == 64
+    assert by_name["id"]["nullable"] is False
+    assert by_name["category"]["max_length"] == 64
+    assert by_name["category"]["nullable"] is True
+    assert by_name["category"]["default_value"] == "unknown"
+    assert by_name["vector"]["dim"] == 4
 
 
 def test_drop_collection_not_found(client):
@@ -395,6 +550,318 @@ def test_search_requires_one_of(client):
     r = client.post(
         "/v1/databases/alpha/collections/c1/search",
         json={"primary_field": "id", "vector_field": "vector", "top_k": 5},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+# ---- browse (POST .../rows) ----
+
+def test_browse_happy_path(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "limit": 20, "offset": 0},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # FakeStore.collection_info reports count=3; the response should
+    # echo total/limit/offset/returned and flag has_more correctly.
+    assert body["total"] == 3
+    assert body["limit"] == 20
+    assert body["offset"] == 0
+    assert body["returned"] == len(body["items"]) == 2
+    # has_more == offset + returned < total  →  0 + 2 < 3
+    assert body["has_more"] is True
+    # Each item is shaped like a GetVectorItem: id, vector (None), fields.
+    for it in body["items"]:
+        assert "id" in it
+        assert "fields" in it
+    # The fake store echoes the offset into the first id, so we can
+    # also assert the call was forwarded with the right paging args.
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[0] == "browse"
+    assert last_call[1:] == ("alpha", "c1", "id", 20, 0, None, None)
+
+
+def test_browse_with_filter_and_paging(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={
+            "primary_field": "id",
+            "limit": 50,
+            "offset": 20,
+            "filter_expr": "category == 'mouse'",
+            "output_fields": ["id", "category"],
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["limit"] == 50
+    assert body["offset"] == 20
+    # With offset=20 + returned=2 < total=3 the flag is still True;
+    # the contract is purely arithmetic, not backend-driven.
+    assert body["has_more"] is False
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[0] == "browse"
+    assert last_call[5] == 20          # offset
+    assert last_call[6] == "category == 'mouse'"  # filter_expr
+    assert last_call[7] == ["id", "category"]      # output_fields
+
+
+def test_browse_last_page_no_more(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "limit": 20, "offset": 0},
+    )
+    body = r.json()
+    # Pinned: total=3, returned=2, offset=0 → has_more=True.
+    assert body["has_more"] is True
+
+
+def test_browse_collection_not_found(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/missing/rows",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "collection_not_found"
+
+
+def test_browse_limit_above_cap_rejected(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "limit": 500},
+    )
+    # Pydantic ge/le enforcement → 422 with the standard envelope.
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_browse_limit_below_one_rejected(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "limit": 0},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_browse_negative_offset_rejected(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "offset": -1},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_browse_backend_error_returns_503(client):
+    """BackendError → store_unavailable (503), not 422."""
+    fake = client.app.state.store
+    fake.browse = lambda *a, **kw: (_ for _ in ()).throw(BackendError("milvus down"))
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "store_unavailable"
+
+
+def test_browse_store_error_returns_422(client):
+    """A StoreError from the adapter (e.g. unknown output_fields) maps
+    to invalid_request, same envelope shape as upsert/search."""
+    fake = client.app.state.store
+    fake.browse = lambda *a, **kw: (
+        (_ for _ in ()).throw(StoreError("unknown output_fields ['foo']"))
+    )
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "output_fields": ["foo"]},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_browse_filter_expr_too_long_rejected(client):
+    # Cap is 4096 chars; a 600-char token × 10 = 6000 chars busts it.
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "filter_expr": "abcdefghij" * 600},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+# ---- delete (POST .../vectors/delete) — ids vs filter_expr ----
+
+def test_delete_by_ids_happy_path(client):
+    """Regression: the original ids-only delete path still works."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "ids": ["a", "b"]},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"deleted": 2}
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[0] == "delete"
+    assert last_call[4] == ["a", "b"]  # ids
+    assert last_call[5] is None         # filter_expr
+
+
+def test_delete_by_filter_expr_happy_path(client):
+    """Bulk delete via Milvus filter expression is the new path."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id",
+              "filter_expr": "category == 'mouse' and price < 100"},
+    )
+    assert r.status_code == 200
+    # FakeStore.delete returns 2 in filter mode so we can assert
+    # the count flows through to the response body.
+    assert r.json() == {"deleted": 2}
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[0] == "delete"
+    assert last_call[4] is None                       # ids
+    assert last_call[5] == "category == 'mouse' and price < 100"  # filter_expr
+
+
+def test_delete_both_ids_and_filter_rejected(client):
+    """The request body must provide exactly one of ids or filter_expr."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "ids": ["a"], "filter_expr": "x > 0"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_delete_neither_ids_nor_filter_rejected(client):
+    """Empty body (neither ids nor filter_expr) is a 422."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_delete_empty_ids_list_rejected(client):
+    """ids=[] is treated as "not provided" by the XOR check, not as
+    a 0-element delete — must be rejected with 422."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "ids": []},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_delete_filter_expr_too_long_rejected(client):
+    """The same 4096 char cap used by the browse filter applies here."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "filter_expr": "abcdefghij" * 600},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_delete_collection_not_found(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/missing/vectors/delete",
+        json={"primary_field": "id", "ids": ["a"]},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "collection_not_found"
+
+
+# ---- index management ----
+
+def test_create_index_happy_path(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/index",
+        json={
+            "field_name": "vector",
+            "metric_type": "cosine",
+            "index_type": "HNSW",
+            "params": {"M": 16, "efConstruction": 200},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json() == {"rebuilt": "vector"}
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[0] == "create_index"
+    assert last_call[1:] == (
+        "alpha", "c1", "vector", "cosine", "HNSW",
+        {"M": 16, "efConstruction": 200},
+    )
+
+
+def test_create_index_with_defaults(client):
+    """Caller can omit metric_type / index_type / params — defaults apply."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/index",
+        json={"field_name": "vector"},
+    )
+    assert r.status_code == 200
+    last_call = client.app.state.store.calls[-1]
+    assert last_call[3:] == ("vector", "cosine", "HNSW", {})
+
+
+def test_create_index_bad_metric_rejected(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/index",
+        json={"field_name": "vector", "metric_type": "jaccard"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_create_index_collection_not_found(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/missing/index",
+        json={"field_name": "vector"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "collection_not_found"
+
+
+def test_drop_index_happy_path(client):
+    r = client.delete(
+        "/v1/databases/alpha/collections/c1/index",
+        params={"field_name": "vector"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"dropped": "vector"}
+    last_call = client.app.state.store.calls[-1]
+    assert last_call == ("drop_index", "alpha", "c1", "vector")
+
+
+def test_drop_index_missing_field_name_rejected(client):
+    """field_name is required; omitting it must 422 from FastAPI's
+    query-param validation (not surface as a generic 500)."""
+    r = client.delete("/v1/databases/alpha/collections/c1/index")
+    assert r.status_code == 422
+
+
+def test_drop_index_collection_not_found(client):
+    r = client.delete(
+        "/v1/databases/alpha/collections/missing/index",
+        params={"field_name": "vector"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "collection_not_found"
+
+
+def test_create_index_store_error_returns_422(client):
+    """A StoreError from the adapter maps to invalid_request, not 500."""
+    fake = client.app.state.store
+    fake.create_index = lambda *a, **kw: (
+        (_ for _ in ()).throw(StoreError("unknown field 'foo'"))
+    )
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/index",
+        json={"field_name": "vector"},
     )
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "invalid_request"

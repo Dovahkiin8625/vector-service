@@ -302,6 +302,91 @@ class FieldSummary(BaseModel):
     dtype: str
     is_primary: bool = False
     dim: int | None = None
+    # Field-level attributes. Mirrors the ``ScalarFieldSpec`` shape so a UI
+    # can render a faithful picture of the schema without re-reading the
+    # create-time request body.
+    max_length: int | None = Field(
+        default=None,
+        description="Max stored bytes per value (varchar only).",
+    )
+    nullable: bool = Field(
+        default=False,
+        description="Whether the field accepts NULL values.",
+    )
+    default_value: Any | None = Field(
+        default=None,
+        description="Default value used when a row omits this field, if declared.",
+    )
+
+
+class IndexSummary(BaseModel):
+    """Compact view of one index on a collection.
+
+    Mirrors the ``IndexParamSpec`` shape from
+    ``POST .../collections``: one row per vector field's index, with the
+    index-type / metric / params exactly as the backend reported them.
+    """
+
+    field_name: str = Field(description="Vector field name this index covers.")
+    metric_type: str = Field(
+        description="Distance metric (cosine / ip / l2).",
+        examples=["cosine"],
+    )
+    index_type: str = Field(
+        description="Backend-specific index type, e.g. ``HNSW`` / ``IVF_FLAT``.",
+        examples=["HNSW"],
+    )
+    params: dict = Field(
+        default_factory=dict,
+        description="Index-specific knobs as reported by the backend (e.g. ``M``, ``efConstruction``).",
+    )
+
+
+class IndexManageRequest(BaseModel):
+    """Request body for ``POST /v1/databases/{db}/collections/{name}/index``.
+
+    Mirrors :class:`IndexParamSpec` for one index — the runtime
+    manage endpoint only ever operates on a single field, so a flat
+    body is friendlier than reusing the create-time list shape.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "field_name": "vector",
+                "metric_type": "cosine",
+                "index_type": "HNSW",
+                "params": {"M": 16, "efConstruction": 200},
+            }
+        }
+    )
+
+    field_name: str = Field(
+        description=(
+            "Vector field name to (re)build the index on. Must match "
+            "the collection's declared vector field."
+        ),
+        examples=["vector"],
+    )
+    metric_type: Literal["cosine", "ip", "l2"] = Field(
+        default="cosine",
+        description="Distance metric used at search time.",
+    )
+    index_type: str = Field(
+        default="HNSW",
+        description=(
+            "Milvus index type, e.g. ``HNSW``, ``IVF_FLAT``, ``IVF_SQ8``, "
+            "``DISKANN``, ``FLAT``. Case-sensitive per pymilvus."
+        ),
+    )
+    params: dict = Field(
+        default_factory=dict,
+        description=(
+            "Index-specific knobs forwarded verbatim (e.g. ``{\"M\": 16, "
+            "\"efConstruction\": 200}`` for HNSW, ``{\"nlist\": 128}`` for "
+            "IVF_FLAT). Defaults to the backend's stock values when empty."
+        ),
+    )
 
 
 class CollectionInfoResponse(BaseModel):
@@ -316,6 +401,10 @@ class CollectionInfoResponse(BaseModel):
     vector_field: str = Field(description="Name of the vector field.")
     fields: list[FieldSummary] = Field(
         description="All fields in the collection (scalar + vector)."
+    )
+    indexes: list[IndexSummary] = Field(
+        default_factory=list,
+        description="Indexes built on the collection (one per vector field).",
     )
     metadata: dict = Field(
         default_factory=dict,
@@ -418,13 +507,48 @@ class UpsertVectorsRequest(BaseModel):
 
 
 class DeleteVectorsRequest(BaseModel):
-    """Request body for `POST .../vectors/delete`."""
+    """Request body for `POST .../vectors/delete`.
+
+    Callers must provide **exactly one** of ``ids`` (delete a known
+    list of primary keys) or ``filter_expr`` (delete every row that
+    matches a Milvus-native boolean expression). The legacy
+    ``ids``-only path is preserved for existing callers; new
+    bulk-cleanup flows should use ``filter_expr``.
+    """
 
     primary_field: str = Field(description="Primary key field name.")
-    ids: list[str] = Field(
-        min_length=1,
-        description="Identifiers of vectors to delete.",
+    ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Primary key values to delete. Mutually exclusive with "
+            "``filter_expr``. When provided, must be a non-empty list."
+        ),
     )
+    filter_expr: str | None = Field(
+        default=None,
+        max_length=4096,
+        description=(
+            "Milvus-native boolean expression. Deletes every row that "
+            "matches. Field names must match scalar fields declared on "
+            "the collection. Mutually exclusive with ``ids``."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        has_ids = self.ids is not None
+        # Treat an all-whitespace filter as "not provided" so the
+        # XOR check doesn't reject a request that the operator
+        # might have constructed with a placeholder.
+        has_filter = (
+            self.filter_expr is not None
+            and self.filter_expr.strip() != ""
+        )
+        if has_ids == has_filter:
+            raise ValueError("provide exactly one of ids or filter_expr")
+        if self.ids is not None and len(self.ids) == 0:
+            raise ValueError("ids must be non-empty when provided")
+        return self
 
 
 class GetVectorsRequest(BaseModel):
@@ -455,6 +579,92 @@ class GetVectorsResponse(BaseModel):
     """Response of `POST .../vectors/get`."""
 
     items: list[GetVectorItem]
+
+
+class BrowseRequest(BaseModel):
+    """Request body for `POST .../rows` (paginated list view).
+
+    Lets a caller ask for a slice of rows from a collection without
+    having to know the primary keys in advance — the typical
+    use case is a dashboard "browse data" tab. Mirrors
+    :class:`SearchRequest` for the parts they share (``filter_expr``,
+    ``output_fields``) so a UI can reuse input widgets.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "primary_field": "id",
+                "limit": 20,
+                "offset": 0,
+                "filter_expr": "category == 'mouse'",
+                "output_fields": ["id", "category", "price"],
+            }
+        }
+    )
+
+    primary_field: str = Field(description="Primary key field name.")
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description=(
+            "Maximum number of rows to return in this page. "
+            "Server-side cap; defaults to 20, max 200."
+        ),
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of matching rows to skip before returning results. "
+            "Use with ``limit`` to page through a collection."
+        ),
+    )
+    filter_expr: str | None = Field(
+        default=None,
+        max_length=4096,
+        description=(
+            "Optional Milvus-native boolean expression applied before "
+            "paging. Field names must match scalar fields declared on "
+            "the collection."
+        ),
+    )
+    output_fields: list[str] | None = Field(
+        default=None,
+        description=(
+            "Scalar field names to materialise. ``None`` means "
+            "every declared scalar field; the vector field is never "
+            "included regardless."
+        ),
+    )
+
+
+class BrowseResponse(BaseModel):
+    """Response of `POST .../rows`."""
+
+    items: list[GetVectorItem] = Field(
+        description="Page of rows, ordered by the backend's natural order."
+    )
+    total: int = Field(
+        description=(
+            "Total row count reported by the collection's metadata. "
+            "The page's effective upper bound; ``has_more`` is derived "
+            "from this and the requested offset."
+        ),
+    )
+    limit: int = Field(description="Echoes the requested page size.")
+    offset: int = Field(description="Echoes the requested offset.")
+    returned: int = Field(
+        description="Number of rows actually returned (``len(items)``)."
+    )
+    has_more: bool = Field(
+        description=(
+            "True when more rows exist past this page (``offset + "
+            "returned < total``). On the last page this is False "
+            "even if the page is non-empty."
+        ),
+    )
 
 
 # ---- Search ----

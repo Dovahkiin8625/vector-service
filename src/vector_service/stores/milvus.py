@@ -258,6 +258,39 @@ class MilvusStore(VectorStore):
             raise StoreError(f"create_collection failed: {e}") from e
 
         primary_index = indexes[0]
+        # Build a response-shape that mirrors what ``describe_collection``
+        # would have returned for the freshly-created collection, so the
+        # caller of POST /collections sees the same fields/indexes payload
+        # as GET /collections/{name}.
+        fields_payload: list[dict] = [
+            {
+                "name": f.name,
+                "dtype": f.dtype,
+                "is_primary": bool(f.is_primary),
+                "dim": f.dim,
+                "max_length": f.max_length,
+                "nullable": bool(f.nullable),
+                "default_value": f.default_value,
+            }
+            for f in scalar_fields
+        ]
+        fields_payload.append(
+            {
+                "name": vector_field.name,
+                "dtype": "float_vector",
+                "is_primary": False,
+                "dim": int(vector_field.dim or 0),
+            }
+        )
+        indexes_payload: list[dict] = [
+            {
+                "field_name": ip.field_name,
+                "metric_type": ip.metric_type,
+                "index_type": ip.index_type,
+                "params": dict(ip.params or {}),
+            }
+            for ip in indexes
+        ]
         return CollectionInfo(
             database=database,
             name=name,
@@ -267,6 +300,8 @@ class MilvusStore(VectorStore):
             primary_field=primary_field,
             vector_field=vector_field.name,
             metadata={},
+            fields=fields_payload,
+            indexes=indexes_payload,
         )
 
     def drop_collection(self, database: str, name: str) -> None:
@@ -287,6 +322,40 @@ class MilvusStore(VectorStore):
             primary_field=str(schema["primary_field"]),
             vector_field=str(schema["vector_field"]),
             metadata={},
+            fields=list(schema.get("fields") or []),
+            indexes=list(schema.get("indexes") or []),
+        )
+
+    def create_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+        metric_type: str = "cosine",
+        index_type: str = "HNSW",
+        params: dict | None = None,
+    ) -> None:
+        self._adapter.create_index(
+            database=database,
+            collection=collection,
+            field_name=field_name,
+            metric_type=metric_type,
+            index_type=index_type,
+            params=params,
+        )
+
+    def drop_index(
+        self,
+        database: str,
+        collection: str,
+        *,
+        field_name: str,
+    ) -> None:
+        self._adapter.drop_index(
+            database=database,
+            collection=collection,
+            field_name=field_name,
         )
 
     # ------------------------------------------------------------------
@@ -318,13 +387,16 @@ class MilvusStore(VectorStore):
         database: str,
         collection: str,
         primary_field: str,
-        ids: list[str],
-    ) -> None:
-        self._adapter.delete(
+        ids: list[str] | None = None,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        return self._adapter.delete(
             database=database,
             collection=collection,
             primary_field=primary_field,
             ids=ids,
+            filter_expr=filter_expr,
         )
 
     def get(
@@ -347,6 +419,33 @@ class MilvusStore(VectorStore):
         return [
             {"id": it["id"], "vector": None, "fields": it["fields"]}
             for it in items
+        ]
+
+    def browse(
+        self,
+        database: str,
+        collection: str,
+        primary_field: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[dict]:
+        rows = self._adapter.browse(
+            database=database,
+            collection=collection,
+            primary_field=primary_field,
+            limit=limit,
+            offset=offset,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
+        )
+        # Same "vector is null" contract as ``get``; the adapter already
+        # strips the vector field, so we only need to wrap.
+        return [
+            {"id": it["id"], "vector": None, "fields": it["fields"]}
+            for it in rows
         ]
 
     def search(
