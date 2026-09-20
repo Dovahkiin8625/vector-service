@@ -132,6 +132,21 @@ class ParserSettings(BaseSettings):
     #: default; an explicit env var already set in the shell wins.
     hf_endpoint: str = ""
 
+    #: When to run OCR on PDFs: ``auto`` (default) only runs the full
+    #: OCR pipeline on PDFs whose pages lack an extractable text layer
+    #: (scans); text-native PDFs take a model-light fast path
+    #: (``do_ocr=False`` — seconds vs tens of seconds on the same
+    #: hardware). ``on`` reproduces Docling's default behaviour (OCR
+    #: always available — required for mixed/unknown corpora); ``off``
+    #: never OCRs (fastest, but scanned pages yield no text).
+    ocr: Literal["auto", "on", "off"] = "auto"
+
+    #: Reconstruct tables (TableFormer) on the text-layer fast path.
+    #: Kept enabled because the stage costs almost nothing once warm on
+    #: a GPU and preserves markdown table output; set false to skip the
+    #: model entirely (saves some cold-start time and VRAM).
+    table_structure: bool = True
+
 
 class ChunkingSettings(BaseSettings):
     """Chunking subsystem configuration.

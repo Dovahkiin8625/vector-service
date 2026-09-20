@@ -678,6 +678,268 @@ def test_parse_bytes_invokes_on_progress_during_conversion(monkeypatch):
     assert seen == [(2, 5)]
 
 
+# -----------------------------------------------------------------------
+# Text-layer fast path: PDFs with an embedded text layer skip OCR
+# (VS_PARSER__OCR=auto, the default).
+# -----------------------------------------------------------------------
+
+try:
+    import fitz  # pymupdf, a declared runtime dependency; used below
+
+    HAS_FITZ = True
+except ImportError:  # pragma: no cover
+    HAS_FITZ = False
+
+
+fitz_required = pytest.mark.skipif(
+    not HAS_FITZ,
+    reason="pymupdf not installed; text-layer detection tests need it",
+)
+
+
+def _make_text_pdf(path: Path, *, pages: int = 2) -> Path:
+    """Digital PDF: every page carries an embedded text layer."""
+    doc = fitz.open()
+    for i in range(1, pages + 1):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"Digital text PDF page {i}", fontsize=18)
+        page.insert_text((72, 130), f"Body paragraph number {i}. " * 10, fontsize=11)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _make_scanned_pdf(path: Path, *, pages: int = 2, label: str = "") -> Path:
+    """Image-only PDF: pages render to pixmaps, so there is no text layer."""
+    src = fitz.open()
+    for i in range(1, pages + 1):
+        page = src.new_page()
+        page.insert_text((72, 72), f"Scanned {label} page {i}", fontsize=18)
+        page.insert_text((72, 130), f"Rendered line {i}. " * 10, fontsize=11)
+
+    out = fitz.open()
+    for page in src:
+        pix = page.get_pixmap(dpi=150)
+        new = out.new_page(width=page.rect.width, height=page.rect.height)
+        new.insert_image(new.rect, pixmap=pix)
+    out.save(str(path))
+    out.close()
+    src.close()
+    return path
+
+
+class _TaggedConverter:
+    """Fake converter that records every convert() call it receives."""
+
+    def __init__(self, tag: str):
+        self.tag = tag
+        self.calls: list[str] = []
+
+    def convert(self, source):
+        self.calls.append(str(source))
+        return _FakeResult(
+            _FakeDocument(markdown=f"from {self.tag}", page_count=2)
+        )
+
+
+def _patch_tagged_converters(monkeypatch) -> list[_TaggedConverter]:
+    made: list[_TaggedConverter] = []
+
+    def _factory(*a, **kw):
+        converter = _TaggedConverter("primary" if not made else f"fast{len(made)}")
+        made.append(converter)
+        return converter
+
+    monkeypatch.setattr(
+        "docling.document_converter.DocumentConverter", _factory,
+    )
+    return made
+
+
+def _set_ocr_mode(monkeypatch, mode: str) -> None:
+    from vector_service.core.config import get_settings
+
+    monkeypatch.setattr(get_settings().parser, "ocr", mode)
+
+
+@fitz_required
+def test_pdf_has_text_layer_true_for_digital_pdf(tmp_path):
+    from vector_service.parsers.docling_parser import _pdf_has_text_layer
+
+    pdf = _make_text_pdf(tmp_path / "digital.pdf")
+    assert _pdf_has_text_layer(pdf) is True
+
+
+@fitz_required
+def test_pdf_has_text_layer_false_for_scanned_pdf(tmp_path):
+    from vector_service.parsers.docling_parser import _pdf_has_text_layer
+
+    pdf = _make_scanned_pdf(tmp_path / "scan.pdf")
+    assert _pdf_has_text_layer(pdf) is False
+
+
+@fitz_required
+def test_pdf_has_text_layer_false_when_any_page_is_textless(tmp_path):
+    """One scanned page in an otherwise digital PDF keeps the full
+    pipeline — the fast path is all-or-nothing per document."""
+    from vector_service.parsers.docling_parser import _pdf_has_text_layer
+
+    digital = _make_text_pdf(tmp_path / "digital.pdf", pages=1)
+    scanned = _make_scanned_pdf(tmp_path / "scan.pdf", pages=1)
+
+    merged = fitz.open()
+    merged.insert_pdf(fitz.open(str(digital)))
+    merged.insert_pdf(fitz.open(str(scanned)))
+    merged.save(str(tmp_path / "mixed.pdf"))
+    merged.close()
+
+    assert _pdf_has_text_layer(tmp_path / "mixed.pdf") is False
+
+
+@fitz_required
+def test_pdf_has_text_layer_false_below_char_threshold(tmp_path):
+    from vector_service.parsers.docling_parser import _pdf_has_text_layer
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "hi", fontsize=11)  # < 10 stripped chars
+    doc.save(str(tmp_path / "tiny.pdf"))
+    doc.close()
+    assert _pdf_has_text_layer(tmp_path / "tiny.pdf") is False
+
+
+def test_pdf_has_text_layer_false_for_garbage_and_missing(tmp_path):
+    from vector_service.parsers.docling_parser import _pdf_has_text_layer
+
+    garbage = tmp_path / "broken.pdf"
+    garbage.write_bytes(b"%PDF-1.4 definitely not parseable")
+    assert _pdf_has_text_layer(garbage) is False
+    assert _pdf_has_text_layer(tmp_path / "missing.pdf") is False
+
+
+@fitz_required
+def test_auto_routes_digital_pdf_to_fast_converter(tmp_path, monkeypatch):
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "auto")
+    pdf = _make_text_pdf(tmp_path / "digital.pdf")
+
+    parser = DoclingParser()
+    parser.load()
+    assert len(made) == 1  # fast converter stays lazy after load()
+
+    parser.parse(pdf)
+    assert len(made) == 2  # built on first text PDF
+    assert made[0].calls == []  # primary (full OCR) never touched
+    assert made[1].calls[0].endswith("digital.pdf")
+
+    # A second digital PDF reuses the same fast converter.
+    parser.parse(_make_text_pdf(tmp_path / "digital2.pdf"))
+    assert len(made) == 2
+    assert len(made[1].calls) == 2
+
+
+@fitz_required
+def test_auto_routes_scanned_pdf_to_primary(tmp_path, monkeypatch):
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "auto")
+    pdf = _make_scanned_pdf(tmp_path / "scan.pdf")
+
+    parser = DoclingParser()
+    parser.load()
+    parser.parse(pdf)
+
+    assert len(made) == 1  # fast converter never built
+    assert made[0].calls[0].endswith("scan.pdf")
+
+
+def test_ocr_off_forces_fast_converter(monkeypatch):
+    """off = never OCR, even when text-layer detection fails (garbage)."""
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "off")
+
+    parser = DoclingParser()
+    parser.load()
+    assert len(made) == 1
+    import asyncio
+
+    asyncio.run(parser.parse_bytes(b"not a real pdf", "application/pdf"))
+    assert len(made) == 2
+    assert made[0].calls == []
+    assert len(made[1].calls) == 1
+
+
+@fitz_required
+def test_ocr_on_forces_primary_for_digital_pdf(tmp_path, monkeypatch):
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "on")
+    pdf = _make_text_pdf(tmp_path / "digital.pdf")
+
+    parser = DoclingParser()
+    parser.load()
+    parser.parse(pdf)
+
+    assert len(made) == 1  # no fast converter at all
+    assert made[0].calls[0].endswith("digital.pdf")
+
+
+def test_non_pdf_mime_always_uses_primary(monkeypatch):
+    """DOCX/PPTX/HTML never take the PDF fast path, even in off mode."""
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "off")
+
+    parser = DoclingParser()
+    parser.load()
+    import asyncio
+
+    asyncio.run(
+        parser.parse_bytes(
+            b"docx bytes",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    )
+    assert len(made) == 1
+    assert len(made[0].calls) == 1
+
+
+def test_unload_clears_both_converters(monkeypatch):
+    import asyncio
+
+    from vector_service.parsers.docling_parser import DoclingParser
+
+    made = _patch_tagged_converters(monkeypatch)
+    _set_ocr_mode(monkeypatch, "off")
+
+    parser = DoclingParser()
+    parser.load()
+
+    asyncio.run(parser.parse_bytes(b"data", "application/pdf"))
+    assert parser._converter is made[0]
+    assert parser._fast_converter is made[1]
+
+    parser.unload()
+    assert parser._converter is None
+    assert parser._fast_converter is None
+
+
+def test_parser_ocr_setting_rejects_unknown_value():
+    import pydantic
+
+    from vector_service.core.config import ParserSettings
+
+    with pytest.raises(pydantic.ValidationError):
+        ParserSettings(ocr="sometimes")
+
+
 def test_markdown_parser_accepts_progress_callback_but_emits_none():
     """Text formats share the parser ABC; they must accept the same
     ``on_progress`` kwarg without producing any page events."""

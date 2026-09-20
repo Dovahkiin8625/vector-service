@@ -178,11 +178,17 @@ def _wrap_threaded_pdf_pipeline(pipeline: Any) -> Any:
     return pipeline
 
 
-def _build_progress_converter() -> "DocumentConverter":
-    """Construct the progress-reporting converter.
+def _build_progress_converter(*, fast: bool = False) -> "DocumentConverter":
+    """Construct a progress-reporting converter.
 
     Imported lazily inside ``DoclingParser.load``'s lock so the class is
     created only when Docling is actually installed.
+
+    ``fast=True`` builds the text-layer converter: the PDF pipeline is
+    created with ``do_ocr=False`` (and ``do_table_structure`` from
+    ``VS_PARSER__TABLE_STRUCTURE``), so text-native PDFs skip RapidOCR
+    entirely. It is a separate converter because Docling caches one
+    pipeline per options hash per ``DocumentConverter`` instance.
     """
     from docling.document_converter import DocumentConverter
 
@@ -191,7 +197,31 @@ def _build_progress_converter() -> "DocumentConverter":
     if not isinstance(DocumentConverter, type):
         return DocumentConverter()
 
+    format_options = None
+    if fast:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import PdfFormatOption
+
+        from vector_service.core.config import get_settings
+
+        parser_settings = get_settings().parser
+        format_options = {
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=PdfPipelineOptions(
+                    do_ocr=False,
+                    do_table_structure=parser_settings.table_structure,
+                )
+            )
+        }
+
     class _ProgressConverterImpl(DocumentConverter):
+        def __init__(self) -> None:
+            if format_options is not None:
+                super().__init__(format_options=format_options)
+            else:
+                super().__init__()
+
         def _get_pipeline(self, doc_format: Any) -> Any:
             pipeline = super()._get_pipeline(doc_format)
             if pipeline is not None:
@@ -236,6 +266,38 @@ def _apply_hub_env() -> None:
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
+#: A page with fewer stripped characters of embedded text than this is
+#: treated as scanned (no usable text layer).
+_TEXT_LAYER_MIN_CHARS = 10
+
+
+def _pdf_has_text_layer(path: Path) -> bool:
+    """True when EVERY page of ``path`` exposes extractable native text.
+
+    Reads the PDF's embedded text layer via PyMuPDF (a declared
+    dependency) — no rendering and no OCR, so this is cheap even for
+    large files. Used by ``ocr=auto`` to route text-native PDFs onto
+    the OCR-free fast pipeline while keeping the full OCR pipeline for
+    scans. Any failure (not a PDF, encrypted, malformed, zero pages,
+    one textless page) returns ``False`` so the caller conservatively
+    keeps the full OCR pipeline instead of silently dropping text.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover — pymupdf is a declared dep
+        return False
+    try:
+        with fitz.open(path) as doc:
+            if doc.is_encrypted or doc.page_count == 0:
+                return False
+            for page in doc:
+                if len(page.get_text("text").strip()) < _TEXT_LAYER_MIN_CHARS:
+                    return False
+    except Exception:  # noqa: BLE001 — any read failure => safe default
+        return False
+    return True
+
+
 class ParserUnavailable(VectorServiceError):
     """The Docling backend is not available (not installed or not loaded)."""
 
@@ -247,6 +309,13 @@ class DoclingParser(DocumentParser):
     DOCX, PPTX, and HTML. Markdown and plain text are handled by
     :class:`vector_service.parsers.markdown_parser.MarkdownParser`
     instead (they don't need Docling's layout model).
+
+    PDFs are routed between TWO lazily built converters according to
+    ``VS_PARSER__OCR`` (default ``auto``): the primary runs Docling's
+    full OCR pipeline (scans), the fast one runs ``do_ocr=False`` for
+    PDFs whose every page exposes an embedded text layer (see
+    :func:`_pdf_has_text_layer`). DOCX/PPTX/HTML always use the
+    primary.
     """
 
     accepted_mime: tuple[str, ...] = (
@@ -269,14 +338,23 @@ class DoclingParser(DocumentParser):
     }
 
     def __init__(self) -> None:
+        # Primary converter: Docling defaults (OCR + table structure),
+        # used for scans and every non-PDF format.
         self._converter: DocumentConverter | None = None
+        # Fast converter: ``do_ocr=False`` PDF pipeline, built lazily on
+        # the first text-native PDF so hosts that only see scans never
+        # pay for a second converter's model set.
+        self._fast_converter: DocumentConverter | None = None
         self._lock = threading.Lock()
+        self._fast_lock = threading.Lock()
 
     # ---- lifecycle ----------------------------------------------------
 
     def load(self) -> None:
-        """Eagerly instantiate the ``DocumentConverter``.
+        """Eagerly instantiate the primary ``DocumentConverter``.
 
+        Only the full OCR converter is built here; the OCR-free fast
+        converter is created lazily by the first text-native PDF.
         Idempotent and 409-tolerant — calling ``load`` twice is a
         no-op. Idempotent loading is required so the lifespan handler
         can call this on every startup (cold + warm starts alike)
@@ -298,15 +376,53 @@ class DoclingParser(DocumentParser):
             self._converter = _build_progress_converter()
 
     def unload(self) -> None:
-        """Release the cached converter. Idempotent."""
+        """Release the cached converters. Idempotent."""
         with self._lock:
             self._converter = None
+        with self._fast_lock:
+            self._fast_converter = None
 
     def _ensure_loaded(self) -> "DocumentConverter":
         if self._converter is None:
             self.load()
         assert self._converter is not None  # for type checkers
         return self._converter
+
+    def _ensure_fast_converter(self) -> DocumentConverter:
+        """Lazily build (and cache) the OCR-free PDF converter."""
+        with self._fast_lock:
+            if self._fast_converter is None:
+                # load() owns the HF-env setup and the docling import
+                # check; the fast converter must not be constructible
+                # on a host where the primary is not.
+                self._ensure_loaded()
+                self._fast_converter = _build_progress_converter(fast=True)
+            return self._fast_converter
+
+    def _select_converter(self, path: Path, mime: str) -> DocumentConverter:
+        """Pick the OCR or OCR-free converter for one document.
+
+        Only PDFs are eligible for the fast path; DOCX/PPTX/HTML keep
+        the primary converter so their behaviour is unchanged.
+        ``VS_PARSER__OCR`` forces ``on`` (always OCR) or ``off``
+        (never OCR); the default ``auto`` inspects the PDF's embedded
+        text layer via :func:`_pdf_has_text_layer`.
+        """
+        primary = self._ensure_loaded()
+        if mime != "application/pdf":
+            return primary
+
+        from vector_service.core.config import get_settings
+
+        mode = get_settings().parser.ocr
+        if mode == "on":
+            return primary
+        if mode == "off":
+            return self._ensure_fast_converter()
+        # auto
+        if _pdf_has_text_layer(path):
+            return self._ensure_fast_converter()
+        return primary
 
     # ---- parsing ------------------------------------------------------
 
@@ -322,9 +438,10 @@ class DoclingParser(DocumentParser):
         ``loop.run_in_executor``). ``on_progress`` ticks once per
         completed page as ``(pages_done, total_pages)``.
         """
-        converter = self._ensure_loaded()
         if not path.exists():
             raise FileNotFoundError(f"file not found: {path}")
+        mime = guess_mime(path)
+        converter = self._select_converter(path, mime)
         token = _current_progress.set(on_progress)
         try:
             result = converter.convert(str(path))
@@ -334,7 +451,7 @@ class DoclingParser(DocumentParser):
             raise RuntimeError(f"docling conversion failed for {path}: {e}") from e
         finally:
             _current_progress.reset(token)
-        return _result_to_parsed(result, mime=guess_mime(path))
+        return _result_to_parsed(result, mime=mime)
 
     async def parse_bytes(
         self,
@@ -356,13 +473,15 @@ class DoclingParser(DocumentParser):
         def _work() -> ParsedDocument:
             import tempfile
 
-            converter = self._ensure_loaded()
             suffix = _suffix_for_mime(mime)
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=suffix, prefix="vs_ingest_",
             ) as fh:
                 fh.write(data)
                 tmp_path = fh.name
+            # Select on the worker thread once the temp file exists:
+            # auto mode needs to read the PDF's text layer to decide.
+            converter = self._select_converter(Path(tmp_path), mime)
             token = _current_progress.set(on_progress)
             try:
                 result = converter.convert(tmp_path)

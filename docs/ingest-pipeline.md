@@ -42,7 +42,7 @@ file: <binary>      # 必填
 
 | MIME | 解析器 | 备注 |
 |------|--------|------|
-| `application/pdf` | Docling | 含 OCR / 表格识别 / 阅读顺序 |
+| `application/pdf` | Docling | 文本层 PDF 走无 OCR 快通道；扫描件走 OCR / 表格识别 / 阅读顺序（见下） |
 | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (.docx) | Docling | |
 | `application/vnd.openxmlformats-officedocument.presentationml.presentation` (.pptx) | Docling | |
 | `text/html` | Docling | |
@@ -70,6 +70,23 @@ file: <binary>      # 必填
 - `metadata.page_count` —— 文档页数（PDF / PPT），其他格式可能为 `null`。
 - Docling converter 为进程级单例：首次调用会触发懒加载（约 10-30 秒模型加载）；设置
   `VS_PARSER__AUTO_LOAD=true` 可在启动时预热（dashboard 部署默认开启），首个请求不再付冷启动代价。
+
+#### OCR 策略（`VS_PARSER__OCR`）
+
+OCR（RapidOCR 逐文本块识别）是扫描件解析的主要耗时（实测约占 98%，GPU 利用率仅个位数百分比）。
+PDF 在转换前先用 PyMuPDF 检查内嵌文本层，逐页判定：
+
+| 值 | 行为 |
+|----|------|
+| `auto`（默认） | **所有页面都有文本层** → 无 OCR 快通道（`do_ocr=False`，实测提速约 70 倍）；任一页无文本层（含损坏/加密 PDF）→ 完整 OCR 管线 |
+| `on` | 始终完整管线（Docling 默认行为，混合语料/不确定时使用） |
+| `off` | 永不 OCR；扫描件页面提取不到文字 |
+
+- 判定基于 PDF 内嵌文本层，不做渲染，开销可忽略；每页少于 10 个非空白字符即视为无文本层。
+- DOCX / PPTX / HTML 始终走完整 converter，不受此开关影响。
+- 快通道仍保留表格重建（TableFormer）；如不需要可设 `VS_PARSER__TABLE_STRUCTURE=false`
+  跳过该模型（省冷启动时间和显存，表格会退化为普通文本）。
+- 快通道 converter 按需懒加载，只解析文本 PDF 的主机不会初始化 OCR 模型。
 
 错误码：`unsupported_mime`（415）/ `file_too_large`（413）/ `parser_failed`（500）/ `parser_unavailable`（503）。
 
@@ -334,11 +351,14 @@ Lumos 用户 query
 
 ## 实现细节
 
-### Docling converter 单例
+### Docling converter 单例（双 converter）
 
-`parsers/docling_parser.py::DoclingParser` 维护一个进程级 `DocumentConverter` 单例（懒加载）。
-首次调用 `parse()` 时实例化；后续调用复用实例，避免每次都重新初始化模型。模型权重
-按需从 HuggingFace 下载（`VS_PARSER__AUTO_DOWNLOAD=true` 时）。
+`parsers/docling_parser.py::DoclingParser` 维护两个懒加载的进程级 `DocumentConverter`：
+完整 OCR 管线（主 converter，`load()` 时创建）和 `do_ocr=False` 的快通道 converter
+（首个文本层 PDF 到达时才创建）。`VS_PARSER__OCR=auto` 时按文档用 PyMuPDF 检测文本层，
+在两者间选择；DOCX/PPTX/HTML 固定走主 converter。两个 converter 都包装了逐页进度回调，
+流式端点的进度事件对两种路径行为一致。模型权重按需从 HuggingFace 下载
+（`VS_PARSER__AUTO_DOWNLOAD=true` 时）。
 
 ### Chunk row 主键
 
