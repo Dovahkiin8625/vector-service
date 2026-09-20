@@ -14,11 +14,14 @@
 | 方法 | 路径 | 用途 |
 |------|------|------|
 | `POST` | `/v1/parse` | 文件 → Markdown + 元数据 |
+| `POST` | `/v1/parse/stream` | 同上，但返回 NDJSON 事件流（上传 % + 逐页解析进度） |
 | `POST` | `/v1/chunk` | Markdown → chunks（含 token 数 / 章节 / 页码） |
 | `POST` | `/v1/ingest` | 一体化：文件 → 解析 → 分片 → 嵌入 → Milvus |
+| `POST` | `/v1/ingest/stream` | 同上，但返回 NDJSON 阶段事件流（含逐页解析进度） |
 
-三个端点均接收 `multipart/form-data`（`/v1/chunk` 是 `application/json`）。`/v1/parse` 与 `/v1/ingest`
-在 dashboard 的 **知识库** 导航组下提供可视化调试页面。
+三个端点均接收 `multipart/form-data`（`/v1/chunk` 是 `application/json`）。dashboard 在
+**知识库** 导航组下实际调用的是两个流式端点（`/v1/parse/stream`、`/v1/ingest/stream`），
+非流式变体保留给 API 客户端使用。
 
 ---
 
@@ -65,9 +68,41 @@ file: <binary>      # 必填
 
 - `markdown` —— 完整 Markdown 文本，保留标题层级、表格、列表、code block。
 - `metadata.page_count` —— 文档页数（PDF / PPT），其他格式可能为 `null`。
-- 首次调用会触发 Docling converter 懒加载（首次约 30-60 秒，后续毫秒级）。
+- Docling converter 为进程级单例：首次调用会触发懒加载（约 10-30 秒模型加载）；设置
+  `VS_PARSER__AUTO_LOAD=true` 可在启动时预热（dashboard 部署默认开启），首个请求不再付冷启动代价。
 
-错误码：`unsupported_mime`（415）/ `file_too_large`（413）/ `parse_failed`（500）/ `parser_unavailable`（503）。
+错误码：`unsupported_mime`（415）/ `file_too_large`（413）/ `parser_failed`（500）/ `parser_unavailable`（503）。
+
+---
+
+## `POST /v1/parse/stream`
+
+multipart 契约与 `/v1/parse` 完全相同，但响应是 `application/x-ndjson` —— 每行一个 JSON 事件，
+dashboard 用它渲染「上传字节 % → 逐页解析进度」：
+
+```
+{"type": "stage", "stage": "parse"}
+{"type": "progress", "stage": "parse", "page": 1, "total": 12}
+{"type": "progress", "stage": "parse", "page": 2, "total": 12}
+...
+{"type": "result", "markdown": "# 文档标题\n\n...", "metadata": {"page_count": 12, ...}}
+```
+
+- `stage` —— 流开始时固定发一个 `{"stage": "parse"}`。
+- `progress` —— 分页二进制格式（PDF / DOCX / PPTX / HTML）每完成一页发一个事件，
+  `page` 为已完成页数、`total` 为总页数；文本格式（MD / TXT）不产生 `progress` 事件。
+  事件严格有序：全部页码事件先于终态事件。
+- 终态事件二选一：成功为 `result`（字段同 `ParseResponse`）；解析中失败为
+  `{"type": "error", "status": 500, "error": {"code": "parser_failed", ...}}`，
+  此时 HTTP 状态码仍是 200 —— 流已经开始。
+- **预检失败**（MIME 不支持 / 文件超限 / 空文件）发生在流开启之前，仍按普通 JSON 错误信封返回
+  （415 / 413 / 400，`Content-Type: application/json`），客户端需同时兼容两种响应。
+
+curl 示例：
+
+```bash
+curl -N -F "file=@report.pdf" http://localhost:8080/v1/parse/stream
+```
 
 ---
 
@@ -156,10 +191,10 @@ token 计数使用 `tiktoken.get_encoding("cl100k_base")`。
 POST /v1/ingest
 Content-Type: multipart/form-data
 
-file:          <binary>            # 必填
-database:      lumos               # 必填，必须已存在
-collection:    kb_a1b2c3d4e5f6    # 必填，必须已存在且 schema 匹配 embedder.dim
-chunk_size:    500                 # 可选，默认 500
+file:          <binary>            # 必填，表单字段
+database:      lumos               # 表单字段；不存在时按固定 ingest schema 自动创建
+collection:    kb_a1b2c3d4e5f6    # 表单字段；不存在时自动创建，已存在则校验 dim 必须匹配 embedder.dim
+chunk_size:    500                 # 可选，表单字段，默认 500
 chunk_overlap: 75                  # 可选，默认 75
 embed_model:   bge-m3              # 必填，必须已加载
 metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选，JSON 字符串
@@ -179,9 +214,38 @@ metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选�
 }
 ```
 
+### 流式变体：`POST /v1/ingest/stream`
+
+multipart 契约与 `/v1/ingest` 完全相同，但响应是 `application/x-ndjson` —— 每行一个 JSON 事件，
+dashboard 用它渲染「上传 → 解析 → 分片 → 嵌入 → 写入」阶段步进器：
+
+```
+{"type": "stage", "stage": "parse"}
+{"type": "progress", "stage": "parse", "page": 1, "total": 12}
+{"type": "progress", "stage": "parse", "page": 2, "total": 12}
+...
+{"type": "stage", "stage": "chunk"}
+{"type": "stage", "stage": "embed"}
+{"type": "stage", "stage": "upsert"}
+{"type": "result", "doc_id": "...", "chunk_count": 23, "page_count": 12, "tokens_used": 12453}
+```
+
+- `stage` 事件共 4 个，名称固定（`parse` / `chunk` / `embed` / `upsert`），属于公开 API 契约。
+- parse 阶段内可能穿插 `progress` 事件（逐页，字段同 `/v1/parse/stream`；仅 PDF / DOCX / PPTX /
+  HTML，文本上传没有），全部位于 parse 与 chunk 两个 stage 事件之间。
+  字节级上传进度不经过该流，由客户端从 multipart 上传本身取（dashboard 用 XHR `upload.onprogress`）。
+- 终态事件二选一：成功为 `result`（字段同 `IngestResponse`）；管道内失败为
+  `{"type": "error", "status": 503, "error": {"code": "...", "message": "..."}}`，
+  此时 HTTP 状态码仍是 200 —— 流已经开始。
+- **预检失败**（参数非法 / MIME 不支持 / 文件超限 / embedder 未加载）发生在流开启之前，
+  仍按普通 JSON 错误信封返回（4xx/503，`Content-Type: application/json`），客户端需同时兼容两种响应。
+- 文档解析后未产生任何分片时，只发出 `parse`、`chunk` 两个 stage 事件，随后直接 `result`
+  （`chunk_count: 0`），不会进入嵌入 / 写入。
+
 ### Collection schema（写入约定）
 
-`/v1/ingest` 要求目标 collection 已存在，schema 必须与下面兼容：
+目标 collection 不存在时按下列固定 schema 自动创建（database 也会自动创建）；
+已存在则只校验向量维度，schema 必须与下面兼容：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -210,7 +274,7 @@ metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选�
 
 | 失败点 | 错误码 | HTTP |
 |--------|--------|------|
-| 文件解析 | `parse_failed` | 500 |
+| 文件解析 | `parser_failed` | 500 |
 | 分片 | `chunk_failed` | 500 |
 | 嵌入（模型未加载 / 推理失败） | `embedder_unavailable` | 503 |
 | Milvus 写入 | `store_unavailable` | 503 |
@@ -226,9 +290,9 @@ metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选�
 
 | 面板 | 端点 | 功能 |
 |------|------|------|
-| 文档解析 | `POST /v1/parse` | 文件上传 → Markdown 预览 + 元数据表 |
+| 文档解析 | `POST /v1/parse/stream` | multipart 上传（字节 %）+ 逐页解析进度条 → Markdown 预览 + 元数据 |
 | 文本分片 | `POST /v1/chunk` | Markdown 输入 → 可折叠 chunk 列表（含 token / 页码 / 章节 / 原文） |
-| 一体化摄取 | `POST /v1/ingest` | database/collection/embed_model 联动选择 + multipart 上传 → 摄取结果统计 |
+| 一体化摄取 | `POST /v1/ingest/stream` | database/embed_model 联动选择 + multipart 上传，5 阶段步进器（parse 阶段显示 n/total 页） → 摄取结果统计 |
 
 ---
 

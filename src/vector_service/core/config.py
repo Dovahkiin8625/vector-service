@@ -125,6 +125,13 @@ class ParserSettings(BaseSettings):
     #: yield 413 from ``POST /v1/parse`` and ``POST /v1/ingest``.
     max_file_size_mb: int = Field(100, ge=1, le=2048)
 
+    #: HuggingFace Hub endpoint Docling will pull its layout/OCR models
+    #: from. Applied as ``HF_ENDPOINT`` before Docling/HF is imported,
+    #: so hosts where huggingface.co is unreachable can point this at
+    #: ``https://hf-mirror.com``. Empty (default) = the upstream
+    #: default; an explicit env var already set in the shell wins.
+    hf_endpoint: str = ""
+
 
 class ChunkingSettings(BaseSettings):
     """Chunking subsystem configuration.

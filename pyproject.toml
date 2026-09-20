@@ -31,7 +31,17 @@ dependencies = [
 [project.optional-dependencies]
 embed = [
     "torch>=2.2",
-    "onnxruntime>=1.18",
+    # GPU build on NVIDIA hosts: the [cuda] extra pulls CUDA 13
+    # nvidia-* wheels (cuBLAS/cuFFT/cuRAND/NVRTC; aligned with the
+    # cu130 torch in .venv — RTX 5070 Ti / Blackwell needs CUDA 13).
+    # No [cudnn] extra: cuDNN comes from torch/lib instead, which keeps
+    # a single cuDNN 9 sub-library set in the process (two sets make
+    # torch fail with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH).
+    # core/cuda_dlls.py registers the DLL directories at startup.
+    # macOS stays on the CPU build — the nvidia-* wheels publish no
+    # darwin distributions.
+    "onnxruntime-gpu[cuda]>=1.29,<2; sys_platform == 'win32' or sys_platform == 'linux'",
+    "onnxruntime>=1.18; sys_platform == 'darwin'",
     "FlagEmbedding>=1.2.10",
     "transformers>=4.41",
     "huggingface-hub>=0.23",

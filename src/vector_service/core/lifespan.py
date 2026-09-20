@@ -21,7 +21,10 @@ from vector_service.embeddings.multimodal_registry import (
     get_multimodal_embedder_class,
 )
 from vector_service.embeddings.registry import get_embedder_class
-from vector_service.parsers.docling_parser import DoclingParser, ParserUnavailable
+from vector_service.parsers.docling_parser import (
+    ParserUnavailable,
+    get_docling_parser,
+)
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import get_reranker_class
 from vector_service.stores.registry import build_store
@@ -120,6 +123,7 @@ async def lifespan(app: "FastAPI"):
     # eager load is logged + surfaced via /readyz but does NOT kill
     # the process.
     if settings.embedding_auto_load:
+        t0 = time.perf_counter()
         try:
             embedder = build_embedder(settings)
             embedder.load()
@@ -128,8 +132,11 @@ async def lifespan(app: "FastAPI"):
         except Exception as e:
             log.error("model_load_unexpected", error=str(e), exception_type=type(e).__name__)
         else:
+            load_duration = time.perf_counter() - t0
             app.state.embedder = embedder
-            app.state._slot_embedder.set_instance(embedder)
+            app.state._slot_embedder.set_instance(
+                embedder, load_duration=load_duration
+            )
             MODEL_LOADED.labels(kind="embedder").set(1)
             device = getattr(embedder, "_device", "unknown")
             log.info(
@@ -144,6 +151,7 @@ async def lifespan(app: "FastAPI"):
     # around it via /readyz, which is strictly better than exiting
     # with a non-zero code for one of four backends.
     if settings.reranker.auto_load:
+        t0 = time.perf_counter()
         try:
             reranker = build_reranker(settings)
             reranker.load()
@@ -155,8 +163,11 @@ async def lifespan(app: "FastAPI"):
                 exception_type=type(exc).__name__,
             )
         else:
+            load_duration = time.perf_counter() - t0
             app.state.reranker = reranker
-            app.state._slot_reranker.set_instance(reranker)
+            app.state._slot_reranker.set_instance(
+                reranker, load_duration=load_duration
+            )
             MODEL_LOADED.labels(kind="reranker").set(1)
             log.info(
                 "reranker_loaded",
@@ -166,6 +177,7 @@ async def lifespan(app: "FastAPI"):
 
     # ---- image embedder (opt-in eager load, fail-open) ----------
     if settings.image_embedding.auto_load:
+        t0 = time.perf_counter()
         try:
             image_embedder = build_image_embedder(settings)
             image_embedder.load()
@@ -177,8 +189,11 @@ async def lifespan(app: "FastAPI"):
                 exception_type=type(exc).__name__,
             )
         else:
+            load_duration = time.perf_counter() - t0
             app.state.image_embedder = image_embedder
-            app.state._slot_image.set_instance(image_embedder)
+            app.state._slot_image.set_instance(
+                image_embedder, load_duration=load_duration
+            )
             MODEL_LOADED.labels(kind="image_embedder").set(1)
             log.info(
                 "image_embedder_loaded",
@@ -189,6 +204,7 @@ async def lifespan(app: "FastAPI"):
 
     # ---- multimodal embedder (opt-in eager load, fail-open) -----
     if settings.multimodal_embedding.auto_load:
+        t0 = time.perf_counter()
         try:
             multimodal_embedder = build_multimodal_embedder(settings)
             multimodal_embedder.load()
@@ -200,8 +216,11 @@ async def lifespan(app: "FastAPI"):
                 exception_type=type(exc).__name__,
             )
         else:
+            load_duration = time.perf_counter() - t0
             app.state.multimodal_embedder = multimodal_embedder
-            app.state._slot_multimodal.set_instance(multimodal_embedder)
+            app.state._slot_multimodal.set_instance(
+                multimodal_embedder, load_duration=load_duration
+            )
             MODEL_LOADED.labels(kind="multimodal_embedder").set(1)
             log.info(
                 "multimodal_embedder_loaded",
@@ -219,7 +238,10 @@ async def lifespan(app: "FastAPI"):
     # — the same fail-open contract used by every other family.
     if settings.parser.auto_load:
         try:
-            parser = DoclingParser()
+            # Same process-wide singleton the routes use — warming a
+            # separately constructed parser would not take the cold
+            # model-build cost off the first request.
+            parser = get_docling_parser()
             parser.load()
         except ParserUnavailable as exc:
             # Docling is an optional dep; a host that hasn't

@@ -258,6 +258,25 @@ class VectorStore(ABC):
         ``{"id": <primary>, "vector": None, "fields": {scalar: value}}``.
         """
 
+    def count_rows(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int | None:
+        """Return an authoritative, tombstone-aware row count.
+
+        Defaults to ``None``, which tells callers to fall back to
+        :meth:`collection_info`'s ``count``. Metadata-based counts can
+        lag deletes (Milvus does not subtract tombstoned rows until
+        compaction), so backends able to run a live ``count(*)`` query
+        — Milvus — override this. When ``filter_expr`` is given, only
+        matching rows are counted (the correct denominator for paged
+        browse results).
+        """
+        return None
+
     @abstractmethod
     def search(
         self,

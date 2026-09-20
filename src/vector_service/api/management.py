@@ -747,18 +747,28 @@ async def get_vectors(db: str, name: str, body: GetVectorsRequest, request: Requ
 )
 async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request):
     store = request.app.state.store
-    # ``total`` is read from the collection's metadata so we don't
-    # have to re-issue a separate count RPC for every page turn.
-    # Collection-not-found is the same error path as the underlying
-    # browse call, so it surfaces a single 404 envelope.
+    # ``total`` starts from collection metadata (cheap, but Milvus keeps
+    # counting tombstoned rows there until compaction, so the pager would
+    # look unrefreshed right after a delete). Stores exposing a live,
+    # tombstone-aware ``count_rows`` override it with a Strong-consistency
+    # ``count(*)``; with ``filter_expr`` the count is restricted to the
+    # same filter, so it is the exact denominator for filtered pages.
+    # The metadata read still runs for the not-found/404 side effect and
+    # as the fallback for backends without ``count_rows``. Collection-
+    # not-found and invalid filters share the browse call's error envelope.
     try:
         info = await _timed_async(
             "coll_info", _backend(store), db, store.collection_info, db, name,
         )
         total = int(info.count)
-    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
-        raise _http_from_store_error(e)
-    try:
+        counter = getattr(store, "count_rows", None)
+        if callable(counter):
+            live_total = await _timed_async(
+                "count", _backend(store), db, counter,
+                db, name, filter_expr=body.filter_expr,
+            )
+            if live_total is not None:
+                total = int(live_total)
         rows = await _timed_async(
             "browse", _backend(store), db, store.browse,
             db, name, body.primary_field,

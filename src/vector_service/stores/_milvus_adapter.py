@@ -823,9 +823,67 @@ class MilvusAdapter:
             raise BackendError(
                 f"delete failed for {database!r}/{collection!r}: {e}"
             ) from e
+        # The cached describe payload carries a ``count`` field — stale
+        # the moment a delete lands. Drop it so the next read doesn't
+        # serve the pre-delete row count for up to the cache TTL.
+        self._invalidate_collection(database, collection)
         if isinstance(res, dict):
             return int(res.get("delete_count", 0))
         return 0
+
+    def count(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        """Live, tombstone-aware row count via ``count(*)``.
+
+        ``get_collection_stats`` (the row_count inside describe_collection)
+        keeps counting deleted entities until the next compaction, and the
+        describe payload is cached — both make a post-delete browse view
+        look unrefreshed. A real query under Strong consistency returns
+        the authoritative count immediately, optionally restricted to
+        rows matching ``filter_expr`` (same expression the browse call
+        uses, so the pager's denominator matches the rows on screen).
+        """
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+        try:
+            self._ensure_loaded(collection)
+            rows = self._client.query(
+                collection,
+                filter=filter_expr or "",
+                output_fields=["count(*)"],
+                # Strong: the count must reflect the delete that just
+                # returned, even when the request lands on a different
+                # worker/process than the one that issued it.
+                consistency_level="Strong",
+            )
+        except (CollectionNotFound, StoreError):
+            raise
+        except Exception as e:
+            raise BackendError(
+                f"count failed for {database!r}/{collection!r}: {e}"
+            ) from e
+
+        if not rows:
+            return 0
+        first = rows[0] if isinstance(rows[0], dict) else {}
+        # Milvus returns a one-row payload ``[{"count(*)": N}]``; accept
+        # the literal key but tolerate any count-shaped spelling too.
+        val = first.get("count(*)")
+        if val is None:
+            val = next((v for k, v in first.items() if "count" in str(k)), 0)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
 
     def get(
         self,
@@ -963,6 +1021,9 @@ class MilvusAdapter:
                 "output_fields": output,
                 "limit": int(limit),
                 "offset": int(offset),
+                # Read-your-writes across processes: a delete issued by
+                # another worker must be reflected on the next page load.
+                "consistency_level": "Strong",
             }
             rows = self._client.query(collection, **kwargs)
         except (CollectionNotFound, StoreError):

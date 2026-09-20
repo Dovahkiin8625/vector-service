@@ -108,6 +108,14 @@ const I18N = {
     'models.auto_refresh_label': '自动刷新:',
     'models.load': '加载',
     'models.unload': '卸载',
+    'models.loading': '加载中…',
+    'models.unloading': '卸载中…',
+    'models.load_failed': '加载失败',
+    'models.unload_failed': '卸载失败',
+    'models.meta_params': '参数量',
+    'models.meta_vram': '显存占用',
+    'models.meta_ram': '内存占用',
+    'models.meta_load_time': '加载耗时',
 
     // Databases panel
     'databases.coll_count': '集合数',
@@ -151,8 +159,98 @@ const I18N = {
     'modals.add_index': '＋ 添加一个索引',
     'modals.create_collection': '创建集合',
     'modals.name_hint': '1-64 字符,字母 / 数字 / 下划线',
+
+    // Ingest panel (upload progress + result cards)
+    'ingest.upload': '上传',
+    'ingest.uploading': '上传中…',
+    'ingest.processing': '处理中…',
+    'ingest.stage.upload': '上传',
+    'ingest.stage.parse': '解析',
+    'ingest.stage.chunk': '分片',
+    'ingest.stage.embed': '嵌入',
+    'ingest.stage.upsert': '写入',
+    'ingest.stage_hint.parse': '正在解析文档内容…',
+    'ingest.stage_hint.chunk': '正在按 token 数切分文本…',
+    'ingest.stage_hint.embed': '正在调用嵌入模型生成向量…',
+    'ingest.stage_hint.upsert': '正在写入向量库…',
+    'ingest.failed_at': '失败阶段：',
+    'ingest.success': '摄取成功',
+    'ingest.success_empty': '摄取完成,但文档未产生任何分片',
+    'ingest.failed': '摄取失败',
+    'ingest.banner_ok': '成功',
+    'ingest.banner_empty': '空文档',
+    'ingest.stat.chunks': '分片数',
+    'ingest.stat.pages': '页数',
+    'ingest.stat.tokens': 'tokens',
+    'ingest.stat.duration': '耗时',
+    'ingest.stat.size': '文件大小',
+    'ingest.stat.model': '嵌入模型',
+    'ingest.doc_id': 'doc_id',
+    'ingest.copy': '复制',
+    'ingest.copied': '已复制 ✓',
+    'ingest.raw': '原始响应 JSON',
+    'ingest.metadata_hint': '可选,仅 title / author / filename / page_count 会写入标量字段',
+    'ingest.no_dbs': '（暂无数据库,请先在数据库管理中创建）',
+    'ingest.err.no_db': '请先选择数据库。',
+    'ingest.err.no_file': '请先选择要上传的文件。',
+    'ingest.err.bad_meta': 'metadata 必须是合法的 JSON 对象,例如 {"title":"年度报告"}。',
+    'ingest.err.bad_size': 'chunk size 必须在 1–8192 之间。',
+    'ingest.err.bad_overlap': 'chunk overlap 必须满足 0 ≤ overlap < chunk size。',
+    'ingest.err.network': '网络错误,请求未完成。',
+    'ingest.parse_pages_prefix': '已解析 ',
+    'ingest.parse_pages_suffix': ' 页',
+
+    // Parse 面板（上传字节进度 + 逐页解析进度）
+    'parse.upload': '解析',
+    'parse.uploading': '上传中…',
+    'parse.parsing': '解析中…',
+    'parse.failed': '解析失败',
+    'parse.pages_prefix': '已解析 ',
+    'parse.pages_suffix': ' 页',
+    'parse.hint.parse': '正在解析文档内容,大文件可能需要数分钟…',
+    'parse.err.no_file': '请先选择要解析的文件。',
+    'parse.err.network': '网络错误,请求未完成。',
   },
   en: {
+    // Brand + topbar
+    'brand.dashboard': 'Dashboard',
+    'topbar.dim_unit': 'dim',
+    'status.SVC': 'SVC',
+    'status.VER': 'VER',
+    'status.EMB': 'EMB',
+    'status.STORE': 'STORE',
+    'status.LOADED': 'LOADED',
+
+    // Sidebar nav
+    'nav.overview': 'Overview',
+    'nav.models': 'Model List',
+    'nav.embeddings': 'Text Embed',
+    'nav.image_embeddings': 'Image Embed',
+    'nav.multimodal_embeddings': 'Multimodal Embed',
+    'nav.rerank': 'Rerank',
+    'nav.text_similarity': 'Text Similarity',
+    'nav.image_similarity': 'Image Similarity',
+    'nav.mm_similarity': 'Multimodal Similarity',
+    'nav.databases': 'Databases',
+    'nav.collections': 'Collections',
+    'nav.records': 'Records',
+    'nav.search': 'Search',
+    'nav.browse': 'Browse',
+    'nav.parse': 'Parse',
+    'nav.chunk': 'Chunk',
+    'nav.ingest': 'Ingest',
+    'nav.Navigation': 'Navigation',
+    'nav.Overview': 'Overview',
+    'nav.Models': 'Models',
+    'nav.Vector Store': 'Vector Store',
+    'nav.Knowledge Base': 'Knowledge Base',
+
+    // Breadcrumb cats
+    'cat.overview': 'Overview',
+    'cat.models': 'Models',
+    'cat.store': 'Vector Store',
+    'cat.kb': 'Knowledge Base',
+
     'overview.version': 'version',
     'overview.uptime': 'uptime',
     'overview.uptime_sub': 'since startup',
@@ -192,6 +290,14 @@ const I18N = {
     'models.auto_refresh_label': 'auto-refresh:',
     'models.load': 'load',
     'models.unload': 'unload',
+    'models.loading': 'loading…',
+    'models.unloading': 'unloading…',
+    'models.load_failed': 'load failed',
+    'models.unload_failed': 'unload failed',
+    'models.meta_params': 'parameters',
+    'models.meta_vram': 'VRAM',
+    'models.meta_ram': 'RAM',
+    'models.meta_load_time': 'load time',
 
     'databases.coll_count': 'collection count',
     'databases.meta_count': 'metadata fields',
@@ -233,43 +339,57 @@ const I18N = {
     'modals.add_index': '+ add index',
     'modals.create_collection': 'create collection',
     'modals.name_hint': '1-64 chars, alphanumeric / underscore',
-  },
-  en: {
-    'brand.dashboard': 'Dashboard',
-    'topbar.dim_unit': 'dim',
-    'status.SVC': 'SVC',
-    'status.VER': 'VER',
-    'status.EMB': 'EMB',
-    'status.STORE': 'STORE',
-    'status.LOADED': 'LOADED',
 
-    'nav.overview': 'Overview',
-    'nav.models': 'Model List',
-    'nav.embeddings': 'Text Embed',
-    'nav.image_embeddings': 'Image Embed',
-    'nav.multimodal_embeddings': 'Multimodal Embed',
-    'nav.rerank': 'Rerank',
-    'nav.text_similarity': 'Text Similarity',
-    'nav.image_similarity': 'Image Similarity',
-    'nav.mm_similarity': 'Multimodal Similarity',
-    'nav.databases': 'Databases',
-    'nav.collections': 'Collections',
-    'nav.records': 'Records',
-    'nav.search': 'Search',
-    'nav.browse': 'Browse',
-    'nav.parse': 'Parse',
-    'nav.chunk': 'Chunk',
-    'nav.ingest': 'Ingest',
-    'nav.Navigation': 'Navigation',
-    'nav.Overview': 'Overview',
-    'nav.Models': 'Models',
-    'nav.Vector Store': 'Vector Store',
-    'nav.Knowledge Base': 'Knowledge Base',
+    // Ingest panel (upload progress + result cards)
+    'ingest.upload': 'upload',
+    'ingest.uploading': 'uploading…',
+    'ingest.processing': 'processing…',
+    'ingest.stage.upload': 'upload',
+    'ingest.stage.parse': 'parse',
+    'ingest.stage.chunk': 'chunk',
+    'ingest.stage.embed': 'embed',
+    'ingest.stage.upsert': 'upsert',
+    'ingest.stage_hint.parse': 'Parsing the document…',
+    'ingest.stage_hint.chunk': 'Splitting text into token chunks…',
+    'ingest.stage_hint.embed': 'Calling the embedding model…',
+    'ingest.stage_hint.upsert': 'Writing vectors to the store…',
+    'ingest.failed_at': 'Failed at stage: ',
+    'ingest.success': 'Ingest succeeded',
+    'ingest.success_empty': 'Ingest finished, but no chunks were produced',
+    'ingest.failed': 'Ingest failed',
+    'ingest.banner_ok': 'SUCCESS',
+    'ingest.banner_empty': 'EMPTY',
+    'ingest.stat.chunks': 'chunks',
+    'ingest.stat.pages': 'pages',
+    'ingest.stat.tokens': 'tokens',
+    'ingest.stat.duration': 'duration',
+    'ingest.stat.size': 'file size',
+    'ingest.stat.model': 'embed model',
+    'ingest.doc_id': 'doc_id',
+    'ingest.copy': 'copy',
+    'ingest.copied': 'copied ✓',
+    'ingest.raw': 'raw response JSON',
+    'ingest.metadata_hint': 'optional; only title / author / filename / page_count stored as scalar fields',
+    'ingest.no_dbs': '(no databases — create one in Databases first)',
+    'ingest.err.no_db': 'Select a database first.',
+    'ingest.err.no_file': 'Select a file to upload.',
+    'ingest.err.bad_meta': 'metadata must be a valid JSON object, e.g. {"title":"annual report"}.',
+    'ingest.err.bad_size': 'chunk size must be between 1 and 8192.',
+    'ingest.err.bad_overlap': 'chunk overlap must satisfy 0 ≤ overlap < chunk size.',
+    'ingest.err.network': 'Network error — the request did not complete.',
+    'ingest.parse_pages_prefix': 'parsed ',
+    'ingest.parse_pages_suffix': ' pages',
 
-    'cat.overview': 'Overview',
-    'cat.models': 'Models',
-    'cat.store': 'Vector Store',
-    'cat.kb': 'Knowledge Base',
+    // Parse panel (byte-upload progress + per-page parse progress)
+    'parse.upload': 'parse',
+    'parse.uploading': 'uploading…',
+    'parse.parsing': 'parsing…',
+    'parse.failed': 'Parse failed',
+    'parse.pages_prefix': 'parsed ',
+    'parse.pages_suffix': ' pages',
+    'parse.hint.parse': 'Parsing the document — large files can take a few minutes…',
+    'parse.err.no_file': 'Select a file to parse.',
+    'parse.err.network': 'Network error — the request did not complete.',
   },
 };
 
@@ -304,12 +424,75 @@ export function extractApiError(e, fallback) {
   return String(e);
 }
 
+// One alert per id+error message: while polling repeats the same
+// `failed` row every few seconds we must not re-pop the alert. Keyed by
+// model id; cleared when that id leaves the failed state (retry / load
+// success / unload).
+const alertedLoadError = Object.create(null);
+
+// Reconcile a fresh GET /v1/models payload into the store:
+//  - drives per-card optimistic busy flags (busy[id] holds the verb of
+//    the request WE fired: 'load' | 'unload'), clearing each only after
+//    the server-polled state settles for THAT verb,
+//  - alerts exactly once on a loading -> failed transition,
+//  - keeps store.embedderDim in sync (previously only the poller did),
+//  - returns true while at least one row is still loading.
+export function applyModelsData(rows) {
+  const prev = new Map((store.models.data || []).map(m => [m.id, m]));
+  store.models.data = rows || [];
+  let anyLoading = false;
+  for (const m of store.models.data) {
+    const before = prev.get(m.id);
+    // The busy verb drives OPTIMISTIC UI: the card switches to its
+    // loading state the instant the button is clicked, before the POST
+    // (or the confirming GET) has returned. It must survive a stale poll
+    // — e.g. a GET fired just before the click that comes back showing
+    // the old unloaded row must not flip the card back mid-request.
+    const busyVerb = store.models.busy[m.id];
+    if (m.load_status === 'loading' || busyVerb === 'load') anyLoading = true;
+
+    if (m.load_status === 'failed') {
+      // Alert when WE watched this id fail: either the polled row just
+      // transitioned out of loading, or our own optimistic load is in
+      // flight and the server already reports failure. Opening the
+      // dashboard on a stale failure shows the inline error, no pop-up.
+      const watched =
+        (before && before.load_status === 'loading') || busyVerb === 'load';
+      if (watched && alertedLoadError[m.id] !== m.load_error) {
+        alertedLoadError[m.id] = m.load_error;
+        alert(t('models.load_failed') + ': ' + (m.load_error || 'unknown'));
+      }
+    } else if (alertedLoadError[m.id] !== undefined) {
+      // Any non-failed row (incl. 'loading' during a retry) rearms the
+      // one-shot alert for the next failure.
+      delete alertedLoadError[m.id];
+    }
+
+    if (busyVerb === 'load') {
+      // Settle once the server confirms the instance (or the failure);
+      // 'unloaded' while our POST is in flight is a stale poll.
+      if (m.loaded || m.load_status === 'loaded' || m.load_status === 'failed') {
+        store.models.busy[m.id] = false;
+      }
+    } else if (busyVerb === 'unload') {
+      // Settle once the live instance is gone. A 'loading' row means
+      // someone else started loading this family — also release.
+      if (!m.loaded && m.load_status !== 'loading') {
+        store.models.busy[m.id] = false;
+      }
+    }
+  }
+  const loaded = store.models.data.find(m => m.type === 'embedder' && m.loaded);
+  store.embedderDim = loaded && loaded.dimensions ? loaded.dimensions : 0;
+  return anyLoading;
+}
+
 export const store = reactive({
   view: 'overview',
   locale: 'zh',                                 // current UI language: 'zh' | 'en'
   health: { healthz: 'unknown', readyz: 'unknown' },
   embedderDim: 0,
-  models: { data: [], busy: Object.create(null), autoRefresh: true, timer: null },
+  models: { data: [], busy: Object.create(null), autoRefresh: true },
   databases: { list: [], detailCache: Object.create(null), expanded: new Set() },
   collections: { list: [], detailCache: Object.create(null), expanded: new Set() },
   modals: { newDb: false, newColl: false },
@@ -332,17 +515,37 @@ function startHealthPolling() {
   healthTimer = setInterval(pollHealth, 5000);
   pollHealth();
 }
+// Adaptive poller: 5s cadence at rest, tightened to 2s while any card
+// reports load_status='loading' so a background load completes visually
+// within ~2s instead of waiting out a full 5s tick. Self-rescheduling
+// setTimeout chain (not setInterval) so the delay can change per tick.
+let modelsTimer = null;
+let modelsPollStopped = false;
 function startModelsAutoRefresh() {
-  if (store.models.timer) return;
-  store.models.timer = setInterval(async () => {
-    if (!store.models.autoRefresh) return;
-    try {
-      const { payload } = await api('GET', '/v1/models');
-      store.models.data = (payload && payload.data) || [];
-      const loaded = (store.models.data || []).find(m => m.type === 'embedder' && m.loaded);
-      store.embedderDim = loaded && loaded.dimensions ? loaded.dimensions : 0;
-    } catch (_e) {}
-  }, 5000);
+  if (modelsTimer !== null) return;
+  modelsPollStopped = false;
+  const schedule = (delay) => {
+    modelsTimer = setTimeout(async () => {
+      modelsTimer = null;
+      if (modelsPollStopped) return;
+      let anyLoading = false;
+      if (store.models.autoRefresh) {
+        try {
+          const { payload } = await api('GET', '/v1/models');
+          anyLoading = applyModelsData((payload && payload.data) || []);
+        } catch (_e) { /* logged */ }
+      }
+      if (!modelsPollStopped) schedule(anyLoading ? 2000 : 5000);
+    }, delay);
+  };
+  schedule(5000);
+}
+function stopModelsAutoRefresh() {
+  modelsPollStopped = true;
+  if (modelsTimer !== null) {
+    clearTimeout(modelsTimer);
+    modelsTimer = null;
+  }
 }
 
 const NAV_LABELS = {
@@ -380,7 +583,7 @@ const App = defineComponent({
     });
     onUnmounted(() => {
       if (healthTimer) clearInterval(healthTimer);
-      if (store.models.timer) clearInterval(store.models.timer);
+      stopModelsAutoRefresh();
     });
     return { store, t };
   },

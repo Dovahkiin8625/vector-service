@@ -133,6 +133,43 @@ def test_dashboard_exposes_knowledge_base_panels():
         assert _has(f), f"{f} missing"
 
 
+def test_dashboard_ingest_panel_streams_stage_events():
+    """Ingest posts to the NDJSON stream route and renders a 5-stage
+    stepper (upload/parse/chunk/embed/upsert). The old manual
+    'refresh dbs' button is gone — dbs/models auto-refresh when the
+    tab is opened via a view watcher."""
+    kb = (
+        _ST / "static" / "dashboard" / "components" / "knowledge-base.js"
+    ).read_text(encoding="utf-8")
+    # Stream endpoint (the classic /v1/ingest pill stays matched too).
+    assert "POST /v1/ingest/stream" in kb
+    assert "'/v1/ingest/stream'" in kb
+    # XHR is required for upload byte progress + incremental NDJSON.
+    assert "XMLHttpRequest" in kb
+    assert "xhr.upload.onprogress" in kb
+    # Stage stepper contract.
+    assert 'class="ingest-stages"' in kb
+    assert ':data-ingest-stage="s.key"' in kb
+    for stage in ["uploading", "parse", "chunk", "embed", "upsert"]:
+        assert f"key: '{stage}'" in kb
+        assert f"ingest.stage.{stage if stage != 'uploading' else 'upload'}" in kb
+    # Hint keys are composed dynamically: 'ingest.stage_hint.' + stage.
+    assert "'ingest.stage_hint.' + ingestStage.value" in kb
+    assert "ingest.failed_at" in kb
+    # Auto-refresh replaces the removed button.
+    assert "watch(() => props.view" in kb
+    assert "btn-ingest-refresh" not in kb
+    # i18n keys exist in both dictionaries.
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert app_js.count("ingest.stage.upsert") == 2  # zh + en
+    assert app_js.count("ingest.failed_at") == 2
+    # Stepper styles.
+    assert ".ingest-stages" in _CSS
+    assert ".is-failed .stage-dot" in _CSS
+
+
 def test_dashboard_exposes_browse_panel():
     """BrowsePanel renders the paginated table + pager."""
     assert _has('data-view="browse"')
@@ -148,10 +185,54 @@ def test_dashboard_exposes_browse_panel():
         'id="brw-jump"', 'id="btn-brw-jump"',
         'id="brw-stat-total"', 'id="brw-stat-page"', 'id="brw-stat-returned"',
         'id="brw-pager-info"',
+        # row-selection + delete toolbar
+        'id="brw-select-all"', 'id="brw-delete-bar"',
+        'id="btn-brw-delete-selected"', 'id="btn-brw-delete-filter"',
+        'id="btn-brw-clear-sel"', 'id="brw-delete-status"',
     ]:
         assert _has(f), f"{f} missing"
     assert "const columns = computed(" in _ALL
     assert "v-for=\"row in items\"" in _ALL or "v-for='row in items'" in _ALL
+
+
+def test_dashboard_browse_panel_supports_delete():
+    """Browse panel can delete ticked rows (ids) or every filter match.
+
+    Both flows POST the existing ``.../vectors/delete`` endpoint with
+    exactly one of ``ids`` / ``filter_expr`` (the backend enforces the
+    XOR), and destructive clicks go through a confirm() guard.
+    """
+    browse = (
+        _ST / "static" / "dashboard" / "components" / "browse.js"
+    ).read_text(encoding="utf-8")
+    assert "/vectors/delete" in browse
+    # Selection plumbing: per-row checkbox + select-all-on-page.
+    assert 'class="brw-row-check"' in browse
+    assert "toggleOne" in browse and "togglePage" in browse
+    assert "allPageSelected" in browse
+    # Request bodies match DeleteVectorsRequest's XOR contract.
+    assert "primary_field: primary.value, ids" in browse
+    assert "primary_field: primary.value, filter_expr: expr" in browse
+    # Both destructive actions require confirmation.
+    assert browse.count("confirm(") >= 2
+
+
+def test_dashboard_browse_panel_refreshes_after_delete():
+    """Post-delete freshness contract: the delete toolbar (with its
+    status line) is gated on the collection selection, NOT on ``total`` —
+    otherwise deleting the last rows makes 'deleted N rows.' and the
+    empty state's controls vanish together. The post-delete reload keeps
+    the status; manual queries clear it."""
+    browse = (
+        _ST / "static" / "dashboard" / "components" / "browse.js"
+    ).read_text(encoding="utf-8")
+    # Toolbar survives total -> 0.
+    assert '<div v-if="coll" class="actions brw-delete-bar"' in browse
+    assert 'v-if="total" class="actions brw-delete-bar"' not in browse
+    # runQuery knows whether to preserve the delete feedback.
+    assert "async function runQuery(opts = {})" in browse
+    assert "opts.keepDeleteStatus" in browse
+    assert "runQuery({ keepDeleteStatus: true })" in browse
 
 
 def test_dashboard_exposes_create_modals():

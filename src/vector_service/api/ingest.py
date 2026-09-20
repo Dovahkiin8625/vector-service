@@ -1,13 +1,33 @@
 """``POST /v1/ingest`` — end-to-end document ingestion.
 
+Two routes share one pipeline core:
+
+- ``POST /v1/ingest`` — classic JSON :class:`IngestResponse`.
+- ``POST /v1/ingest/stream`` — newline-delimited JSON event stream
+  (``application/x-ndjson``) so clients can render per-stage progress.
+  Event shapes::
+
+      {"type": "stage", "stage": "parse" | "chunk" | "embed" | "upsert"}
+      {"type": "progress", "stage": "parse", "page": 3, "total": 12}
+      {"type": "result", ...IngestResponse fields...}
+      {"type": "error", "status": 503, "error": {"code": ..., "message": ...}}
+
+  ``progress`` events tick per completed page during the parse stage
+  for paginated binary documents (PDF/DOCX/PPTX/HTML); text uploads
+  emit none.
+
+  Pre-flight failures (bad params / MIME / size / embedder not loaded)
+  happen before the stream opens, so they come back as the usual JSON
+  error envelope with its normal 4xx/503 status code.
+
 Pipeline:
 
 1. Parse the uploaded file to markdown + metadata via the matching
    parser (Docling for binary, passthrough for text).
 2. Chunk the markdown with :class:`RecursiveChunker`.
 3. Embed the chunks (server-side, using the loaded text embedder).
-4. Upsert into Milvus with a UUID4 ``doc_id`` carried on every
-   row's ``doc_id`` scalar field.
+4. Ensure the collection exists, then upsert into Milvus with a UUID4
+   ``doc_id`` carried on every row's ``doc_id`` scalar field.
 5. If anything fails AFTER the upsert, delete every row with the
    new ``doc_id`` (best-effort, 409-tolerant) and re-raise so the
    caller sees a clean error and the collection is left consistent.
@@ -34,9 +54,12 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from vector_service.chunking.recursive_chunker import RecursiveChunker
 from vector_service.core.errors import (
@@ -50,7 +73,7 @@ from vector_service.core.errors import (
     StoreError,
 )
 from vector_service.core.logging import get_logger
-from vector_service.parsers.docling_parser import DoclingParser
+from vector_service.parsers.docling_parser import DoclingParser, get_docling_parser
 from vector_service.parsers.markdown_parser import MarkdownParser
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.ingest import IngestResponse
@@ -212,51 +235,49 @@ def _resolve_mime(filename: str | None, content_type: str | None) -> str:
     return "application/octet-stream"
 
 
-# ---- route ------------------------------------------------------------
+# ---- shared pipeline --------------------------------------------------
+
+# Stage names are the public event contract of /v1/ingest/stream —
+# clients (the dashboard) render progress from these exact strings, so
+# treat them like an API version.
+INGEST_STAGES = ("parse", "chunk", "embed", "upsert")
+
+# Async sink for progress events. The JSON route passes a no-op; the
+# streaming route forwards each event onto its NDJSON response.
+Emit = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-@router.post(
-    "/ingest",
-    response_model=IngestResponse,
-    responses={
-        400: {"model": ErrorEnvelope, "description": "Empty upload / bad config."},
-        404: {"model": ErrorEnvelope, "description": "Database does not exist."},
-        409: {"model": ErrorEnvelope, "description": "Collection exists with conflicting schema."},
-        413: {"model": ErrorEnvelope, "description": "Upload exceeds max size."},
-        415: {"model": ErrorEnvelope, "description": "Unsupported MIME type."},
-        422: {"model": ErrorEnvelope, "description": "Validation / dimension mismatch."},
-        500: {"model": ErrorEnvelope, "description": "Parser failure."},
-        503: {"model": ErrorEnvelope, "description": "Embedder or parser backend unavailable."},
-    },
-    summary="Ingest a document end-to-end",
-    description=(
-        "Parse the uploaded file, chunk the resulting markdown, "
-        "embed the chunks, and store them in a Milvus collection. "
-        "On any post-upsert failure the route deletes the partial "
-        "upsert by ``doc_id`` filter before re-raising the error, "
-        "so the collection stays consistent."
-    ),
-)
-async def ingest_document(
+async def _noop_emit(_event: dict[str, Any]) -> None:
+    """Emit sink used by the classic JSON route (events discarded)."""
+
+
+@dataclass
+class PreparedIngest:
+    """Validated request inputs, ready for the pipeline."""
+
+    data: bytes
+    mime: str
+    extra_metadata: dict[str, Any]
+    filename: str | None
+
+
+async def _prepare_ingest(
+    *,
     file: UploadFile,
-    request: Request,
-    database: str = "default",
-    collection: str = "ingest",
-    chunk_size: int = 500,
-    chunk_overlap: int = 75,
-    embed_model: str = "bge-m3",
-    metadata: str = "{}",
-):
-    """End-to-end ingest.
+    settings: Any,
+    embedder: Any,
+    metadata: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    embed_model: str,
+) -> PreparedIngest:
+    """Validate arguments and spool the upload into memory.
 
-    ``metadata`` arrives as a JSON-encoded string per the spec —
-    multipart form fields can't carry nested objects directly, so
-    callers serialise to a string and we parse it here. A bad JSON
-    string yields 400 ``invalid_metadata``.
+    Covers pipeline steps 0 and 1 — everything that can fail before any
+    work starts. Both routes run this synchronously so pre-flight
+    failures come back as normal JSON error envelopes.
     """
-    settings = request.app.state.settings
     parser_settings = settings.parser
-    embedder = request.app.state.embedder
 
     # ---- 0. argument validation -------------------------------------
     try:
@@ -336,14 +357,84 @@ async def ingest_document(
             "message": "uploaded file is empty",
         }})
 
+    return PreparedIngest(
+        data=data,
+        mime=mime,
+        extra_metadata=extra_metadata,
+        filename=file.filename,
+    )
+
+
+async def _run_ingest_pipeline(
+    *,
+    prepared: PreparedIngest,
+    store: Any,
+    embedder: Any,
+    database: str,
+    collection: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    embed_model: str,
+    inference_timeout_seconds: float,
+    emit: Emit,
+    report_parse_progress: bool = False,
+) -> IngestResponse:
+    """Parse -> chunk -> embed -> ensure-collection/upsert.
+
+    Reports stage transitions via ``emit`` (no-op for the JSON route).
+    When ``report_parse_progress`` is set (the streaming route),
+    per-page parser ticks are forwarded as ``progress`` events. All
+    failure modes are raised as :class:`HTTPException`; callers decide
+    whether that becomes a raised response or an error event.
+    """
+    data = prepared.data
+    mime = prepared.mime
+    extra_metadata = prepared.extra_metadata
+    loop = asyncio.get_running_loop()
+
     # ---- 2. parse ---------------------------------------------------
+    await emit({"type": "stage", "stage": "parse"})
     if mime in DoclingParser.accepted_mime:
-        parser = DoclingParser()
+        # Process-wide singleton: a fresh DocumentConverter per request
+        # costs ~10-30s of model loading; the lifespan warmup populates
+        # the same instance.
+        parser = get_docling_parser()
     else:
         parser = MarkdownParser()
 
+    # Page ticks fire on the Docling worker thread; hop onto the event
+    # loop and turn each into a progress event. Counter + drain loop
+    # (same pattern as /v1/parse/stream) guarantee every tick is queued
+    # before the chunk-stage event, regardless of thread timing.
+    tick_scheduled = 0
+    tick_flushed = 0
+
+    def _on_parse_progress(done: int, total: int) -> None:
+        nonlocal tick_scheduled
+        tick_scheduled += 1
+        event = {
+            "type": "progress",
+            "stage": "parse",
+            "page": int(done),
+            "total": int(total),
+        }
+
+        async def _fire() -> None:
+            nonlocal tick_flushed
+            try:
+                await emit(event)
+            finally:
+                tick_flushed += 1
+
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(_fire())
+        )
+
+    on_progress = _on_parse_progress if report_parse_progress else None
     try:
-        parsed = await parser.parse_bytes(data, mime)
+        parsed = await parser.parse_bytes(data, mime, on_progress=on_progress)
+        while tick_flushed < tick_scheduled:
+            await asyncio.sleep(0)
     except RuntimeError as e:
         log.warning("parser_failed", mime=mime, error=str(e))
         raise HTTPException(500, detail={"error": {
@@ -371,10 +462,11 @@ async def ingest_document(
         extra_metadata.setdefault(_AUTHOR_FIELD, author)
     if page_count is not None:
         extra_metadata.setdefault(_PAGE_COUNT_FIELD, page_count)
-    if file.filename:
-        extra_metadata.setdefault(_FILENAME_FIELD, file.filename)
+    if prepared.filename:
+        extra_metadata.setdefault(_FILENAME_FIELD, prepared.filename)
 
     # ---- 3. chunk ---------------------------------------------------
+    await emit({"type": "stage", "stage": "chunk"})
     chunker = RecursiveChunker(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -390,27 +482,19 @@ async def ingest_document(
             tokens_used=0,
         )
 
-    # ---- 4. ensure collection ---------------------------------------
-    store = request.app.state.store
-    loop = asyncio.get_running_loop()
-
-    try:
-        await loop.run_in_executor(None, _ensure_collection, store, database, collection, embedder.dim)
-    except (DatabaseNotFound, CollectionAlreadyExists, DimensionMismatch, StoreError, BackendError) as e:
-        raise _store_http_error(e, op="create_collection")
-
-    # ---- 5. embed ---------------------------------------------------
+    # ---- 4. embed ---------------------------------------------------
+    await emit({"type": "stage", "stage": "embed"})
     texts = [c.text for c in chunks]
-    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
     try:
         try:
             vectors = await asyncio.wait_for(
                 loop.run_in_executor(None, embedder.embed_documents, texts),
-                timeout=timeout_s,
+                timeout=inference_timeout_seconds,
             )
         except asyncio.TimeoutError:
             raise EmbedderError(
-                f"embedder {embed_model!r} did not finish within {timeout_s}s"
+                f"embedder {embed_model!r} did not finish within "
+                f"{inference_timeout_seconds}s"
             )
     except (EmbedderError, ModelNotLoaded) as e:
         log.warning("ingest_embed_failed", error=str(e))
@@ -422,7 +506,17 @@ async def ingest_document(
             "exception_type": type(e).__name__,
         }})
 
-    # ---- 6. upsert with rollback on failure -----------------------
+    # ---- 5. ensure collection + upsert with rollback ---------------
+    # Collection preparation is part of the upsert stage — dimension
+    # mismatches surface here, right next to the write they block.
+    await emit({"type": "stage", "stage": "upsert"})
+    try:
+        await loop.run_in_executor(
+            None, _ensure_collection, store, database, collection, embedder.dim
+        )
+    except (DatabaseNotFound, CollectionAlreadyExists, DimensionMismatch, StoreError, BackendError) as e:
+        raise _store_http_error(e, op="create_collection")
+
     doc_id = str(uuid.uuid4())
     chunk_ids = [f"{doc_id}_{c.chunk_index}" for c in chunks]
     fields = [
@@ -497,6 +591,189 @@ async def ingest_document(
     )
 
 
+# ---- routes -----------------------------------------------------------
+
+
+# Both routes share the same multipart contract and the same error
+# catalogue; pre-flight failures are JSON envelopes even on the stream
+# route, in-flight failures come as ``error`` events instead.
+_INGEST_RESPONSES = {
+    400: {"model": ErrorEnvelope, "description": "Empty upload / bad config."},
+    404: {"model": ErrorEnvelope, "description": "Database does not exist."},
+    409: {"model": ErrorEnvelope, "description": "Collection exists with conflicting schema."},
+    413: {"model": ErrorEnvelope, "description": "Upload exceeds max size."},
+    415: {"model": ErrorEnvelope, "description": "Unsupported MIME type."},
+    422: {"model": ErrorEnvelope, "description": "Validation / dimension mismatch."},
+    500: {"model": ErrorEnvelope, "description": "Parser failure."},
+    503: {"model": ErrorEnvelope, "description": "Embedder or parser backend unavailable."},
+}
+
+
+@router.post(
+    "/ingest",
+    response_model=IngestResponse,
+    responses=_INGEST_RESPONSES,
+    summary="Ingest a document end-to-end",
+    description=(
+        "Parse the uploaded file, chunk the resulting markdown, "
+        "embed the chunks, and store them in a Milvus collection. "
+        "On any post-upsert failure the route deletes the partial "
+        "upsert by ``doc_id`` filter before re-raising the error, "
+        "so the collection stays consistent. Use "
+        "``POST /v1/ingest/stream`` for per-stage progress events."
+    ),
+)
+async def ingest_document(
+    request: Request,
+    file: UploadFile,
+    database: str = Form("default"),
+    collection: str = Form("ingest"),
+    chunk_size: int = Form(500),
+    chunk_overlap: int = Form(75),
+    embed_model: str = Form("bge-m3"),
+    metadata: str = Form("{}"),
+):
+    """End-to-end ingest, classic JSON response.
+
+    ``metadata`` arrives as a JSON-encoded string per the spec —
+    multipart form fields can't carry nested objects directly, so
+    callers serialise to a string and we parse it here. A bad JSON
+    string yields 400 ``invalid_metadata``.
+    """
+    settings = request.app.state.settings
+    embedder = request.app.state.embedder
+    prepared = await _prepare_ingest(
+        file=file,
+        settings=settings,
+        embedder=embedder,
+        metadata=metadata,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embed_model=embed_model,
+    )
+    return await _run_ingest_pipeline(
+        prepared=prepared,
+        store=request.app.state.store,
+        embedder=embedder,
+        database=database,
+        collection=collection,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embed_model=embed_model,
+        inference_timeout_seconds=getattr(settings, "inference_timeout_seconds", 60.0),
+        emit=_noop_emit,
+    )
+
+
+def _http_error_event(exc: HTTPException) -> dict[str, Any]:
+    """Serialise an :class:`HTTPException` into a stream ``error`` event."""
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    error = detail.get("error")
+    if not isinstance(error, dict):
+        error = {"code": "error", "message": str(exc.detail)}
+    return {"type": "error", "status": exc.status_code, "error": error}
+
+
+@router.post(
+    "/ingest/stream",
+    responses=_INGEST_RESPONSES,
+    summary="Ingest a document with per-stage progress events",
+    description=(
+        "Same multipart contract as ``POST /v1/ingest`` but responds "
+        "with ``application/x-ndjson``: one JSON event per line. "
+        "``stage`` events mark parse/chunk/embed/upsert transitions and "
+        "``progress`` events tick per parsed page during the parse "
+        "stage (paginated binary formats only); the terminal event is "
+        "either ``result`` (the IngestResponse fields) or ``error`` "
+        "(the canonical error envelope plus HTTP status). Pre-flight "
+        "failures are returned as ordinary JSON error envelopes before "
+        "the stream starts."
+    ),
+)
+async def ingest_document_stream(
+    request: Request,
+    file: UploadFile,
+    database: str = Form("default"),
+    collection: str = Form("ingest"),
+    chunk_size: int = Form(500),
+    chunk_overlap: int = Form(75),
+    embed_model: str = Form("bge-m3"),
+    metadata: str = Form("{}"),
+):
+    """End-to-end ingest as an NDJSON event stream."""
+    settings = request.app.state.settings
+    embedder = request.app.state.embedder
+    # Pre-flight: bad params / MIME / size / embedder state fail here as
+    # regular JSON envelopes (the StreamingResponse hasn't started yet).
+    prepared = await _prepare_ingest(
+        file=file,
+        settings=settings,
+        embedder=embedder,
+        metadata=metadata,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        embed_model=embed_model,
+    )
+
+    async def event_stream():
+        # A small queue decouples the pipeline task from this
+        # generator: parse/embed/upsert run in worker-thread
+        # executors while stages get flushed as soon as they happen.
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        sentinel = object()
+
+        async def emit(event: dict[str, Any]) -> None:
+            queue.put_nowait(event)
+
+        async def runner() -> None:
+            try:
+                response = await _run_ingest_pipeline(
+                    prepared=prepared,
+                    store=request.app.state.store,
+                    embedder=embedder,
+                    database=database,
+                    collection=collection,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    embed_model=embed_model,
+                    inference_timeout_seconds=getattr(
+                        settings, "inference_timeout_seconds", 60.0
+                    ),
+                    emit=emit,
+                    report_parse_progress=True,
+                )
+                queue.put_nowait({"type": "result", **response.model_dump()})
+            except HTTPException as e:
+                queue.put_nowait(_http_error_event(e))
+            except Exception as e:  # pragma: no cover - safety net
+                log.exception("ingest_stream_pipeline_failed")
+                queue.put_nowait({"type": "error", "status": 500, "error": {
+                    "code": "internal_error",
+                    "message": str(e) or "internal error",
+                }})
+            finally:
+                queue.put_nowait(sentinel)
+
+        # The runner is deliberately NOT cancelled on client
+        # disconnect: CancelledError mid-upsert would bypass the
+        # doc_id rollback and leave a partial document behind. It
+        # catches every error itself and only emits a handful of
+        # events, so an orphaned task is cheap.
+        task = asyncio.create_task(runner())
+        while True:
+            event = await queue.get()
+            if event is sentinel:
+                break
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+        await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ---- store-side helpers ----------------------------------------------
 
 
@@ -510,8 +787,8 @@ def _ensure_collection(
 
     Auto-creates the database as well — callers rarely need a
     pre-existing database for ingest. Treats ``DatabaseNotFound`` /
-    ``CollectionAlreadyExists`` as no-ops so this helper is safe
-    to call on every ingest request.
+    ``CollectionAlreadyExists`` as no-ops so this helper is safe to
+    call on every ingest request.
     """
     # Ensure database exists.
     try:

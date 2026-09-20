@@ -19,13 +19,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
-from vector_service.core.errors import (
-    EmbedderError,
-    ImageEmbedderError,
-    MultimodalEmbedderError,
-    RerankerError,
+from vector_service.core.logging import get_logger
+from vector_service.core.metrics import MODEL_LOADED
+from vector_service.core.model_info import describe_instance
+from vector_service.core.model_lifecycle import (
+    ConcurrentModelOperation,
+    DifferentModelLoaded,
+    ModelSlot,
 )
 from vector_service.embeddings.image_registry import (
     IMAGE_EMBEDDER_REGISTRY,
@@ -42,11 +44,6 @@ from vector_service.embeddings.registry import (
     get_embedder_class,
     list_embedder_names,
 )
-from vector_service.core.model_lifecycle import (
-    ConcurrentModelOperation,
-    DifferentModelLoaded,
-    ModelSlot,
-)
 from vector_service.rerankers.registry import (
     get_reranker_class,
     list_reranker_names,
@@ -54,12 +51,15 @@ from vector_service.rerankers.registry import (
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.openai import (
     Model,
+    ModelInfo,
     ModelList,
     ModelLoadResponse,
     ModelUnloadResponse,
 )
 
 router = APIRouter(prefix="/v1", tags=["model"])
+
+log = get_logger(__name__)
 
 # Type alias used internally for ``_resolve_family`` return values.
 _FamilyLiteral = str  # one of: embedder | image_embedder | multimodal_embedder | reranker
@@ -82,7 +82,9 @@ def list_models(request: Request):
     # populated by lifespan in production, but test fixtures that build
     # an app without lifespan never set them, and ``request.app.state``
     # raises AttributeError on missing keys.
-    embedder = getattr(request.app.state, "embedder", None)
+    app_state = request.app.state
+    embedder = getattr(app_state, "embedder", None)
+    embedder_slot = _slot_for(app_state, "embedder")
     models: list[Model] = []
     for name in list_embedder_names():
         loaded = bool(embedder and embedder.model_name == name)
@@ -90,15 +92,28 @@ def list_models(request: Request):
             dim = embedder.dim if loaded else None
         except Exception:
             dim = None
-        models.append(Model(id=name, type="embedder", dimensions=dim, loaded=loaded))
+        load_status, load_error = _row_load_state(embedder_slot, name)
+        models.append(Model(
+            id=name, type="embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(embedder if loaded else None, embedder_slot),
+        ))
     for name in list_reranker_names():
         # Rerankers don't expose a dimension. ``loaded`` is the only signal
         # the dashboard (or any other consumer) has to tell apart a loaded
         # reranker from a registered-but-unloaded one.
-        reranker = getattr(request.app.state, "reranker", None)
+        reranker = getattr(app_state, "reranker", None)
+        reranker_slot = _slot_for(app_state, "reranker")
         loaded = bool(reranker and reranker.model_name == name)
-        models.append(Model(id=name, type="reranker", dimensions=None, loaded=loaded))
-    image_embedder = getattr(request.app.state, "image_embedder", None)
+        effective_reranker = reranker if loaded else None
+        load_status, load_error = _row_load_state(reranker_slot, name)
+        models.append(Model(
+            id=name, type="reranker", dimensions=None, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(effective_reranker, reranker_slot),
+        ))
+    image_embedder = getattr(app_state, "image_embedder", None)
+    image_slot = _slot_for(app_state, "image_embedder")
     for name in list_image_embedder_names():
         # Constraint: only the embedder that is actually loaded on
         # ``app.state.image_embedder`` can report a real dimension.
@@ -115,8 +130,14 @@ def list_models(request: Request):
             dim = effective.dim if loaded else None
         except Exception:
             dim = None
-        models.append(Model(id=name, type="image_embedder", dimensions=dim, loaded=loaded))
-    multimodal_embedder = getattr(request.app.state, "multimodal_embedder", None)
+        load_status, load_error = _row_load_state(image_slot, name)
+        models.append(Model(
+            id=name, type="image_embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(effective, image_slot),
+        ))
+    multimodal_embedder = getattr(app_state, "multimodal_embedder", None)
+    multimodal_slot = _slot_for(app_state, "multimodal_embedder")
     for name in list_multimodal_embedder_names():
         effective = (
             multimodal_embedder
@@ -128,7 +149,12 @@ def list_models(request: Request):
             dim = effective.dim if loaded else None
         except Exception:
             dim = None
-        models.append(Model(id=name, type="multimodal_embedder", dimensions=dim, loaded=loaded))
+        load_status, load_error = _row_load_state(multimodal_slot, name)
+        models.append(Model(
+            id=name, type="multimodal_embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(effective, multimodal_slot),
+        ))
     return ModelList(data=models)
 
 
@@ -143,33 +169,60 @@ def list_models(request: Request):
     ),
 )
 def get_model(model_id: str, request: Request):
+    app_state = request.app.state
     if model_id in EMBEDDER_REGISTRY:
-        embedder = request.app.state.embedder
+        embedder = app_state.embedder
         loaded = bool(embedder and embedder.model_name == model_id)
         dim = embedder.dim if loaded else None
-        return Model(id=model_id, type="embedder", dimensions=dim, loaded=loaded)
+        embedder_slot = _slot_for(app_state, "embedder")
+        load_status, load_error = _row_load_state(embedder_slot, model_id)
+        return Model(
+            id=model_id, type="embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(embedder if loaded else None, embedder_slot),
+        )
     if model_id in list_reranker_names():
         # Rerankers don't expose a dimension; ``loaded`` is the only
         # signal that the queried id is currently held on app.state.
         # ``getattr`` so test harnesses that skip lifespan (and therefore
         # never set ``app.state.reranker``) don't crash.
-        reranker = getattr(request.app.state, "reranker", None)
+        reranker = getattr(app_state, "reranker", None)
+        reranker_slot = _slot_for(app_state, "reranker")
         loaded = bool(reranker and reranker.model_name == model_id)
-        return Model(id=model_id, type="reranker", dimensions=None, loaded=loaded)
+        load_status, load_error = _row_load_state(reranker_slot, model_id)
+        return Model(
+            id=model_id, type="reranker", dimensions=None, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(reranker if loaded else None, reranker_slot),
+        )
     if model_id in IMAGE_EMBEDDER_REGISTRY:
-        image_embedder = request.app.state.image_embedder
+        image_embedder = app_state.image_embedder
         # See note above in ``list_models``: only report ``dimensions``
         # when the queried id matches the live embedder on app.state.
         # Otherwise the model is registered but not loaded, and the
         # dimension is genuinely unknown to this process.
         loaded = bool(image_embedder and image_embedder.model_name == model_id)
         dim = image_embedder.dim if loaded else None
-        return Model(id=model_id, type="image_embedder", dimensions=dim, loaded=loaded)
+        image_slot = _slot_for(app_state, "image_embedder")
+        load_status, load_error = _row_load_state(image_slot, model_id)
+        return Model(
+            id=model_id, type="image_embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(image_embedder if loaded else None, image_slot),
+        )
     if model_id in MULTIMODAL_EMBEDDER_REGISTRY:
-        multimodal_embedder = getattr(request.app.state, "multimodal_embedder", None)
+        multimodal_embedder = getattr(app_state, "multimodal_embedder", None)
         loaded = bool(multimodal_embedder and multimodal_embedder.model_name == model_id)
         dim = multimodal_embedder.dim if loaded else None
-        return Model(id=model_id, type="multimodal_embedder", dimensions=dim, loaded=loaded)
+        multimodal_slot = _slot_for(app_state, "multimodal_embedder")
+        load_status, load_error = _row_load_state(multimodal_slot, model_id)
+        return Model(
+            id=model_id, type="multimodal_embedder", dimensions=dim, loaded=loaded,
+            load_status=load_status, load_error=load_error,
+            model_info=_model_info(
+                multimodal_embedder if loaded else None, multimodal_slot
+            ),
+        )
     registered = (
         sorted(EMBEDDER_REGISTRY)
         + sorted(list_reranker_names())
@@ -189,9 +242,12 @@ def get_model(model_id: str, request: Request):
 # after the lifespan eager-load. To support hot-swapping we mount a
 # parallel :class:`ModelSlot` on ``app.state._slot_<family>`` (see
 # ``core.model_lifecycle.attach_default_slots``). Each route resolves
-# ``model_id`` to a (class, family, slot) triple, dispatches the slot
-# operation to a thread executor so the event loop never blocks on the
-# family lock, and maps the slot exceptions onto HTTP error envelopes.
+# ``model_id`` to a (class, family, slot) triple and maps the slot
+# exceptions onto HTTP error envelopes. Load is asynchronous: the route
+# runs only the slot's non-blocking ``begin_load`` phase, then schedules
+# the slow ``finish_load`` (factory + ``load()``) on a thread executor
+# and returns HTTP 202; clients poll GET /v1/models for ``load_status``.
+# Unload stays synchronous — it only releases local resources.
 
 # Lookup table: family name → (registry_dict, slot attr on app.state,
 # settings block attribute, class lookup callable, app.state mirror
@@ -305,6 +361,60 @@ def _resolve_family(request: Request, model_id: str) -> tuple[str, ModelSlot, ty
     }})
 
 
+def _slot_for(app_state: Any, family: str) -> ModelSlot | None:
+    """Return the family's :class:`ModelSlot`, or ``None`` for test apps
+    that mount the router without ``attach_default_slots``."""
+    slot_attr = _FAMILY_TABLE[family][0]
+    return getattr(app_state, slot_attr, None)
+
+
+def _model_info(instance: Any, slot: ModelSlot | None) -> ModelInfo | None:
+    """Build the runtime ``model_info`` block for a loaded row.
+
+    ``instance`` is the live backend for THIS registered id (or ``None``
+    when the row is not the family's currently-loaded id). Static
+    resource details come from :func:`describe_instance` (cached on the
+    instance); the slot contributes the last load duration. Returns
+    ``None`` for rows with no live instance; never raises — a failure to
+    introspect must not take ``GET /v1/models`` down.
+    """
+    if instance is None:
+        return None
+    try:
+        details = describe_instance(instance)
+    except Exception:  # noqa: BLE001 — introspection is best-effort
+        details = None
+    details = details or {}
+    duration = getattr(slot, "load_duration", None) if slot is not None else None
+    if not details and duration is None:
+        return None
+    return ModelInfo(
+        device=details.get("device"),
+        dtype=details.get("dtype"),
+        param_count=details.get("param_count"),
+        memory_bytes=details.get("memory_bytes"),
+        load_duration_seconds=duration,
+    )
+
+
+def _row_load_state(slot: ModelSlot | None, name: str) -> tuple[str, str | None]:
+    """Map a slot's async state onto one registered model id.
+
+    ``loaded`` is derived separately (from the live ``app.state.<family>``
+    mirror). Here we only resolve the finer ``load_status``: only the id
+    the slot is currently loading (or last failed to load) reports
+    ``loading`` / ``failed``; every other registered id of the same
+    family stays ``unloaded``.
+    """
+    if slot is None:
+        return "unloaded", None
+    if slot.loaded_id == name:
+        return "loaded", None
+    if slot.loading_id == name and slot.load_state in ("loading", "failed"):
+        return slot.load_state, slot.load_error
+    return "unloaded", None
+
+
 def _http_error(status: int, code: str, message: str, **extra: Any) -> HTTPException:
     """Build an HTTPException with the canonical error envelope shape."""
     detail: dict[str, Any] = {"code": code, "message": message}
@@ -315,46 +425,99 @@ def _http_error(status: int, code: str, message: str, **extra: Any) -> HTTPExcep
 @router.post(
     "/models/{model_id}/load",
     response_model=ModelLoadResponse,
+    status_code=202,
     responses={
+        200: {"model": ModelLoadResponse, "description": "Idempotent re-load: the id was already held."},
+        202: {"model": ModelLoadResponse, "description": "Load accepted; running in the background."},
         404: {"model": ErrorEnvelope, "description": "Unknown model id."},
         409: {"model": ErrorEnvelope, "description": "Model is busy or a different id is loaded."},
-        503: {"model": ErrorEnvelope, "description": "Backend failed to load."},
+        503: {"model": ErrorEnvelope, "description": "Model slot is not attached."},
     },
-    summary="Hot-load a model",
+    summary="Hot-load a model (asynchronous)",
     description=(
-        "Construct and load the registered backend for ``model_id``, "
-        "replacing the current instance of that family on "
-        "``app.state``. Idempotent for the same id; a *different* id "
-        "in the same family returns 409 ``conflict_loaded`` (call "
-        "``/unload`` first). Concurrent load/unload on the same "
-        "family returns 409 ``model_busy``."
+        "Start loading the registered backend for ``model_id``. The call "
+        "is asynchronous: it returns **202** ``{status: 'loading'}`` "
+        "immediately while construction + ``load()`` (potentially a slow "
+        "weight download / GPU warmup) continue in the background. Poll "
+        "``GET /v1/models`` and watch this id's ``load_status`` — it ends "
+        "at ``loaded`` (``dimensions`` populated) or ``failed`` with a "
+        "``load_error`` message; there is no synchronous failure "
+        "response. If the same id is already held, the request is "
+        "idempotent and returns **200** ``{status: 'loaded'}`` without "
+        "rebuilding. A *different* id in the same family returns 409 "
+        "``conflict_loaded`` (call ``/unload`` first); concurrent "
+        "load/unload on the same family returns 409 ``model_busy``."
     ),
 )
-async def load_model(model_id: str, request: Request):
+async def load_model(model_id: str, request: Request, response: Response):
     family, slot, cls, factory, _settings, state_attr = _resolve_family(request, model_id)
-    loop = asyncio.get_running_loop()
+    # Fast phase: non-blocking lock + idempotent/conflict settlement.
+    # ``begin_load`` performs no I/O, so it is safe on the event loop.
     try:
-        instance = await loop.run_in_executor(None, slot.load, cls, factory)
+        instance = slot.begin_load(cls)
     except ConcurrentModelOperation as exc:
         raise _http_error(409, "model_busy", str(exc), model=model_id, family=family)
     except DifferentModelLoaded as exc:
         raise _http_error(409, "conflict_loaded", str(exc), model=model_id, family=family)
-    except (EmbedderError, ImageEmbedderError, MultimodalEmbedderError, RerankerError) as exc:
-        raise _http_error(
-            503, "model_load_failed",
-            str(exc) or f"failed to load {model_id}",
-            model=model_id, family=family,
-            exception_type=type(exc).__name__,
+
+    if instance is not None:
+        # Idempotent hit — the slot already holds this id. 200, not 202.
+        response.status_code = 200
+        return ModelLoadResponse(
+            id=instance.model_name,
+            type=family,  # type: ignore[arg-type]
+            status="loaded",
+            dimensions=getattr(instance, "dim", None),
         )
-    # Mirror the slot into ``app.state.<family>`` so the inference routes
-    # see the freshly loaded instance immediately. Without this the
-    # routes would keep reading the previous (or stale) instance.
-    setattr(request.app.state, state_attr, instance)
+
+    # Slow phase runs on a worker thread; settle bookkeeping when done.
+    app = request.app
+    model_id_local = model_id
+
+    async def _settle() -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            loaded = await loop.run_in_executor(None, slot.finish_load, factory)
+        except asyncio.CancelledError:
+            # Server shutting down mid-load. The executor thread is NOT
+            # cancelled: it keeps running finish_load, which settles the
+            # slot state and releases the lock on its own. Just propagate.
+            raise
+        except Exception as exc:  # noqa: BLE001 — slot already recorded ``failed``
+            # Any failure (family error OR unexpected) is observable via
+            # GET /v1/models (load_status=failed / load_error); nothing is
+            # installed on app.state. Don't let it surface as an unretrieved
+            # task exception.
+            log.warning(
+                "model_load_failed",
+                model=model_id_local,
+                family=family,
+                error=str(exc) or f"failed to load {model_id_local}",
+                exception_type=type(exc).__name__,
+            )
+            return
+        # Mirror the slot into ``app.state.<family>`` so the inference
+        # routes see the freshly loaded instance immediately.
+        setattr(app.state, state_attr, loaded)
+        MODEL_LOADED.labels(kind=family).set(1)
+        log.info(
+            "model_loaded",
+            model=loaded.model_name,
+            family=family,
+            device=getattr(loaded, "_device", "unknown"),
+            dim=getattr(loaded, "dim", None),
+        )
+
+    task = asyncio.create_task(_settle())
+    tasks = getattr(app.state, "_model_tasks", None)
+    if tasks is not None:
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
     return ModelLoadResponse(
-        id=instance.model_name,
+        id=model_id,
         type=family,  # type: ignore[arg-type]
-        status="loaded",
-        dimensions=getattr(instance, "dim", None),
+        status="loading",
+        dimensions=None,
     )
 
 

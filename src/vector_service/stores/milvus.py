@@ -448,6 +448,25 @@ class MilvusStore(VectorStore):
             for it in rows
         ]
 
+    def count_rows(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        """Live ``count(*)`` — see :meth:`MilvusAdapter.count`.
+
+        Unlike ``collection_info().count`` (segment metadata, stale
+        until compaction), this reflects deletes immediately and is
+        what drives the dashboard browse pager's total.
+        """
+        return self._adapter.count(
+            database=database,
+            collection=collection,
+            filter_expr=filter_expr,
+        )
+
     def search(
         self,
         database: str,

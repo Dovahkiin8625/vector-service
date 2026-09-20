@@ -17,15 +17,223 @@ have not opted into binary document parsing.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vector_service.core.errors import VectorServiceError
-from vector_service.parsers.base import DocumentParser, ParsedDocument
+from vector_service.parsers.base import (
+    DocumentParser,
+    ParsedDocument,
+    ProgressCallback,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — import only for typing
     from docling.document_converter import DocumentConverter
+
+# Per-convert progress sink. Docling runs the conversion on a worker
+# thread (the route dispatches via run_in_executor), so the callback
+# cannot travel as a plain closure-scoped global — a contextvar set
+# inside the worker thread is visible to every pipeline stage there.
+_current_progress: contextvars.ContextVar[ProgressCallback | None] = contextvars.ContextVar(
+    "docling_parse_progress", default=None,
+)
+
+
+def _wrap_pipeline(pipeline: Any) -> Any:
+    """Make Docling's shared, cached pipeline report per-page progress.
+
+    ``DocumentConverter`` caches one pipeline instance per options hash
+    (``document_converter.py`` ``_get_pipeline``), and every page is
+    yielded from ``PaginatedPipeline._apply_on_pages`` only AFTER it has
+    passed the full stage chain (layout → table → OCR → assembly — see
+    ``base_pipeline.py``). Wrapping that generator once per pipeline
+    gives us a reliable "page n of N finished" tick. The wrapper reads
+    the current contextvar, so concurrent converts on different threads
+    each see their own callback. Idempotent: repeated convert() calls
+    must not stack wrappers.
+    """
+    if getattr(pipeline, "_vs_progress_wrapped", False):
+        return pipeline
+    if not hasattr(pipeline, "_apply_on_pages"):
+        # Non-paginated pipeline (no per-page concept) — nothing to wrap.
+        return pipeline
+
+    original = pipeline._apply_on_pages
+
+    def _wrapped(conv_res: Any, page_batch: Any) -> Any:
+        page_count = getattr(getattr(conv_res, "input", None), "page_count", None)
+        for page in original(conv_res, page_batch):
+            callback = _current_progress.get()
+            page_no = getattr(page, "page_no", None)
+            if callback is not None and isinstance(page_no, int):
+                try:
+                    callback(page_no, page_count if isinstance(page_count, int) else 0)
+                except Exception:  # noqa: BLE001 — progress must never break conversion
+                    pass
+            yield page
+
+    pipeline._apply_on_pages = _wrapped
+    pipeline._vs_progress_wrapped = True
+    return pipeline
+
+
+class _ProgressQueueProxy:
+    """Intercept ``get_batch`` drains without touching the slotted queue.
+
+    Delegates every other attribute (``put``, ``close``, ``closed`` …)
+    to the wrapped :class:`ThreadedQueue` so the drain loop's lifecycle
+    calls behave identically. The completed-page set is per-run: the
+    pipeline factory constructs one proxy per convert call.
+    """
+
+    __slots__ = ("_queue", "_completed", "_total")
+
+    def __init__(self, queue: Any) -> None:
+        self._queue = queue
+        self._completed: set[int] = set()
+        self._total = 0
+
+    def get_batch(self, size: Any, timeout: Any = None, *args: Any, **kwargs: Any) -> Any:
+        batch = self._queue.get_batch(size, timeout, *args, **kwargs)
+        callback = _current_progress.get()
+        if callback and batch:
+            for item in batch:
+                page_no = getattr(item, "page_no", None)
+                if isinstance(page_no, int):
+                    self._completed.add(page_no)
+                conv_res = getattr(item, "conv_res", None)
+                page_count = getattr(getattr(conv_res, "input", None), "page_count", None)
+                if isinstance(page_count, int):
+                    self._total = page_count
+            if self._completed:
+                try:
+                    callback(len(self._completed), self._total)
+                except Exception:  # noqa: BLE001 — progress must never break conversion
+                    pass
+        return batch
+
+    def close(self) -> None:
+        self._queue.close()
+
+    @property
+    def closed(self) -> bool:
+        return bool(self._queue.closed)
+
+    def __getattr__(self, name: str) -> Any:
+        # ``object.__getattribute__`` avoids recursion if accessed
+        # before ``__init__`` assigned the ``_queue`` slot.
+        return getattr(object.__getattribute__(self, "_queue"), name)
+
+
+def _wrap_threaded_pdf_pipeline(pipeline: Any) -> Any:
+    """Add page ticks to docling 2.12+'s threaded ``StandardPdfPipeline``.
+
+    That pipeline (the default for PDF/DOCX/PPTX in recent docling)
+    bypasses :meth:`PaginatedPipeline._apply_on_pages`: six worker
+    stages communicate over bounded queues, and ``_build_document``
+    drains finished pages with ``RunContext.output_queue.get_batch``.
+    Wrapping the queue returned per-run by ``_create_run_ctx`` is the
+    one point where every finished page (success OR failure) passes in
+    page order of completion.
+
+    Counts are unique-``page_no`` based because pages complete out of
+    order; the run-scoped completed set is rebuilt by ``_create_run_ctx``
+    on every convert, so a second document restarts at zero. The
+    contextvar is read at drain time — drains run on the caller's
+    converter thread, i.e. our executor worker.
+
+    The real ``ThreadedQueue`` declares ``__slots__`` and has no
+    ``__weakref__`` slot, so neither per-instance method patching nor a
+    weakref map works: assigning ``queue.get_batch`` raises
+    ``AttributeError`` INSIDE ``_build_document`` and fails every page.
+    ``RunContext`` is a plain (non-frozen) dataclass — the wrapper
+    replaces ``ctx.output_queue`` with a thin proxy instead. Worker
+    stages were wired to the underlying queue before the factory
+    returned, so only the drain loop sees the proxy.
+    """
+    if getattr(pipeline, "_vs_progress_wrapped", False):
+        return pipeline
+    create_run_ctx = getattr(pipeline, "_create_run_ctx", None)
+    if not callable(create_run_ctx):
+        # Legacy/simple pipeline — no threaded run context.
+        return pipeline
+
+    def _reporting_run_ctx() -> Any:
+        ctx = create_run_ctx()
+        out_q = getattr(ctx, "output_queue", None)
+        if out_q is None or not hasattr(out_q, "get_batch"):
+            return ctx
+        ctx.output_queue = _ProgressQueueProxy(out_q)
+        return ctx
+
+    # Instance attr shadows the class method. The call site is
+    # ``self._create_run_ctx()`` with zero args — an instance-attr
+    # function is NOT bound, so the wrapper takes no ``self`` and closes
+    # over ``pipeline`` instead.
+    pipeline._create_run_ctx = _reporting_run_ctx
+    pipeline._vs_progress_wrapped = True
+    return pipeline
+
+
+def _build_progress_converter() -> "DocumentConverter":
+    """Construct the progress-reporting converter.
+
+    Imported lazily inside ``DoclingParser.load``'s lock so the class is
+    created only when Docling is actually installed.
+    """
+    from docling.document_converter import DocumentConverter
+
+    # Tests inject a factory/instance in place of the class; subclassing
+    # a non-class raises, so duck-type the branch.
+    if not isinstance(DocumentConverter, type):
+        return DocumentConverter()
+
+    class _ProgressConverterImpl(DocumentConverter):
+        def _get_pipeline(self, doc_format: Any) -> Any:
+            pipeline = super()._get_pipeline(doc_format)
+            if pipeline is not None:
+                # docling 2.12+ threaded StandardPdfPipeline first; the
+                # legacy generator pipeline second. Each wrapper is a
+                # no-op on pipelines it doesn't recognise, and both are
+                # idempotent against converter-level pipeline caching.
+                _wrap_threaded_pdf_pipeline(pipeline)
+                _wrap_pipeline(pipeline)
+            return pipeline
+
+    return _ProgressConverterImpl()
+
+
+def _apply_hub_env() -> None:
+    """Configure HuggingFace Hub env vars BEFORE Docling/HF is imported.
+
+    Docling pulls its layout/table models from the HuggingFace Hub on
+    first use; on networks where huggingface.co is unreachable the
+    operator sets ``VS_PARSER__HF_ENDPOINT`` (e.g.
+    ``https://hf-mirror.com``). ``huggingface_hub`` reads
+    ``HF_ENDPOINT`` at import time, and Docling is imported lazily
+    inside :meth:`DoclingParser.load`, so setting it here is early
+    enough. Download progress bars are suppressed unless the service
+    runs at DEBUG — in a server log each bar becomes a stream of
+    progress lines, while a stalled/failed download still surfaces as
+    a regular exception either way.
+    """
+    from vector_service.core.config import get_settings
+
+    endpoint = get_settings().parser.hf_endpoint.strip()
+    if endpoint:
+        os.environ.setdefault("HF_ENDPOINT", endpoint)
+        # Mirrors (e.g. hf-mirror.com) serve the regular file API but
+        # can't proxy the Xet CAS backend (cas-server.xethub.hf.co
+        # answers 401), so force the classic HTTP download path.
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    if get_settings().log_level.upper() != "DEBUG":
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        # Windows hosts without Developer Mode fall back to copying
+        # cache files — works fine, but emits a multi-line UserWarning.
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
 class ParserUnavailable(VectorServiceError):
@@ -77,14 +285,17 @@ class DoclingParser(DocumentParser):
         with self._lock:
             if self._converter is not None:
                 return
+            _apply_hub_env()
             try:
-                from docling.document_converter import DocumentConverter
+                # Import validates that docling is installed; the
+                # converter itself is the progress-reporting subclass.
+                from docling.document_converter import DocumentConverter  # noqa: F401
             except ImportError as e:
                 raise ParserUnavailable(
                     "docling is not installed; install it to enable binary "
                     "document parsing (pip install 'docling>=2.0')"
                 ) from e
-            self._converter = DocumentConverter()
+            self._converter = _build_progress_converter()
 
     def unload(self) -> None:
         """Release the cached converter. Idempotent."""
@@ -99,37 +310,51 @@ class DoclingParser(DocumentParser):
 
     # ---- parsing ------------------------------------------------------
 
-    def parse(self, path: Path) -> ParsedDocument:
+    def parse(
+        self,
+        path: Path,
+        on_progress: ProgressCallback | None = None,
+    ) -> ParsedDocument:
         """Parse a file on disk via Docling's ``DocumentConverter``.
 
         The conversion is CPU/GPU heavy — call sites should dispatch to
         a thread executor (the route does this via
-        ``loop.run_in_executor``).
+        ``loop.run_in_executor``). ``on_progress`` ticks once per
+        completed page as ``(pages_done, total_pages)``.
         """
         converter = self._ensure_loaded()
         if not path.exists():
             raise FileNotFoundError(f"file not found: {path}")
+        token = _current_progress.set(on_progress)
         try:
             result = converter.convert(str(path))
         except ParserUnavailable:
             raise
         except Exception as e:
             raise RuntimeError(f"docling conversion failed for {path}: {e}") from e
+        finally:
+            _current_progress.reset(token)
         return _result_to_parsed(result, mime=guess_mime(path))
 
-    async def parse_bytes(self, data: bytes, mime: str) -> ParsedDocument:
+    async def parse_bytes(
+        self,
+        data: bytes,
+        mime: str,
+        on_progress: ProgressCallback | None = None,
+    ) -> ParsedDocument:
         """Parse in-memory bytes via a temporary file.
 
         Docling's converter is path-oriented; the smallest integration
         surface is to spill ``data`` to a tempfile and let Docling read
         it back. The temp file is cleaned up via ``tempfile``'s context
-        manager semantics.
+        manager semantics. The progress contextvar is set INSIDE the
+        worker thread — contextvars don't cross run_in_executor threads
+        automatically.
         """
         loop = asyncio.get_running_loop()
 
         def _work() -> ParsedDocument:
             import tempfile
-            import os
 
             converter = self._ensure_loaded()
             suffix = _suffix_for_mime(mime)
@@ -138,6 +363,7 @@ class DoclingParser(DocumentParser):
             ) as fh:
                 fh.write(data)
                 tmp_path = fh.name
+            token = _current_progress.set(on_progress)
             try:
                 result = converter.convert(tmp_path)
             except ParserUnavailable:
@@ -147,6 +373,7 @@ class DoclingParser(DocumentParser):
                     f"docling conversion failed for in-memory {mime}: {e}"
                 ) from e
             finally:
+                _current_progress.reset(token)
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -154,6 +381,28 @@ class DoclingParser(DocumentParser):
             return _result_to_parsed(result, mime=mime)
 
         return await loop.run_in_executor(None, _work)
+
+
+# ---- process-wide singleton -------------------------------------------
+
+
+_parser_singleton: DoclingParser | None = None
+_parser_singleton_lock = threading.Lock()
+
+
+def get_docling_parser() -> DoclingParser:
+    """Return the process-wide :class:`DoclingParser`.
+
+    Both the HTTP routes and the lifespan warmup must hit one cached
+    ``DocumentConverter``: Docling's layout/OCR models cost ~10-30s to
+    build, so constructing a fresh parser per request made every upload
+    pay the cold-start cost even after warmup.
+    """
+    global _parser_singleton
+    with _parser_singleton_lock:
+        if _parser_singleton is None:
+            _parser_singleton = DoclingParser()
+        return _parser_singleton
 
 
 def _result_to_parsed(result: Any, *, mime: str) -> ParsedDocument:

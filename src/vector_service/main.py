@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import uvicorn
@@ -9,6 +10,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+# Must run before anything builds an ONNX Runtime session (Docling's
+# RapidOCR) — see vector_service.core.cuda_dlls for the full story.
+from vector_service.core.cuda_dlls import enable_pip_cuda_dlls
+
+enable_pip_cuda_dlls()
 
 from vector_service import __version__
 from vector_service.api.backend import router as backend_router
@@ -79,6 +86,21 @@ def _err(
             }
         },
     )
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce arbitrary values into JSON-serialisable ones for logging.
+
+    Pydantic validation errors can carry non-serialisable objects in
+    ``input`` / ``ctx``; a failed log render must never mask the
+    original error response.
+    """
+    return json.loads(json.dumps(value, default=str))
+
+
+# Cap raw-body previews in validation-failure logs so a large upload
+# doesn't flood the log stream.
+_VALIDATION_BODY_LOG_LIMIT = 4000
 
 
 OPENAPI_TAGS = [
@@ -300,14 +322,30 @@ def create_app() -> FastAPI:
             and isinstance(detail["error"], dict)
         ):
             inner = detail["error"]
+            code = inner.get("code", "error")
+            message = inner.get("message", str(exc.detail))
             extras = {k: v for k, v in inner.items() if k not in ("code", "message")}
-            return _err(
-                inner.get("code", "error"),
-                inner.get("message", str(exc.detail)),
-                exc.status_code,
-                extras,
+        else:
+            code = "error"
+            message = str(detail)
+            extras = None
+
+        # Without this, a raised 5xx only shows as a bare access-log line
+        # — log the raise-site traceback so backend failures are debuggable.
+        if exc.status_code >= 500:
+            log.error(
+                "http_exception",
+                status_code=exc.status_code,
+                method=request.method,
+                path=request.url.path,
+                code=code,
+                error=message,
+                exc_info=exc,
             )
-        return _err("error", str(detail), exc.status_code, exc=exc)
+
+        if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+            return _err(code, message, exc.status_code, extras)
+        return _err(code, message, exc.status_code, exc=exc)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(request: Request, exc: RequestValidationError):
@@ -326,6 +364,29 @@ def create_app() -> FastAPI:
                 err_type = e.get("type", "invalid")
                 raw_msg = e.get("msg", "")
                 first_msg = f"{loc}: {raw_msg}" if loc else f"{err_type}: {raw_msg}"
+
+        # By default a 422 only produces an uvicorn access-log line, which
+        # says nothing about WHY the request failed. Log every field error
+        # plus a preview of the raw body (FastAPI has already cached it on
+        # the request, so this does not consume the stream).
+        body_preview: str | None = None
+        try:
+            raw = await request.body()
+            if raw:
+                body_preview = raw.decode("utf-8", errors="replace")[
+                    :_VALIDATION_BODY_LOG_LIMIT
+                ]
+        except Exception:  # pragma: no cover - logging must never mask the 422
+            body_preview = None
+        log.warning(
+            "request_validation_failed",
+            method=request.method,
+            path=request.url.path,
+            detail=first_msg or "validation error",
+            errors=_json_safe(safe_errors),
+            body=body_preview,
+        )
+
         return _err(
             "invalid_request",
             first_msg or "validation error",

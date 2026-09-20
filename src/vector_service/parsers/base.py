@@ -10,8 +10,14 @@ another subclass.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+#: Per-page progress sink: ``(pages_done, total_pages)``. Fired after a
+#: page has passed every pipeline stage (layout, OCR, ...); paginated
+#: binary parsers emit one call per page, text parsers emit none.
+ProgressCallback = Callable[[int, int], None]
 
 
 @dataclass
@@ -45,16 +51,32 @@ class DocumentParser(ABC):
     accepted_mime: tuple[str, ...] = ()
 
     @abstractmethod
-    def parse(self, path: Path) -> ParsedDocument:
-        """Parse a file on disk and return its markdown + metadata."""
+    def parse(
+        self,
+        path: Path,
+        on_progress: ProgressCallback | None = None,
+    ) -> ParsedDocument:
+        """Parse a file on disk and return its markdown + metadata.
+
+        ``on_progress`` is called as ``(pages_done, total_pages)`` after
+        each completed page for paginated formats; text-only parsers
+        never call it. ``None`` (the default) disables progress
+        reporting.
+        """
 
     @abstractmethod
-    async def parse_bytes(self, data: bytes, mime: str) -> ParsedDocument:
+    async def parse_bytes(
+        self,
+        data: bytes,
+        mime: str,
+        on_progress: ProgressCallback | None = None,
+    ) -> ParsedDocument:
         """Parse in-memory bytes with the given MIME type.
 
         Async because the docling backend can hold the event loop on a
         long conversion; the markdown passthrough is trivial enough that
-        it just returns synchronously.
+        it just returns synchronously. ``on_progress`` mirrors
+        :meth:`parse` and fires from the converter's worker thread.
         """
 
     def can_handle(self, mime: str) -> bool:
