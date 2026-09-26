@@ -111,18 +111,29 @@ def hyde(chat_fn, query: str, embedder, alpha: float = 0.7) -> RecallSpec:
 
     ``q' = norm((1−α)·q + α·h)`` — the TREC 2025 RAG winning recipe;
     the original wording stays on the spec for trace display.
+
+    Any LLM-side failure (timeout, bad output, missing client) degrades
+    to a plain ``RecallSpec(query=query)`` — ``DenseChannel`` then
+    embeds the original query itself — and retrieval continues. An
+    embedder failure inside the fallback spec still surfaces at the
+    channel layer, where dense recall without an embedder is genuinely
+    impossible (the API answers with a 503); that failure belongs there.
     """
-    raw_doc = chat_fn([
-        {"role": "system", "content": _HYDE_SYSTEM},
-        {"role": "user", "content": query},
-    ])
-    doc = (raw_doc or "").strip() or query
-    q_vec = embedder.embed_query(query)
-    h_vec = embedder.embed_query(doc)
-    mix = [(1.0 - alpha) * a + alpha * b for a, b in zip(q_vec, h_vec)]
-    norm = math.sqrt(sum(x * x for x in mix)) or 1.0
-    return RecallSpec(
-        query=query,
-        vector=[x / norm for x in mix],
-        hypothetical=doc,
-    )
+    try:
+        raw_doc = chat_fn([
+            {"role": "system", "content": _HYDE_SYSTEM},
+            {"role": "user", "content": query},
+        ])
+        doc = (raw_doc or "").strip() or query
+        q_vec = embedder.embed_query(query)
+        h_vec = embedder.embed_query(doc)
+        mix = [(1.0 - alpha) * a + alpha * b for a, b in zip(q_vec, h_vec)]
+        norm = math.sqrt(sum(x * x for x in mix)) or 1.0
+        return RecallSpec(
+            query=query,
+            vector=[x / norm for x in mix],
+            hypothetical=doc,
+        )
+    except Exception:  # noqa: BLE001 — LLM-side hiccups never abort retrieval
+        logger.warning("HyDE transform failed, using plain query", exc_info=True)
+        return RecallSpec(query=query)

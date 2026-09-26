@@ -105,3 +105,40 @@ def test_hyde_alpha_one_uses_answer_only():
     chat = FakeChat("doc")
     spec = transforms.hyde(chat, "q", FakeEmbedder(), alpha=1.0)
     assert spec.vector == [pytest.approx(0.0), pytest.approx(1.0)]
+
+
+class RaisingChat:
+    def __call__(self, messages):
+        raise RuntimeError("llm timeout")
+
+
+class RecordingEmbedder:
+    def __init__(self):
+        self.calls = []
+
+    def embed_query(self, query):
+        self.calls.append(query)
+        return [0.0, 1.0]
+
+
+class RaisingEmbedder:
+    def embed_query(self, query):
+        raise RuntimeError("embedder down")
+
+
+def test_hyde_chat_failure_falls_back_to_plain_spec():
+    embedder = RecordingEmbedder()
+    spec = transforms.hyde(RaisingChat(), "q", embedder)
+    assert isinstance(spec, RecallSpec)
+    assert spec.query == "q"
+    assert spec.vector is None
+    assert spec.hypothetical is None
+    assert embedder.calls == []  # embedder never reached
+
+
+def test_hyde_embedder_failure_falls_back_to_plain_spec():
+    spec = transforms.hyde(FakeChat("doc"), "q", RaisingEmbedder())
+    assert isinstance(spec, RecallSpec)
+    assert spec.query == "q"
+    assert spec.vector is None
+    assert spec.hypothetical is None
