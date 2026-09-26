@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from vector_service.core.errors import StoreError
 from vector_service.stores import _milvus_adapter as ma_mod
 from vector_service.stores._milvus_adapter import MilvusAdapter
 from vector_service.stores.base import FieldSpec, Hit, IndexSpec
@@ -111,6 +112,20 @@ class FakeMilvusClient:
     def create_collection(self, collection_name, schema, index_params):
         self.created = collection_name
 
+    def describe_collection(self, collection_name):
+        # Raw MilvusClient shape (type codes + params); the adapter's
+        # describe_collection() normalizes it. Type 21 = varchar,
+        # 104 = sparse_float_vector.
+        return {
+            "fields": [
+                {"name": "id", "type": 21, "is_primary": True,
+                 "params": {"max_length": 64}},
+                {"name": "text", "type": 21,
+                 "params": {"max_length": 8192}},
+                {"name": "sparse", "type": 104, "params": {}},
+            ]
+        }
+
     def search(self, *args, **kwargs):
         self.search_calls.append(kwargs)
         return [[{
@@ -195,3 +210,13 @@ def test_adapter_rejects_analyzer_on_non_varchar_field(adapter):
         ad.create_collection("default", "ingest", "id", "vector", 4, "cosine",
                              scalars, indexes)
     assert fake.created is None
+
+
+def test_search_text_unknown_sparse_field_raises_store_error(adapter):
+    """Preflight symmetry with dense search: an undeclared sparse_field
+    must raise StoreError (mapped to 422 invalid_request), never reach
+    Milvus as a backend failure (503)."""
+    ad, fake = adapter
+    with pytest.raises(StoreError, match="sparse_field"):
+        ad.search_text("default", "ingest", "missing", "季度营收", top_k=5)
+    assert fake.search_calls == []

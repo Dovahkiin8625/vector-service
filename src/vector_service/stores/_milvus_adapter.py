@@ -1173,6 +1173,18 @@ class MilvusAdapter:
             raise CollectionNotFound(
                 f"collection {collection!r} does not exist in database {database!r}"
             )
+        schema = self.describe_collection(database, collection)
+        declared = {f["name"] for f in schema["fields"]}
+        if sparse_field not in declared:
+            raise StoreError(
+                f"sparse_field {sparse_field!r} is not in the collection schema"
+            )
+        if output_fields:
+            unknown = [f for f in output_fields if f not in declared]
+            if unknown:
+                raise StoreError(
+                    f"unknown output_fields {unknown}; declared: {sorted(declared)}"
+                )
 
         try:
             self._ensure_loaded(collection)
