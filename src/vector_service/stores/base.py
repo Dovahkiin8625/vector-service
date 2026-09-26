@@ -62,11 +62,15 @@ class CollectionInfo:
 class FieldSpec:
     """One field in a collection schema.
 
-    ``dtype`` is a Milvus DataType name (``varchar`` / ``int64`` / ``float``
-    / ... / ``float_vector``). ``dim`` is required for ``float_vector``.
-    ``is_primary`` marks the (single) primary key; ``max_length`` is
-    required for ``varchar``. The vector field is identified by
-    ``dtype == "float_vector"``.
+    ``dtype`` is a Milvus DataType name (``varchar`` / ``int64`` /
+    ``float`` / ... / ``float_vector`` / ``sparse_float_vector``).
+    ``dim`` is required for ``float_vector``. ``is_primary`` marks the
+    (single) primary key; ``max_length`` is required for ``varchar``.
+    The dense vector field is identified by ``dtype == "float_vector"``.
+
+    For a varchar field, ``enable_analyzer`` + ``analyzer`` turn on the
+    Milvus 2.5 text analyzer (paired with a
+    ``sparse_float_vector`` field and a BM25 Function).
     """
 
     name: str
@@ -76,6 +80,8 @@ class FieldSpec:
     max_length: int | None = None
     nullable: bool = False
     default_value: Any | None = None
+    enable_analyzer: bool = False
+    analyzer: dict | None = None
 
 
 @dataclass
@@ -258,6 +264,25 @@ class VectorStore(ABC):
         ``{"id": <primary>, "vector": None, "fields": {scalar: value}}``.
         """
 
+    def count_rows(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int | None:
+        """Return an authoritative, tombstone-aware row count.
+
+        Defaults to ``None``, which tells callers to fall back to
+        :meth:`collection_info`'s ``count``. Metadata-based counts can
+        lag deletes (Milvus does not subtract tombstoned rows until
+        compaction), so backends able to run a live ``count(*)`` query
+        — Milvus — override this. When ``filter_expr`` is given, only
+        matching rows are counted (the correct denominator for paged
+        browse results).
+        """
+        return None
+
     @abstractmethod
     def search(
         self,
@@ -270,6 +295,25 @@ class VectorStore(ABC):
         output_fields: list[str] | None = None,
     ) -> list[Hit]:
         """Top-k nearest neighbours in the given (database, collection)."""
+
+    @abstractmethod
+    def search_text(
+        self,
+        database: str,
+        collection: str,
+        sparse_field: str,
+        query_text: str,
+        top_k: int = 10,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[Hit]:
+        """Full-text search over a BM25 sparse field.
+
+        The server-side analyzer tokenizes ``query_text`` and scores
+        matching rows with BM25; the collection must have a
+        ``sparse_float_vector`` field bound to an analyzed varchar via
+        a BM25 Function.
+        """
 
     # ---- lifecycle ----
 

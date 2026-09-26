@@ -35,6 +35,8 @@ from typing import Any
 
 from pymilvus import (
     DataType,
+    Function,
+    FunctionType,
     MilvusClient,
     connections,
     db as milvus_db,
@@ -80,9 +82,10 @@ _SCALAR_DTYPE = {
     "double": DataType.DOUBLE,
     "varchar": DataType.VARCHAR,
     "json": DataType.JSON,
+    "sparse_float_vector": DataType.SPARSE_FLOAT_VECTOR,
 }
 
-_METRIC = {"cosine": "COSINE", "ip": "IP", "l2": "L2"}
+_METRIC = {"cosine": "COSINE", "ip": "IP", "l2": "L2", "bm25": "BM25"}
 _INV_METRIC = {v: k for k, v in _METRIC.items()}
 
 
@@ -351,29 +354,36 @@ class MilvusAdapter:
     ) -> None:
         self._ensure_connected()
         self._using_db(database)
-        if self.has_collection(database, name):
-            raise CollectionAlreadyExists(
-                f"collection {name!r} already exists in database {database!r}"
-            )
         if vector_metric not in _METRIC:
             raise StoreError(
                 f"unsupported metric {vector_metric!r}; expected one of {sorted(_METRIC)}"
             )
+        sparse_names = {
+            f["name"] for f in scalar_fields if f["dtype"] == "sparse_float_vector"
+        }
         for ip in indexes:
-            if ip.get("field_name") != vector_field_name:
+            target = ip.get("field_name")
+            metric = ip.get("metric_type")
+            if target == vector_field_name:
+                allowed = ("cosine", "ip", "l2")
+            elif target in sparse_names:
+                allowed = ("bm25",)
+            else:
                 raise StoreError(
-                    f"index target {ip.get('field_name')!r} is not the vector field "
-                    f"{vector_field_name!r}"
+                    f"index target {target!r} is neither the vector field "
+                    f"{vector_field_name!r} nor a sparse field {sorted(sparse_names)}"
                 )
-            if ip.get("metric_type") not in _METRIC:
+            if metric not in allowed:
                 raise StoreError(
-                    f"unsupported index metric {ip.get('metric_type')!r}"
+                    f"index on {target!r} got metric {metric!r}; "
+                    f"expected one of {allowed}"
                 )
 
         try:
-            schema = MilvusClient.create_schema(
+            schema = self._client.create_schema(
                 auto_id=False, enable_dynamic_field=False,
             )
+            analyzed_varchars: list[str] = []
             for f in scalar_fields:
                 dtype = _SCALAR_DTYPE.get(f["dtype"])
                 if dtype is None:
@@ -387,12 +397,35 @@ class MilvusAdapter:
                             f"varchar field {f['name']!r} must set max_length"
                         )
                     kwargs["max_length"] = int(f["max_length"])
+                    if f.get("enable_analyzer"):
+                        kwargs["enable_analyzer"] = True
+                        kwargs["analyzer_params"] = dict(f.get("analyzer") or {})
+                        kwargs["enable_match"] = True
+                        analyzed_varchars.append(f["name"])
+                elif f["dtype"] == "sparse_float_vector":
+                    if f.get("enable_analyzer"):
+                        raise StoreError(
+                            f"sparse field {f['name']!r} cannot have enable_analyzer"
+                        )
+                else:
+                    if f.get("enable_analyzer"):
+                        raise StoreError(
+                            f"field {f['name']!r}: analyzer requires dtype varchar"
+                        )
                 if f.get("nullable"):
                     kwargs["nullable"] = True
                 if f.get("default_value") is not None:
                     kwargs["default_value"] = f["default_value"]
                 schema.add_field(f["name"], dtype, **kwargs)
             schema.add_field(vector_field_name, DataType.FLOAT_VECTOR, dim=vector_dim)
+            if analyzed_varchars and sparse_names:
+                sparse_list = sorted(sparse_names)
+                schema.add_function(Function(
+                    name=f"bm25_{sparse_list[0]}",
+                    function_type=FunctionType.BM25,
+                    input_field_names=analyzed_varchars,
+                    output_field_names=sparse_list,
+                ))
         except StoreError:
             raise
         except Exception as e:
@@ -414,11 +447,18 @@ class MilvusAdapter:
             self._client.create_collection(
                 collection_name=name, schema=schema, index_params=ip,
             )
+        except MilvusException as e:
+            # The backend is authoritative for the duplicate check.
+            self._invalidate_collection(database, name)
+            if "already exist" in str(e).lower():
+                raise CollectionAlreadyExists(
+                    f"collection {name!r} already exists in database {database!r}"
+                ) from e
+            raise BackendError(
+                f"create_collection failed for {database!r}/{name!r}: {e}"
+            ) from e
         except Exception as e:
-            # Drop any cache entry the prior ``has_collection`` check
-            # may have populated: even on failure we may have
-            # implicitly created metadata that subsequent reads would
-            # observe inconsistently.
+            # Drop any cache entry an earlier read may have populated.
             self._invalidate_collection(database, name)
             raise BackendError(
                 f"create_collection failed for {database!r}/{name!r}: {e}"
@@ -823,9 +863,67 @@ class MilvusAdapter:
             raise BackendError(
                 f"delete failed for {database!r}/{collection!r}: {e}"
             ) from e
+        # The cached describe payload carries a ``count`` field — stale
+        # the moment a delete lands. Drop it so the next read doesn't
+        # serve the pre-delete row count for up to the cache TTL.
+        self._invalidate_collection(database, collection)
         if isinstance(res, dict):
             return int(res.get("delete_count", 0))
         return 0
+
+    def count(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        """Live, tombstone-aware row count via ``count(*)``.
+
+        ``get_collection_stats`` (the row_count inside describe_collection)
+        keeps counting deleted entities until the next compaction, and the
+        describe payload is cached — both make a post-delete browse view
+        look unrefreshed. A real query under Strong consistency returns
+        the authoritative count immediately, optionally restricted to
+        rows matching ``filter_expr`` (same expression the browse call
+        uses, so the pager's denominator matches the rows on screen).
+        """
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+        try:
+            self._ensure_loaded(collection)
+            rows = self._client.query(
+                collection,
+                filter=filter_expr or "",
+                output_fields=["count(*)"],
+                # Strong: the count must reflect the delete that just
+                # returned, even when the request lands on a different
+                # worker/process than the one that issued it.
+                consistency_level="Strong",
+            )
+        except (CollectionNotFound, StoreError):
+            raise
+        except Exception as e:
+            raise BackendError(
+                f"count failed for {database!r}/{collection!r}: {e}"
+            ) from e
+
+        if not rows:
+            return 0
+        first = rows[0] if isinstance(rows[0], dict) else {}
+        # Milvus returns a one-row payload ``[{"count(*)": N}]``; accept
+        # the literal key but tolerate any count-shaped spelling too.
+        val = first.get("count(*)")
+        if val is None:
+            val = next((v for k, v in first.items() if "count" in str(k)), 0)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return 0
 
     def get(
         self,
@@ -963,6 +1061,9 @@ class MilvusAdapter:
                 "output_fields": output,
                 "limit": int(limit),
                 "offset": int(offset),
+                # Read-your-writes across processes: a delete issued by
+                # another worker must be reflected on the next page load.
+                "consistency_level": "Strong",
             }
             rows = self._client.query(collection, **kwargs)
         except (CollectionNotFound, StoreError):
@@ -1055,6 +1156,61 @@ class MilvusAdapter:
                 })
         return hits
 
+    def search_text(
+        self,
+        database: str,
+        collection: str,
+        sparse_field: str,
+        query_text: str,
+        top_k: int = 10,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """BM25 full-text leg; mirrors :meth:`search` result shape."""
+        self._ensure_connected()
+        self._using_db(database)
+        if not self.has_collection(database, collection):
+            raise CollectionNotFound(
+                f"collection {collection!r} does not exist in database {database!r}"
+            )
+
+        try:
+            self._ensure_loaded(collection)
+            results = self._client.search(
+                collection,
+                data=[query_text],
+                anns_field=sparse_field,
+                limit=top_k,
+                filter=filter_expr or "",
+                output_fields=list({sparse_field, *(output_fields or [])}),
+                search_params={"metric_type": "BM25"},
+            )
+        except (StoreError, CollectionNotFound):
+            raise
+        except Exception as e:
+            raise BackendError(
+                f"search_text failed for {database!r}/{collection!r}: {e}"
+            ) from e
+
+        hits: list[dict[str, Any]] = []
+        for batch in results or []:
+            for hit in batch:
+                entity = hit.get("entity") if isinstance(hit, dict) else None
+                fields: dict[str, Any] = {}
+                if isinstance(entity, dict):
+                    raw = dict(entity)
+                    raw.pop(sparse_field, None)
+                    if output_fields:
+                        fields = {k: raw.get(k) for k in output_fields}
+                    else:
+                        fields = raw
+                hits.append({
+                    "id": str(hit.get("id")),
+                    "score": float(hit.get("distance", 0.0)),
+                    "fields": fields,
+                })
+        return hits
+
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
@@ -1088,6 +1244,7 @@ class MilvusAdapter:
                 21: "varchar",
                 23: "json",
                 100: "binary_vector", 101: "float_vector",
+                104: "sparse_float_vector",
             }
             return mapping.get(value, str(value))
         name = getattr(value, "name", None)

@@ -41,8 +41,16 @@ from vector_service.stores.base import (
     VectorStore,
 )
 
-_VALID_METRICS = {"cosine", "ip", "l2"}
-_VALID_DTYPES = {"bool", "int8", "int16", "int32", "int64", "float", "double", "varchar", "json"}
+_VALID_METRICS = {"cosine", "ip", "l2", "bm25"}
+_VALID_DTYPES = {
+    "bool", "int8", "int16", "int32", "int64", "float", "double",
+    "varchar", "json", "sparse_float_vector",
+}
+# System-wide convention for the BM25 sparse field name. The ingest v2
+# helper names it ``sparse`` (``_SPARSE_FIELD`` in ``api/ingest.py``);
+# this store-level pass needs no view of the scalar dtypes, and the
+# adapter re-validates the field's dtype when creating the collection.
+_SPARSE_FIELD_NAME = "sparse"
 _ID_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
@@ -88,27 +96,39 @@ def _validate_schema(
         raise StoreError("scalar field names must be unique")
 
     for f in scalar_fields:
+        if f.enable_analyzer and f.dtype != "varchar":
+            raise StoreError(
+                f"field {f.name!r}: enable_analyzer requires dtype='varchar'"
+            )
         if f.dtype not in _VALID_DTYPES:
             raise StoreError(
-                f"unsupported scalar dtype {f.dtype!r}; expected one of {sorted(_VALID_DTYPES)}"
+                f"unsupported scalar dtype {f.dtype!r}; expected one of "
+                f"{sorted(_VALID_DTYPES)}"
             )
         if f.dtype == "varchar" and (f.max_length is None or f.max_length < 1):
             raise StoreError(f"varchar field {f.name!r} must set max_length >= 1")
 
 
-def _validate_indexes(vector_field: FieldSpec, indexes: list[IndexSpec]) -> None:
+def _validate_indexes(
+    vector_field: FieldSpec,
+    indexes: list[IndexSpec],
+) -> None:
     if not indexes:
         raise StoreError("at least one index covering the vector field is required")
     for ip in indexes:
-        if ip.field_name != vector_field.name:
+        if ip.field_name == vector_field.name:
+            allowed = _VALID_METRICS - {"bm25"}
+        elif ip.field_name == _SPARSE_FIELD_NAME:
+            allowed = {"bm25"}
+        else:
             raise StoreError(
                 f"index target {ip.field_name!r} is not the vector field "
                 f"{vector_field.name!r}"
             )
-        if ip.metric_type not in _VALID_METRICS:
+        if ip.metric_type not in allowed:
             raise StoreError(
-                f"unsupported metric_type {ip.metric_type!r}; "
-                f"expected one of {sorted(_VALID_METRICS)}"
+                f"index on {ip.field_name!r} got metric_type {ip.metric_type!r}; "
+                f"expected one of {sorted(allowed)}"
             )
 
 
@@ -239,6 +259,8 @@ class MilvusStore(VectorStore):
                         "max_length": f.max_length,
                         "nullable": bool(f.nullable),
                         "default_value": f.default_value,
+                        "enable_analyzer": bool(f.enable_analyzer),
+                        "analyzer": dict(f.analyzer) if f.analyzer else None,
                     }
                     for f in scalar_fields
                 ],
@@ -271,6 +293,8 @@ class MilvusStore(VectorStore):
                 "max_length": f.max_length,
                 "nullable": bool(f.nullable),
                 "default_value": f.default_value,
+                "enable_analyzer": bool(f.enable_analyzer),
+                "analyzer": dict(f.analyzer) if f.analyzer else None,
             }
             for f in scalar_fields
         ]
@@ -448,6 +472,25 @@ class MilvusStore(VectorStore):
             for it in rows
         ]
 
+    def count_rows(
+        self,
+        database: str,
+        collection: str,
+        *,
+        filter_expr: str | None = None,
+    ) -> int:
+        """Live ``count(*)`` — see :meth:`MilvusAdapter.count`.
+
+        Unlike ``collection_info().count`` (segment metadata, stale
+        until compaction), this reflects deletes immediately and is
+        what drives the dashboard browse pager's total.
+        """
+        return self._adapter.count(
+            database=database,
+            collection=collection,
+            filter_expr=filter_expr,
+        )
+
     def search(
         self,
         database: str,
@@ -463,6 +506,27 @@ class MilvusStore(VectorStore):
             collection=collection,
             vector_field=vector_field,
             query_vector=query_vector,
+            top_k=top_k,
+            filter_expr=filter_expr,
+            output_fields=output_fields,
+        )
+        return [Hit(id=h["id"], score=h["score"], fields=h["fields"]) for h in hits]
+
+    def search_text(
+        self,
+        database: str,
+        collection: str,
+        sparse_field: str,
+        query_text: str,
+        top_k: int = 10,
+        filter_expr: str | None = None,
+        output_fields: list[str] | None = None,
+    ) -> list[Hit]:
+        hits = self._adapter.search_text(
+            database=database,
+            collection=collection,
+            sparse_field=sparse_field,
+            query_text=query_text,
             top_k=top_k,
             filter_expr=filter_expr,
             output_fields=output_fields,
