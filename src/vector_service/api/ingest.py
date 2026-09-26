@@ -74,6 +74,7 @@ _AUTHOR_FIELD = "author"
 _PAGE_COUNT_FIELD = "page_count"
 _FILENAME_FIELD = "filename"
 _TOKEN_COUNT_FIELD = "token_count"
+_SPARSE_FIELD = "sparse"
 
 
 def _ingest_scalar_fields() -> list[FieldSpec]:
@@ -96,6 +97,63 @@ def _ingest_scalar_fields() -> list[FieldSpec]:
         FieldSpec(name=_FILENAME_FIELD, dtype="varchar", max_length=512, nullable=True),
         FieldSpec(name=_TOKEN_COUNT_FIELD, dtype="int64"),
     ]
+
+
+def _ingest_scalar_fields_v2() -> list[FieldSpec]:
+    """Schema v2: v1 fields + analyzed ``text`` + ``sparse`` BM25 field.
+
+    Milvus runs the built-in ``chinese`` analyzer (jieba +
+    cnalphanumonly) over ``text`` on every write; the registered BM25
+    Function turns the tokens into the ``sparse`` vector.
+    """
+    fields = [
+        FieldSpec(
+            name=f.name,
+            dtype=f.dtype,
+            is_primary=f.is_primary,
+            max_length=f.max_length,
+            nullable=f.nullable,
+            default_value=f.default_value,
+        )
+        for f in _ingest_scalar_fields()
+    ]
+    for f in fields:
+        if f.name == _TEXT_FIELD:
+            f.enable_analyzer = True
+            f.analyzer = {"type": "chinese"}
+    fields.append(FieldSpec(name=_SPARSE_FIELD, dtype="sparse_float_vector"))
+    return fields
+
+
+def _ingest_indexes_v2() -> list[IndexSpec]:
+    """Dense HNSW index plus sparse inverted (BM25) index."""
+    return [
+        IndexSpec(
+            field_name=_VECTOR_FIELD,
+            metric_type="cosine",
+            index_type="HNSW",
+            params={"M": 16, "efConstruction": 200},
+        ),
+        IndexSpec(
+            field_name=_SPARSE_FIELD,
+            metric_type="bm25",
+            index_type="SPARSE_INVERTED_INDEX",
+        ),
+    ]
+
+
+def schema_version(info: Any) -> int:
+    """Return 2 for collections carrying the ``sparse`` field, else 1.
+
+    Field entries may be dicts (CollectionInfo from the store) or any
+    object exposing ``name``; retrieval capability detection must work
+    with both.
+    """
+    for f in getattr(info, "fields", []) or []:
+        name = f.get("name") if isinstance(f, dict) else getattr(f, "name", None)
+        if name == _SPARSE_FIELD:
+            return 2
+    return 1
 
 
 def _build_chunk_row(
@@ -559,15 +617,8 @@ def _ensure_collection(
             name=collection,
             primary_field=_PRIMARY_FIELD,
             vector_field=FieldSpec(name=_VECTOR_FIELD, dtype="float_vector", dim=dim),
-            scalar_fields=_ingest_scalar_fields(),
-            indexes=[
-                IndexSpec(
-                    field_name=_VECTOR_FIELD,
-                    metric_type="cosine",
-                    index_type="HNSW",
-                    params={"M": 16, "efConstruction": 200},
-                ),
-            ],
+            scalar_fields=_ingest_scalar_fields_v2(),
+            indexes=_ingest_indexes_v2(),
         )
     except CollectionAlreadyExists:
         # Lost the race; another worker created the same collection.
