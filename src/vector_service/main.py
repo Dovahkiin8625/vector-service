@@ -23,6 +23,7 @@ from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
 from vector_service.api.parse import router as parse_router
 from vector_service.api.rerank import router as rerank_router
+from vector_service.api.retrieval import router as retrieval_router
 from vector_service.api.similarity import router as similarity_router
 from vector_service.api.system import router as system_router
 from vector_service.core.errors import (
@@ -363,6 +364,7 @@ def create_app() -> FastAPI:
     app.include_router(parse_router)
     app.include_router(chunk_router)
     app.include_router(ingest_router)
+    app.include_router(retrieval_router)
 
     return app
 
