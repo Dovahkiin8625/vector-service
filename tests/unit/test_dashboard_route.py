@@ -228,3 +228,48 @@ def test_dashboard_router_tag_is_dashboard():
     from vector_service.api.dashboard import router
     assert "dashboard" in router.tags
     assert "playground" not in router.tags
+
+
+def test_dashboard_exposes_retrieval_panel():
+    """Retrieval panel: NDJSON-streamed multi-channel retrieval with
+    mode presets, capabilities-driven disabled states, and the v1
+    migration banner."""
+    retrieval = (
+        _ST / "static" / "dashboard" / "components" / "retrieval.js"
+    ).read_text(encoding="utf-8")
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    # Served as a static asset.
+    with TestClient(app) as c:
+        rr = c.get("/static/dashboard/components/retrieval.js")
+    assert rr.status_code == 200
+    # Nav wiring: NAV_LABELS entry, kb-group nav-item, panel mount and
+    # component registration/import.
+    assert _has('data-view="retrieval"')
+    assert "'retrieval':" in app_js
+    assert "import RetrievalPanel from './retrieval.js'" in app_js
+    assert "KnowledgeBasePanel, RetrievalPanel," in app_js
+    assert "<retrieval-panel v-show=\"store.view === 'retrieval'\" />" in app_js
+    # Endpoints consumed by the panel.
+    assert "'/v1/retrieval/stream'" in retrieval
+    assert "'/v1/retrieval/capabilities" in retrieval
+    assert "/collections/ingest/migrate" in retrieval
+    # Four mode presets.
+    for m in ["'basic'", "'hybrid'", "'advanced'", "'custom'"]:
+        assert m in retrieval
+    # Capabilities-driven disabled states: bm25 off on schema v1; the
+    # whole rewrite group off without an LLM.
+    assert ':disabled="s.caps.schema_version === 1"' in retrieval
+    assert ':disabled="!s.caps.llm_configured"' in retrieval
+    # NDJSON frame splitting (partial trailing line kept in buffer).
+    assert "buffer.split('\\n')" in retrieval
+    # i18n keys exist in both dictionaries (nav.retrieval is also used
+    # by NAV_LABELS and the nav-item's t() -> 4 occurrences).
+    assert app_js.count("'nav.retrieval'") == 4
+    assert app_js.count("'retrieval.trace'") == 2
+    assert app_js.count("'retrieval.v1_banner'") == 2
+    # Styles.
+    assert ".retrieval-modes" in _CSS
+    assert ".retrieval-migrate-banner" in _CSS
+    assert ".retrieval-chunk" in _CSS

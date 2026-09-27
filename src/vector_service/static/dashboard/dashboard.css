@@ -1336,3 +1336,30 @@ table.data-table tbody tr.expanded .row-json { display: block; }
 """
 
 DASHBOARD_HTML_BODY = """
+/* ---- retrieval panel ---- */
+.retrieval-modes { display: flex; gap: 6px; margin: 10px 0; }
+.retrieval-migrate-banner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 8px 12px; margin: 10px 0;
+  border: 1px solid var(--warn-border, #d9a441);
+  background: var(--warn-bg, #fdf6e3); border-radius: 6px;
+}
+.retrieval-fieldset { border: none; padding: 0; margin: 0 0 10px; }
+.retrieval-fieldset[disabled] { opacity: .55; }
+.retrieval-progress { display: flex; flex-wrap: wrap; gap: 12px; }
+.retrieval-stage { display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-muted, #888); }
+.retrieval-chunk {
+  border: 1px solid var(--border, #e2e2e2); border-radius: 8px;
+  padding: 10px 12px; margin: 10px 0;
+}
+.retrieval-chunk-head { display: flex; align-items: center; gap: 8px; }
+.retrieval-scores { margin-left: auto; font-size: 12px;
+  color: var(--text-muted, #888); }
+.retrieval-chunk-text { margin: 8px 0; white-space: pre-wrap; }
+.retrieval-chunk-meta { font-size: 12px; color: var(--text-muted, #888); }
+.retrieval-trace-toggle { cursor: pointer; margin: 12px 0 6px;
+  font-weight: 600; }
+.retrieval-trace .stat { display: flex; gap: 8px; padding: 3px 0;
+  font-size: 12px; }
+.retrieval-trace .key { min-width: 200px; color: var(--text-muted, #888); }

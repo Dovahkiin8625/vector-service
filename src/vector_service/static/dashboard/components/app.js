@@ -14,6 +14,7 @@ import RerankPanel from './rerank.js';
 import EmbeddingsPanel from './embeddings.js';
 import SimilarityPanel from './similarity.js';
 import KnowledgeBasePanel from './knowledge-base.js';
+import RetrievalPanel from './retrieval.js';
 import { NewDbModal, NewCollModal } from './modals.js';
 
 // =====================================================================
@@ -54,6 +55,19 @@ const I18N = {
     'nav.parse': '文档解析',
     'nav.chunk': '文本分片',
     'nav.ingest': '一体化摄取',
+    'nav.retrieval': '分片检索',
+    'retrieval.title': '分片检索',
+    'retrieval.modes.basic': '基础',
+    'retrieval.modes.hybrid': '混合',
+    'retrieval.modes.advanced': '高阶',
+    'retrieval.modes.custom': '自定义',
+    'retrieval.run': '检索',
+    'retrieval.running': '检索中…',
+    'retrieval.migrate': '一键迁移到 v2',
+    'retrieval.migrating': '迁移中…',
+    'retrieval.v1_banner': 'schema v1：BM25 全文检索不可用',
+    'retrieval.llm_hint': 'LLM 未配置',
+    'retrieval.trace': '检索追踪',
     'nav.Navigation': '导航 · Navigation',
     'nav.Overview': '概览',
     'nav.Models': '模型',
@@ -260,6 +274,19 @@ const I18N = {
     'nav.parse': 'Parse',
     'nav.chunk': 'Chunk',
     'nav.ingest': 'Ingest',
+    'nav.retrieval': 'Retrieval',
+    'retrieval.title': 'Retrieval',
+    'retrieval.modes.basic': 'Basic',
+    'retrieval.modes.hybrid': 'Hybrid',
+    'retrieval.modes.advanced': 'Advanced',
+    'retrieval.modes.custom': 'Custom',
+    'retrieval.run': 'Retrieve',
+    'retrieval.running': 'Retrieving…',
+    'retrieval.migrate': 'Migrate to v2',
+    'retrieval.migrating': 'Migrating…',
+    'retrieval.v1_banner': 'Schema v1: BM25 full-text unavailable',
+    'retrieval.llm_hint': 'LLM not configured',
+    'retrieval.trace': 'Retrieval trace',
     'nav.Navigation': 'Navigation',
     'nav.Overview': 'Overview',
     'nav.Models': 'Models',
@@ -363,6 +390,7 @@ const NAV_LABELS = {
   'parse':               { catKey: 'cat.kb',        subKey: 'nav.parse' },
   'chunk':               { catKey: 'cat.kb',        subKey: 'nav.chunk' },
   'ingest':              { catKey: 'cat.kb',        subKey: 'nav.ingest' },
+  'retrieval':           { catKey: 'cat.kb',        subKey: 'nav.retrieval' },
 };
 
 const App = defineComponent({
@@ -370,7 +398,7 @@ const App = defineComponent({
   components: {
     OverviewPanel, ModelsPanel, DatabasesPanel, CollectionsPanel,
     RecordsPanel, SearchPanel, BrowsePanel, RerankPanel,
-    EmbeddingsPanel, SimilarityPanel, KnowledgeBasePanel,
+    EmbeddingsPanel, SimilarityPanel, KnowledgeBasePanel, RetrievalPanel,
     NewDbModal, NewCollModal,
   },
   setup() {
@@ -467,6 +495,7 @@ const App = defineComponent({
               <div :class="['nav-item', store.view === 'parse' ? 'active' : '']" data-view="parse" @click="store.view = 'parse'"><span>{{ t('nav.parse') }}</span></div>
               <div :class="['nav-item', store.view === 'chunk' ? 'active' : '']" data-view="chunk" @click="store.view = 'chunk'"><span>{{ t('nav.chunk') }}</span></div>
               <div :class="['nav-item', store.view === 'ingest' ? 'active' : '']" data-view="ingest" @click="store.view = 'ingest'"><span>{{ t('nav.ingest') }}</span></div>
+              <div :class="['nav-item', store.view === 'retrieval' ? 'active' : '']" data-view="retrieval" @click="store.view = 'retrieval'"><span>{{ t('nav.retrieval') }}</span></div>
             </div>
           </div>
         </div>
@@ -497,6 +526,7 @@ const App = defineComponent({
           <search-panel v-show="store.view === 'search'" />
           <browse-panel v-show="store.view === 'browse'" />
           <knowledge-base-panel v-show="store.view === 'parse' || store.view === 'chunk' || store.view === 'ingest'" :view="store.view" />
+          <retrieval-panel v-show="store.view === 'retrieval'" />
         </div>
       </main>
 
