@@ -37,3 +37,11 @@ def test_first_pick_is_highest_query_similarity():
     docs = [[0.1, 0.9], [0.9, 0.1]]
     out = mmr(_chunks(2), docs, [1.0, 0.0], lambda_mult=0.7, top_k=1)
     assert out[0].chunk_id == "c1"
+
+
+def test_lambda_zero_first_pick_is_most_query_similar():
+    # At lambda=0 the first round must still be the argmax of query
+    # similarity, not an all-zero tie broken by set iteration order.
+    docs = [[0.9, 0.1], [1.0, 0.0]]
+    out = mmr(_chunks(2), docs, [1.0, 0.0], lambda_mult=0.0, top_k=1)
+    assert out[0].chunk_id == "c1"

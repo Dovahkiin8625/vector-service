@@ -37,18 +37,25 @@ def mmr(
         return []
     if top_k is None:
         top_k = len(chunks)
+    if top_k <= 0:
+        return []
     docs = [_l2_normalize(v) for v in doc_vectors]
     query = _l2_normalize(query_vector)
     query_sim = [_cosine(d, query) for d in docs]
 
-    selected_idx: list[int] = []
+    # First pick is always the single most query-relevant candidate. This
+    # must be an explicit argmax: at lambda_mult == 0 every first-round
+    # MMR score is identically zero, so the generic loop would leave the
+    # pick to set iteration order rather than query similarity.
+    selected_idx: list[int] = [
+        max(range(len(chunks)), key=query_sim.__getitem__)
+    ]
     remaining = set(range(len(chunks)))
+    remaining.discard(selected_idx[0])
     while remaining and len(selected_idx) < top_k:
         best_idx, best_score = None, None
         for i in remaining:
-            redundancy = 0.0
-            if selected_idx:
-                redundancy = max(_cosine(docs[i], docs[j]) for j in selected_idx)
+            redundancy = max(_cosine(docs[i], docs[j]) for j in selected_idx)
             score = lambda_mult * query_sim[i] - (1.0 - lambda_mult) * redundancy
             if best_score is None or score > best_score:
                 best_idx, best_score = i, score
