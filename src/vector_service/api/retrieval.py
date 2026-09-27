@@ -16,7 +16,11 @@ from vector_service.core.errors import (
     StoreError,
 )
 from vector_service.retrieval.pipeline import RetrievalPipeline
-from vector_service.api.ingest import _store_http_error, schema_version
+from vector_service.api.ingest import (
+    _store_http_error,
+    migrate_ingest_collection,
+    schema_version,
+)
 from vector_service.schemas.retrieval import (
     RetrievalRequest,
     RetrievalResponse,
@@ -124,6 +128,29 @@ async def retrieve_stream(body: RetrievalRequest, request: Request):
             yield json.dumps(item, ensure_ascii=False) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@router.post("/databases/{database}/collections/ingest/migrate")
+def migrate(database: str, request: Request) -> dict:
+    """One-click v1 → v2 migration of the ingest collection."""
+    store = request.app.state.store
+    if database not in store.list_databases():
+        raise HTTPException(status_code=404, detail={"error": {
+            "code": "database_not_found",
+            "message": f"database {database!r} does not exist",
+        }})
+    if "ingest" not in store.list_collections(database):
+        raise HTTPException(status_code=404, detail={"error": {
+            "code": "collection_not_found",
+            "message": "collection 'ingest' does not exist",
+        }})
+    info = store.collection_info(database, "ingest")
+    if schema_version(info) >= 2:
+        raise HTTPException(status_code=409, detail={"error": {
+            "code": "collection_exists",
+            "message": "ingest collection already uses schema v2",
+        }})
+    return migrate_ingest_collection(store, database, int(info.dim))
 
 
 @router.get("/retrieval/capabilities")

@@ -1001,6 +1001,7 @@ class MilvusAdapter:
         offset: int = 0,
         filter_expr: str | None = None,
         output_fields: list[str] | None = None,
+        include_vectors: bool = False,
     ) -> list[dict[str, Any]]:
         """Paginated, filterable list view over a collection.
 
@@ -1008,9 +1009,11 @@ class MilvusAdapter:
         returned row count, ``offset`` skips that many matching rows
         (pymilvus 2.4 supports both), and ``output_fields`` selects the
         scalar columns to materialise. The vector column is never
-        materialised — even if the caller puts it in ``output_fields``,
-        we drop it before issuing the RPC, so a wide-vector collection
-        cannot be accidentally pulled through this path.
+        materialised by default — even if the caller puts it in
+        ``output_fields``, we drop it before issuing the RPC, so a
+        wide-vector collection cannot be accidentally pulled through
+        this path. The bulk migration copy passes
+        ``include_vectors=True`` to carry dense vectors across.
         """
         if limit < 0:
             raise StoreError(f"limit must be >= 0, got {limit}")
@@ -1037,7 +1040,9 @@ class MilvusAdapter:
         # per row would balloon responses on a wide embedder and is not
         # what a dashboard browse view is for.
         if output_fields is None:
-            output = [f["name"] for f in schema["fields"] if f["name"] != schema.get("vector_field")]
+            output = [f["name"] for f in schema["fields"]
+                      if include_vectors
+                      or f["name"] != schema.get("vector_field")]
         else:
             unknown = [
                 f for f in output_fields
@@ -1048,7 +1053,8 @@ class MilvusAdapter:
                     f"unknown output_fields {unknown}; declared: "
                     f"{sorted(schema_names)}"
                 )
-            output = [f for f in output_fields if f != schema.get("vector_field")]
+            output = [f for f in output_fields
+                      if include_vectors or f != schema.get("vector_field")]
         # Always include the primary key in the projection so we can
         # wrap each row into the standard ``{"id", "fields"}`` shape.
         if primary_field not in output:
@@ -1222,6 +1228,38 @@ class MilvusAdapter:
                     "fields": fields,
                 })
         return hits
+
+    def insert_rows(
+        self, database: str, collection: str, rows: list[dict[str, Any]]
+    ) -> None:
+        """Raw row insert (migration bulk-copy path).
+
+        Callers provide every field except function-generated ones:
+        the BM25 Function populates ``sparse`` from ``text`` itself.
+        """
+        self._ensure_connected()
+        self._using_db(database)
+        try:
+            self._client.insert(collection, data=rows)
+        except Exception as e:
+            raise BackendError(
+                f"insert_rows failed for {database!r}/{collection!r}: {e}"
+            ) from e
+
+    def rename_collection(
+        self, database: str, old_name: str, new_name: str
+    ) -> None:
+        """Rename a collection; keeps the same data and schema."""
+        self._ensure_connected()
+        self._using_db(database)
+        try:
+            self._client.rename_collection(old_name, new_name)
+        except Exception as e:
+            raise BackendError(
+                f"rename_collection failed {old_name!r} -> {new_name!r}: {e}"
+            ) from e
+        self._invalidate_collection(database, old_name)
+        self._invalidate_collection(database, new_name)
 
     # ------------------------------------------------------------------
     # internal helpers
