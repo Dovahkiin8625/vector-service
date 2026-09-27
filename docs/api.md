@@ -75,8 +75,11 @@
 | `POST` | `/v1/parse` | 文件 → Markdown + 元数据 |
 | `POST` | `/v1/chunk` | Markdown → chunks（含 token 数 / 章节 / 页码） |
 | `POST` | `/v1/ingest` | 一体化：文件 → 解析 → 分片 → 嵌入 → Milvus（失败原子回滚） |
+| `POST` | `/v1/retrieval` | 多路检索：dense/BM25 召回 + RRF/加权融合 + 改写 + MMR + 重排 |
+| `POST` | `/v1/retrieval/stream` | 同上，NDJSON 阶段事件流（stage → result/error） |
 
-请求 / 响应 / collection schema 详见 [ingest-pipeline.md](ingest-pipeline.md)。
+摄取端点的请求 / 响应 / collection schema 详见 [ingest-pipeline.md](ingest-pipeline.md)；
+检索端点的参数、schema v2、迁移与调优建议详见 [retrieval.md](retrieval.md)。
 
 ## 调用示例
 
