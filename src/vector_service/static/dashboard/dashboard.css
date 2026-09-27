@@ -1333,9 +1333,7 @@ table.data-table tbody tr.expanded .row-json { display: block; }
 @media (max-width: 1280px) {
   .model-grid { grid-template-columns: repeat(2, 1fr); }
 }
-"""
 
-DASHBOARD_HTML_BODY = """
 /* ---- retrieval panel ---- */
 .retrieval-modes { display: flex; gap: 6px; margin: 10px 0; }
 .retrieval-migrate-banner {
@@ -1363,3 +1361,6 @@ DASHBOARD_HTML_BODY = """
 .retrieval-trace .stat { display: flex; gap: 8px; padding: 3px 0;
   font-size: 12px; }
 .retrieval-trace .key { min-width: 200px; color: var(--text-muted, #888); }
+"""
+
+DASHBOARD_HTML_BODY = """
