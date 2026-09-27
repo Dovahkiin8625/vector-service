@@ -40,6 +40,7 @@ from vector_service.core.errors import (
     DatabaseAlreadyExists,
     DatabaseNotFound,
     DimensionMismatch,
+    EmbedderError,
     ModelNotLoadedForSimilarity,
     RerankerError,
     RerankerNotLoaded,
@@ -264,6 +265,16 @@ def create_app() -> FastAPI:
         return _err(
             "store_unavailable",
             str(exc) or "vector store backend unavailable",
+            503,
+            exc=exc,
+        )
+
+    @app.exception_handler(EmbedderError)
+    async def _embedder_error(request: Request, exc: EmbedderError):
+        log.warning("embedder_error", error=str(exc))
+        return _err(
+            "embedder_unavailable",
+            str(exc) or "embedder inference failed",
             503,
             exc=exc,
         )

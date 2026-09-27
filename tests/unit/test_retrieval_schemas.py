@@ -103,6 +103,15 @@ def test_rerank_pool_bounds_and_relation():
                          rerank={"enabled": True, "candidate_pool": 25})
 
 
+def test_pool_relation_skipped_when_rerank_disabled():
+    # pool < top_k is fine when the rerank stage never runs.
+    req = RetrievalRequest(
+        query="q", top_k=100,
+        rerank={"enabled": False, "candidate_pool": 25},
+    )
+    assert req.rerank.enabled is False
+
+
 def test_to_result_maps_dataclasses():
     from vector_service.retrieval.base import (
         ChannelHit, ChannelRun, RecallSpec, RetrievalPlan, RetrievalResult,

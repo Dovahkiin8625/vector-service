@@ -100,7 +100,9 @@ class RetrievalRequest(BaseModel):
 
     @model_validator(mode="after")
     def _pool_covers_top_k(self):
-        if self.rerank.candidate_pool < self.top_k:
+        # Only relevant when reranking actually runs — otherwise the basic
+        # preset (rerank off, top_k up to 100) would always 422.
+        if self.rerank.enabled and self.rerank.candidate_pool < self.top_k:
             raise ValueError("rerank.candidate_pool must be >= top_k")
         return self
 

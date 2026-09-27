@@ -135,10 +135,19 @@ class RetrievalPipeline:
                 f"{req.database!r}",
             ) from None
 
-        field_names = {
+        schema_field_names = [
             f.get("name") if isinstance(f, dict) else getattr(f, "name", None)
             for f in getattr(info, "fields", [])
-        }
+        ]
+        field_names = set(schema_field_names)
+        # Recall legs must get an explicit scalar projection: the adapter's
+        # output_fields=None legacy default resolves to ["vector"], which
+        # after the vector is popped leaves every hit with empty fields
+        # (contentless results; MMR/rerank then operate on empty strings).
+        output_fields = [
+            name for name in schema_field_names
+            if name and name not in (_VECTOR_FIELD, _SPARSE_FIELD)
+        ]
         if req.channels.bm25 and _SPARSE_FIELD not in field_names:
             raise _http(
                 422, "retrieval_channel_unsupported",
@@ -163,7 +172,11 @@ class RetrievalPipeline:
                 503, "llm_unavailable",
                 "LLM is not configured; set VS_LLM__BASE_URL and VS_LLM__MODEL",
             )
-        return {"info": info, "rewrite_on": rewrite_on}
+        return {
+            "info": info,
+            "rewrite_on": rewrite_on,
+            "output_fields": output_fields,
+        }
 
     async def retrieve(
         self,
@@ -202,7 +215,9 @@ class RetrievalPipeline:
         await _send(emit, {"type": "stage", "stage": "recall"})
         timer = _Timer("recall")
         filter_expr = build_filter_expr(req.filter)
-        runs = await self._recall(loop, plan, req, recall_limit, filter_expr)
+        runs = await self._recall(
+            loop, plan, req, recall_limit, filter_expr, ctx["output_fields"]
+        )
         traces.append(timer.done({"legs": len(runs), "per_leg_top_k": recall_limit}))
 
         # ---- fuse ----
@@ -315,6 +330,7 @@ class RetrievalPipeline:
         req: RetrievalRequest,
         top_k: int,
         filter_expr: str | None,
+        output_fields: list[str],
     ) -> list:
         dense_ch = DenseChannel(self._store, req.database, req.collection,
                                 self._embedder, _VECTOR_FIELD)
@@ -326,7 +342,7 @@ class RetrievalPipeline:
                 tasks.append(loop.run_in_executor(
                     None,
                     functools.partial(dense_ch.recall, spec, top_k,
-                                      filter_expr, None),
+                                      filter_expr, output_fields),
                 ))
         if req.channels.bm25:
             for query_text in plan.lexical_queries:
@@ -334,7 +350,7 @@ class RetrievalPipeline:
                 tasks.append(loop.run_in_executor(
                     None,
                     functools.partial(bm25_ch.recall, spec, top_k,
-                                      filter_expr, None),
+                                      filter_expr, output_fields),
                 ))
         return list(await asyncio.gather(*tasks))
 

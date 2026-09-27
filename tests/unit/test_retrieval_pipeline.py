@@ -39,23 +39,35 @@ class FakeStore:
             fields=list(_SPARSE_INFO_FIELDS if self.v2 else _V1_INFO_FIELDS),
         )
 
+    @staticmethod
+    def _project(fields, output_fields):
+        # Honor the projection the way real Milvus does: only requested
+        # fields come back. None is the adapter's legacy trap (it resolves
+        # to the vector field, which is then popped -> empty fields), so
+        # emulate it rather than hiding a None regression.
+        if output_fields is None:
+            return {}
+        return {k: v for k, v in fields.items() if k in output_fields}
+
     def search(self, db, coll, field, vector, top_k=10,
                filter_expr=None, output_fields=None):
         self.search_calls.append({"vector": vector, "top_k": top_k,
-                                  "filter_expr": filter_expr})
-        return [Hit(id="c1", score=0.9, fields={
+                                  "filter_expr": filter_expr,
+                                  "output_fields": output_fields})
+        return [Hit(id="c1", score=0.9, fields=self._project({
             "text": "dense text", "doc_id": "d1", "chunk_index": 0,
             "section_header": "S1", "page_number": 1, "filename": "a.pdf",
-        })]
+        }, output_fields))]
 
     def search_text(self, db, coll, field, query, top_k=10,
                     filter_expr=None, output_fields=None):
         self.text_calls.append({"query": query, "top_k": top_k,
-                                "filter_expr": filter_expr})
-        return [Hit(id="c2", score=5.0, fields={
+                                "filter_expr": filter_expr,
+                                "output_fields": output_fields})
+        return [Hit(id="c2", score=5.0, fields=self._project({
             "text": "lexical text", "doc_id": "d1", "chunk_index": 1,
             "section_header": "S2", "page_number": 2, "filename": "a.pdf",
-        })]
+        }, output_fields))]
 
 
 class FakeEmbedder:
@@ -122,6 +134,24 @@ async def test_hybrid_fans_out_two_legs():
     assert len(result.chunks) == 2
     c2 = next(c for c in result.chunks if c.chunk_id == "c2")
     assert c2.matched_channels == ["bm25"]
+
+
+@async_test
+async def test_recall_uses_explicit_scalar_projection():
+    store = FakeStore()
+    pipe = _pipe(store=store)
+    result = await pipe.retrieve(_req(rerank={"enabled": False}))
+    # Every leg received an explicit scalar projection derived from the
+    # preflight schema — never None, and never vector/sparse.
+    for call in store.search_calls + store.text_calls:
+        fields = call["output_fields"]
+        assert fields is not None
+        assert "vector" not in fields
+        assert "sparse" not in fields
+        assert "text" in fields
+    # Hits must carry content — MMR/rerank downstream depend on it.
+    for chunk in result.chunks:
+        assert chunk.fields.get("text")
 
 
 @async_test

@@ -28,11 +28,21 @@ class FakeStore:
         return CollectionInfo(database=db, name=coll, dim=4, metric="cosine",
                               count=0, fields=fields)
 
+    @staticmethod
+    def _project(fields, output_fields):
+        if output_fields is None:
+            return {}
+        return {k: v for k, v in fields.items() if k in output_fields}
+
     def search(self, *a, **kw):
-        return [Hit(id="c1", score=0.9, fields={"text": "dense"})]
+        return [Hit(id="c1", score=0.9,
+                    fields=self._project({"text": "dense"},
+                                         kw.get("output_fields")))]
 
     def search_text(self, *a, **kw):
-        return [Hit(id="c2", score=5.0, fields={"text": "lexical"})]
+        return [Hit(id="c2", score=5.0,
+                    fields=self._project({"text": "lexical"},
+                                         kw.get("output_fields")))]
 
 
 class FakeEmbedder:
@@ -87,6 +97,8 @@ def test_json_retrieval_returns_envelope(client):
     assert data["query"] == "季度营收"
     assert len(data["chunks"]) >= 1
     assert {"channel_runs", "plan", "traces"} <= set(data)
+    # Hits carry scalar content (text must be in the explicit projection).
+    assert data["chunks"][0]["fields"].get("text")
 
 
 def test_stream_emits_stage_then_result(client):
@@ -123,6 +135,36 @@ def test_preflight_error_is_plain_json_not_ndjson(client):
     resp = client.post("/v1/retrieval/stream", json=_body())
     assert resp.status_code == 503
     assert "json" in resp.headers["content-type"]
+    assert resp.json()["error"]["code"] == "embedder_unavailable"
+
+
+def test_rerank_off_top_k_100_does_not_422(client):
+    # candidate_pool relation only applies when rerank is enabled.
+    resp = client.post("/v1/retrieval", json=_body(
+        rerank={"enabled": False}, top_k=100))
+    assert resp.status_code == 200
+
+
+def test_json_embedder_error_maps_via_global_handler():
+    from vector_service.core.errors import EmbedderError
+    from vector_service.main import create_app
+
+    class RaisingEmbedder:
+        def embed_query(self, q):
+            raise EmbedderError("embed model exploded")
+
+        def embed_documents(self, texts):
+            raise EmbedderError("embed model exploded")
+
+    app = create_app()
+    app.state.settings = FakeSettings()
+    app.state.store = FakeStore()
+    app.state.embedder = RaisingEmbedder()
+    app.state.reranker = FakeReranker()
+    client = TestClient(app)  # no context manager -> lifespan does not run
+
+    resp = client.post("/v1/retrieval", json=_body(rerank={"enabled": False}))
+    assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "embedder_unavailable"
 
 
