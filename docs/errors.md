@@ -50,6 +50,5 @@
 | `chunk_failed` | 分片器内部错误 | 500 |
 | `retrieval_empty_query` | 检索 query 为空 | 422 |
 | `retrieval_channel_unsupported` | BM25 channel 需要 schema v2（错误体带 `channels` / `migration_available`） | 422 |
-| `retrieval_invalid_param` | 检索参数非法（融合/改写/MMR/candidate_pool 等） | 422 |
 | `llm_unavailable` | 查询改写需要的 LLM 未配置（`VS_LLM__BASE_URL` / `VS_LLM__MODEL`） | 503 |
 | `internal` | 未捕获异常 | 500 |

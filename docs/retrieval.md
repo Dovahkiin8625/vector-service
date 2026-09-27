@@ -89,8 +89,9 @@ offset + limit < 16,384，因此行数超过约 16,200 的集合无法由本端�
 
 错误映射分两段：
 
-- **预检（preflight）错误**——query 为空、参数非法、embedder/reranker 未加载、
-  LLM 未配置、集合不存在等——在流开启前返回，是普通 HTTP JSON 错误信封。
+- **预检（preflight）错误**——query 为空、参数校验失败（422
+  `invalid_request`，FastAPI 校验信封）、embedder/reranker 未加载、LLM 未配置、
+  集合不存在等——在流开启前返回，是普通 HTTP JSON 错误信封。
 - **飞行中（post-flight）错误**——检索开跑后 store / embedder / reranker 的
   后端故障——以 NDJSON `error` 事件收尾并携带规范错误码，例如
   503 `store_unavailable` / `embedder_unavailable` / `reranker_not_loaded` /
