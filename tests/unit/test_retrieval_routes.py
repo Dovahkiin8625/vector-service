@@ -100,6 +100,24 @@ def test_stream_emits_stage_then_result(client):
     assert "chunks" in events[-1]
 
 
+def test_stream_postflight_backend_error_is_503_event(client):
+    from vector_service.core.errors import BackendError
+
+    def boom(*a, **kw):
+        raise BackendError("milvus unavailable")
+
+    client.app.state.store.search = boom
+    client.app.state.store.search_text = boom
+    resp = client.post("/v1/retrieval/stream", json=_body())
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+    err = events[-1]
+    assert err["type"] == "error"
+    assert err["status"] == 503
+    assert err["error"]["code"] == "store_unavailable"
+
+
 def test_preflight_error_is_plain_json_not_ndjson(client):
     client.app.state.embedder = None
     resp = client.post("/v1/retrieval/stream", json=_body())
