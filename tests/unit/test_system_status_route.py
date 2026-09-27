@@ -23,7 +23,7 @@ def test_system_status_returns_expected_shape():
     body = r.json()
     # Top-level sections — every one of these must exist so the
     # dashboard can render unconditionally.
-    for key in ("service", "models", "store", "system"):
+    for key in ("service", "models", "parser", "store", "system"):
         assert key in body, f"missing '{key}' section in /v1/system/status payload"
     # Service sub-shape
     svc = body["service"]
@@ -40,6 +40,21 @@ def test_system_status_returns_expected_shape():
         assert "registered" in m and isinstance(m["registered"], list)
         assert "loaded_id" in m
         assert "dimensions" in m
+    # Parser sub-shape — one entry per concrete Docling profile.
+    parser = body["parser"]
+    assert parser["backend"] == "docling"
+    assert isinstance(parser["available"], bool)
+    for profile in ("standard", "native", "vlm"):
+        assert profile in parser["profiles"], f"missing parser.profiles.{profile}"
+        p = parser["profiles"][profile]
+        assert "warm" in p and isinstance(p["warm"], bool)
+        assert "components" in p and isinstance(p["components"], list)
+        assert "torch_param_count" in p
+        assert "torch_memory_bytes" in p
+        assert "model_free" in p
+    for key in ("device", "ocr_langs", "images_scale", "vlm_preset"):
+        assert key in parser["config"], f"missing parser.config.{key}"
+
     # Store sub-shape
     store = body["store"]
     assert "status" in store

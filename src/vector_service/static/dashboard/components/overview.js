@@ -1,6 +1,7 @@
-// Overview panel: service health + model load state.
+// Overview panel: service health + unified loaded-capability view.
 import { defineComponent, onMounted, onUnmounted, ref } from '../vue.esm-browser.prod.js';
 import { store, api } from './app.js';
+import ParserProfileCards from './parser-cards.js';
 
 function formatUptime(seconds) {
   if (seconds == null) return '—';
@@ -13,8 +14,26 @@ function formatUptime(seconds) {
   return m + 'm';
 }
 
+function formatParams(n) {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function formatBytes(b) {
+  if (b == null) return '—';
+  const GB = 1024 ** 3, MB = 1024 ** 2, KB = 1024;
+  if (b >= GB) return (b / GB).toFixed(2) + ' GB';
+  if (b >= MB) return (b / MB).toFixed(1) + ' MB';
+  if (b >= KB) return (b / KB).toFixed(1) + ' KB';
+  return b + ' B';
+}
+
 export default defineComponent({
   name: 'OverviewPanel',
+  components: { ParserProfileCards },
   setup() {
     const summary = ref(null);
     const timer = ref(null);
@@ -28,7 +47,7 @@ export default defineComponent({
     }
     onMounted(() => { refresh(); timer.value = setInterval(refresh, 5000); });
     onUnmounted(() => { if (timer.value) clearInterval(timer.value); });
-    return { store, summary, formatUptime, refresh };
+    return { store, summary, formatUptime, formatParams, formatBytes, refresh };
   },
   template: `
     <div>
@@ -44,6 +63,49 @@ export default defineComponent({
           <div class="kpi"><span class="label">{{ $t('overview.vector_store') }}</span><span class="value">{{ (summary && summary.store && summary.store.backend) || '—' }}</span><span class="sub">{{ (summary && summary.store && summary.store.status) || '—' }}</span></div>
         </div>
       </div>
+
+      <div class="section">
+        <div class="section-head">
+          <h3 class="section-title">{{ $t('overview.capabilities') }}</h3>
+          <span class="section-sub">{{ $t('overview.capabilities_sub') }}</span>
+        </div>
+
+        <h4 class="cap-group-title">{{ $t('overview.cap_inference') }} · {{ loadedModels.length }}</h4>
+        <div class="cap-grid">
+          <div v-for="m in loadedModels" :key="m.id" class="model-card loaded">
+            <div class="model-card-head">
+              <div class="model-title">
+                <span class="id" :title="m.id">{{ m.id }}</span>
+                <span class="family-tag">{{ m.type }}</span>
+              </div>
+              <span class="status-pill loaded"><span class="dot"></span>{{ $t('common.loaded') }}</span>
+            </div>
+            <div class="model-current">
+              <span class="dim">{{ m.dimensions }} {{ $t('topbar.dim_unit') }}</span>
+              <span v-if="m.model_info && m.model_info.device"
+                    :class="['device-chip', isGpu(m.model_info.device) ? 'gpu' : 'cpu']">
+                {{ isGpu(m.model_info.device) ? 'GPU' : 'CPU' }}<span v-if="m.model_info.dtype" class="device-dtype">· {{ dtypeText(m.model_info.dtype) }}</span>
+              </span>
+            </div>
+            <div class="model-meta">
+              <div class="meta-item">
+                <span class="meta-k">{{ $t('models.meta_params') }}</span>
+                <span class="meta-v">{{ formatParams(m.model_info && m.model_info.param_count) }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-k">{{ $t(isGpu(m.model_info && m.model_info.device) ? 'models.meta_vram' : 'models.meta_ram') }}</span>
+                <span class="meta-v">{{ formatBytes(m.model_info && m.model_info.memory_bytes) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!loadedModels.length" class="empty cap-empty-inline">{{ $t('overview.cap_inference_empty') }}</div>
+        </div>
+
+        <h4 class="cap-group-title">{{ $t('overview.cap_parser') }} · {{ warmParserCount }} / 3</h4>
+        <parser-profile-cards :parser="summary && summary.parser" :readonly="true" />
+        <p v-if="hasInvisibleOcr" class="cap-note">{{ $t('cap.onnx_note') }}</p>
+      </div>
+
       <div class="section">
         <div class="section-head"><h3 class="section-title">{{ $t('overview.connection_status') }}</h3></div>
         <div style="background:var(--surface-1);border:1px solid var(--border);border-radius:var(--r-md);padding:14px 16px;">
@@ -59,5 +121,35 @@ export default defineComponent({
   `,
   computed: {
     loadedCount() { return (store.models.data || []).filter(m => m.loaded).length; },
+    loadedModels() {
+      return (store.models.data || []).filter(m => m.loaded);
+    },
+    warmParserCount() {
+      const profiles = this.summary && this.summary.parser && this.summary.parser.profiles;
+      if (!profiles) return 0;
+      return Object.values(profiles).filter(p => p.warm).length;
+    },
+    // RapidOCR ONNX sessions are invisible to the torch walk — surface
+    // one global note whenever a warm standard/vlm profile carries one.
+    hasInvisibleOcr() {
+      const profiles = this.summary && this.summary.parser && this.summary.parser.profiles;
+      if (!profiles) return false;
+      return Object.values(profiles).some(
+        p => p.warm && (p.components || []).some(
+          c => c.kind === 'ocr' && c.resource_visible === false
+        )
+      );
+    },
+  },
+  methods: {
+    isGpu(device) {
+      return typeof device === 'string' && device.toLowerCase().startsWith('cuda');
+    },
+    dtypeText(dtype) {
+      const labels = {
+        float16: 'FP16', bfloat16: 'BF16', float32: 'FP32', int8: 'INT8', int4: 'INT4',
+      };
+      return labels[dtype] || String(dtype).toUpperCase();
+    },
   },
 });

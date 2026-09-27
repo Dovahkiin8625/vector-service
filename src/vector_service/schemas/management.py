@@ -648,9 +648,12 @@ class BrowseResponse(BaseModel):
     )
     total: int = Field(
         description=(
-            "Total row count reported by the collection's metadata. "
-            "The page's effective upper bound; ``has_more`` is derived "
-            "from this and the requested offset."
+            "Live, tombstone-aware total row count (a Strong-consistency "
+            "``count(*)`` on backends that support it; metadata count as a "
+            "fallback). Rows deleted in the current session are already "
+            "subtracted. When ``filter_expr`` is present, only matching "
+            "rows are counted. The page's effective upper bound; "
+            "``has_more`` is derived from this and the requested offset."
         ),
     )
     limit: int = Field(description="Echoes the requested page size.")

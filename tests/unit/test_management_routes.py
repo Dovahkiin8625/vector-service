@@ -33,6 +33,11 @@ class FakeStore:
 
     def __init__(self):
         self.calls: list[tuple] = []
+        # Live-count override consulted by POST .../rows. ``None`` makes
+        # the route fall back to collection_info().count (metadata),
+        # mimicking a backend without count_rows; tests set an int to
+        # mimic Milvus's authoritative, tombstone-aware count(*).
+        self.count_rows_result: int | None = None
 
     # database
     def list_databases(self):
@@ -186,6 +191,12 @@ class FakeStore:
             {"id": f"k-{offset}", "fields": {"category": "mouse", "price": 9.9}},
             {"id": f"k-{offset + 1}", "fields": {"category": "keyboard", "price": 99.0}},
         ]
+
+    def count_rows(self, database, collection, *, filter_expr=None):
+        self.calls.append(("count_rows", database, collection, filter_expr))
+        if collection == "count-boom":
+            raise BackendError("count rpc broken")
+        return self.count_rows_result
 
     def close(self):
         pass
@@ -687,6 +698,85 @@ def test_browse_filter_expr_too_long_rejected(client):
     r = client.post(
         "/v1/databases/alpha/collections/c1/rows",
         json={"primary_field": "id", "filter_expr": "abcdefghij" * 600},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+# ---- browse total: live count_rows vs metadata fallback ----
+
+def test_browse_total_falls_back_to_metadata_count(client):
+    """With count_rows returning None, total comes from collection_info
+    (metadata count=3), but count_rows is still consulted."""
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 3
+    calls = client.app.state.store.calls
+    assert any(c[0] == "count_rows" for c in calls)
+
+
+def test_browse_total_prefers_live_count_rows(client):
+    """Metadata says 3 but the live count(*) says 1 (rows deleted since
+    the last compaction): total must be the live number so the pager
+    reflects the delete immediately."""
+    fake = client.app.state.store
+    fake.count_rows_result = 1
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "limit": 20, "offset": 0},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1
+    # 0 + 2 returned < 1 is False — the pager stops on the live total.
+    assert body["has_more"] is False
+    count_calls = [c for c in fake.calls if c[0] == "count_rows"]
+    assert count_calls[-1] == ("count_rows", "alpha", "c1", None)
+
+
+def test_browse_live_count_receives_filter_and_drives_empty_total(client):
+    """The post-delete-by-filter view: no row matches anymore. The
+    filtered count(*) is 0 even though metadata still counts tombstones,
+    and the same filter_expr is forwarded to count_rows."""
+    fake = client.app.state.store
+    fake.count_rows_result = 0
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "filter_expr": "category == 'ghost'"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 0
+    assert body["has_more"] is False
+    count_calls = [c for c in fake.calls if c[0] == "count_rows"]
+    assert count_calls[-1] == ("count_rows", "alpha", "c1", "category == 'ghost'")
+
+
+def test_browse_live_count_backend_error_returns_503(client):
+    """A failing count(*) takes the same 503 envelope as a browse failure."""
+    r = client.post(
+        "/v1/databases/alpha/collections/count-boom/rows",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "store_unavailable"
+
+
+def test_browse_live_count_store_error_returns_422(client):
+    """An invalid filter reaches count_rows first; its StoreError maps
+    to invalid_request exactly like a browse StoreError."""
+    fake = client.app.state.store
+
+    def _raise(*a, **k):
+        raise StoreError("invalid filter expression")
+
+    fake.count_rows = _raise
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "filter_expr": "== bad"},
     )
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "invalid_request"

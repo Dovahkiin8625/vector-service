@@ -67,6 +67,84 @@ def setup_logging(
     root.addHandler(handler)
     root.setLevel(log_level)
 
+    _quiet_chatty_loggers(handler, log_level, out=out, formatter=formatter)
+
+
+# Third-party libraries that flood INFO with pipeline/plugin/download
+# chatter. WARNING/ERROR from these still propagates to our handler
+# (Docling/HF download- and provider-failure messages are WARNING+),
+# so problems stay locatable; set VS_LOG_LEVEL=DEBUG to see every line.
+_CHATTY_STDLIB_LOGGERS: tuple[str, ...] = (
+    "docling",
+    "huggingface_hub",
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "filelock",
+    "matplotlib",
+    "onnxruntime",
+    "pdfminer",
+)
+
+
+def _quiet_chatty_loggers(
+    handler: logging.Handler,
+    log_level: int,
+    *,
+    out: IO[Any],
+    formatter: logging.Formatter,
+) -> None:
+    """Reduce third-party INFO chatter without hiding real problems.
+
+    - Propagating loggers (Docling, huggingface_hub, ...) are dropped
+      to WARNING unless the service itself runs at DEBUG.
+    - RapidOCR ships its own ``logging`` logger (``"RapidOCR"``) with
+      ``propagate=False`` and a verbose color handler installed at
+      import time; root-level filtering cannot reach it. We pre-seed
+      that logger with the service handler at WARNING before the
+      module is imported — RapidOCR's Logger keeps an existing
+      handler — and also normalise a logger RapidOCR already created.
+    - The ONNX Runtime *native* (C++) logger is controlled separately
+      from Python logging; ``set_default_logger_severity`` silences
+      its multi-line yellow "No registered plugin EP" notes that fire
+      even on the happy CUDA path. Real C++ errors remain visible.
+    """
+    third_party_level = logging.DEBUG if log_level <= logging.DEBUG else logging.WARNING
+
+    for name in _CHATTY_STDLIB_LOGGERS:
+        logging.getLogger(name).setLevel(third_party_level)
+
+    rapid = logging.getLogger("RapidOCR")
+    rapid.propagate = False
+    # Give RapidOCR its own handler with our formatter but an
+    # independent level — it must NOT share the root handler, or
+    # raising its level would silence application INFO logs too.
+    # Replace one an earlier setup_logging attached (tagged), and
+    # raise the level of RapidOCR's own colored handler if the
+    # module was imported before setup_logging ran.
+    for existing in list(rapid.handlers):
+        if getattr(existing, "_vs_handler", False):
+            rapid.removeHandler(existing)
+        else:
+            existing.setLevel(third_party_level)
+    rapid_handler = logging.StreamHandler(out)
+    rapid_handler.setFormatter(formatter)
+    rapid_handler.setLevel(third_party_level)
+    rapid_handler._vs_handler = True  # type: ignore[attr-defined]
+    rapid.addHandler(rapid_handler)
+    # RapidOCR's import resets its logger level to INFO; the handler
+    # level above is what actually filters.
+    rapid.setLevel(logging.NOTSET)
+
+    try:
+        import onnxruntime as ort
+
+        # 0 VERBOSE, 1 INFO, 2 WARNING, 3 ERROR, 4 FATAL — ORT's
+        # native log-severity scale is inverted vs Python's.
+        ort.set_default_logger_severity(1 if log_level <= logging.DEBUG else 3)
+    except ImportError:
+        pass
+
 
 def _add_request_id(_logger: Any, _name: str, event_dict: dict) -> dict:
     rid = request_id_var.get()

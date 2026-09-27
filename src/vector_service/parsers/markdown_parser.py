@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vector_service.parsers.base import DocumentParser, ParsedDocument
+from vector_service.parsers.base import (
+    PROFILE_AUTO,
+    DocumentParser,
+    ParseProfile,
+    ParsedDocument,
+)
 
 
 class MarkdownParser(DocumentParser):
@@ -23,13 +28,28 @@ class MarkdownParser(DocumentParser):
 
     accepted_mime: tuple[str, ...] = ("text/markdown", "text/plain")
 
-    def parse(self, path: Path) -> ParsedDocument:
+    def parse(
+        self,
+        path: Path,
+        on_progress=None,  # noqa: ARG002 — ABC parity, text emits no pages
+        *,
+        profile: ParseProfile = PROFILE_AUTO,  # noqa: ARG002 — no Docling here
+        artifact_stem: str | None = None,  # noqa: ARG002 — no images to save
+    ) -> ParsedDocument:
         if not path.exists():
             raise FileNotFoundError(f"file not found: {path}")
         data = path.read_bytes()
         return self._parse(data=data, mime=_mime_for_path(path))
 
-    async def parse_bytes(self, data: bytes, mime: str) -> ParsedDocument:
+    async def parse_bytes(
+        self,
+        data: bytes,
+        mime: str,
+        on_progress=None,  # noqa: ARG002 — ABC parity, text emits no pages
+        *,
+        profile: ParseProfile = PROFILE_AUTO,  # noqa: ARG002 — no Docling here
+        artifact_stem: str | None = None,  # noqa: ARG002 — no images to save
+    ) -> ParsedDocument:
         return self._parse(data=data, mime=mime)
 
     @staticmethod

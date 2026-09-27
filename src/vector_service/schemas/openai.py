@@ -138,6 +138,72 @@ class EmbeddingResponse(BaseModel):
     usage: EmbeddingUsage
 
 
+class ModelInfo(BaseModel):
+    """Runtime details of a *currently loaded* model instance.
+
+    Populated on :class:`Model` rows (and single-model lookups) only
+    while the instance is actually held by the process; ``model_info``
+    stays ``null`` for registered-but-unloaded ids. Every field is
+    best-effort: backends that don't expose a discoverable
+    ``torch.nn.Module`` (test doubles, future non-torch backends)
+    report ``null`` for the resource fields, while ``load_duration_seconds``
+    is still recorded by the lifecycle slot.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "device": "cuda",
+                "dtype": "float16",
+                "param_count": 568_000_000,
+                "memory_bytes": 1_136_000_000,
+                "load_duration_seconds": 12.4,
+            }
+        }
+    )
+
+    device: str | None = Field(
+        default=None,
+        description=(
+            "Device the loaded instance runs inference on (``cuda`` / "
+            "``cpu``, possibly indexed e.g. ``cuda:0``)."
+        ),
+    )
+    dtype: str | None = Field(
+        default=None,
+        description=(
+            "Dominant parameter dtype (e.g. ``float16``, ``float32``, "
+            "``bfloat16``)."
+        ),
+    )
+    param_count: int | None = Field(
+        default=None,
+        description=(
+            "Total number of unique parameters across every discoverable "
+            "``torch.nn.Module`` of the instance (shared/child tensors "
+            "counted once)."
+        ),
+    )
+    memory_bytes: int | None = Field(
+        default=None,
+        description=(
+            "Weight footprint in bytes: unique parameters plus buffers. "
+            "For a GPU model this is the deterministic VRAM floor; it "
+            "excludes the CUDA context, allocator reserves, and "
+            "inference activations. For a CPU model it is the resident "
+            "weight cost in RAM."
+        ),
+    )
+    load_duration_seconds: float | None = Field(
+        default=None,
+        description=(
+            "Wall-clock seconds the last successful build + ``load()`` "
+            "(including any download/warmup done inside it) took. ``null`` "
+            "for an instance injected before the slot measured it."
+        ),
+    )
+
+
 class Model(BaseModel):
     """A registered model descriptor.
 
@@ -156,6 +222,16 @@ class Model(BaseModel):
                 "owned_by": "vector-service",
                 "created": 0,
                 "dimensions": 1024,
+                "loaded": True,
+                "load_status": "loaded",
+                "load_error": None,
+                "model_info": {
+                    "device": "cuda",
+                    "dtype": "float16",
+                    "param_count": 568000000,
+                    "memory_bytes": 1136000000,
+                    "load_duration_seconds": 12.4,
+                },
             }
         }
     )
@@ -202,6 +278,36 @@ class Model(BaseModel):
             "this field."
         ),
     )
+    load_status: Literal["unloaded", "loading", "loaded", "failed"] = Field(
+        default="unloaded",
+        description=(
+            "Fine-grained lifecycle state of this model id: `loading` "
+            "while a background `POST .../load` is constructing/warming "
+            "the instance, `loaded` once it is held on the process, "
+            "`failed` if the last background load raised (see "
+            "`load_error`), `unloaded` otherwise. Poll this field after "
+            "receiving HTTP 202 `loading` from the load endpoint. Only "
+            "the targeted id reports `loading`/`failed`; other ids of "
+            "the same family stay `unloaded`."
+        ),
+    )
+    load_error: str | None = Field(
+        default=None,
+        description=(
+            "Error message from the last failed background load for this "
+            "model id, or `null`. Cleared on the next successful load or "
+            "unload."
+        ),
+    )
+    model_info: ModelInfo | None = Field(
+        default=None,
+        description=(
+            "Runtime details of the live instance (device, dtype, "
+            "parameter count, weight footprint in bytes, load duration) "
+            "while this id is loaded; `null` for unloaded / loading / "
+            "failed rows."
+        ),
+    )
 
 
 class ModelList(BaseModel):
@@ -220,6 +326,8 @@ class ModelList(BaseModel):
                         "created": 0,
                         "dimensions": 1024,
                         "loaded": True,
+                        "load_status": "loaded",
+                        "load_error": None,
                     },
                     {
                         "id": "bge-reranker-v2-m3",
@@ -229,6 +337,8 @@ class ModelList(BaseModel):
                         "created": 0,
                         "dimensions": None,
                         "loaded": False,
+                        "load_status": "unloaded",
+                        "load_error": None,
                     },
                 ],
             }
@@ -244,7 +354,11 @@ class ModelList(BaseModel):
 # Both endpoints share the same shape so clients can dispatch on
 # ``status`` alone. ``dimensions`` mirrors the field on :class:`Model`:
 # ``None`` for rerankers, populated once the corresponding embedder is
-# actually loaded.
+# actually loaded. A load request normally returns HTTP 202 with
+# ``status="loading"`` — the work continues in the background and the
+# client polls ``GET /v1/models`` for ``load_status``. An idempotent
+# re-load of an already-held id returns HTTP 200 with ``status="loaded"``
+# immediately.
 
 
 class ModelLoadResponse(BaseModel):
@@ -252,26 +366,41 @@ class ModelLoadResponse(BaseModel):
 
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {
-                "id": "bge-m3",
-                "type": "embedder",
-                "status": "loaded",
-                "dimensions": 1024,
-            }
+            "examples": [
+                {
+                    "id": "bge-m3",
+                    "type": "embedder",
+                    "status": "loading",
+                    "dimensions": None,
+                },
+                {
+                    "id": "bge-m3",
+                    "type": "embedder",
+                    "status": "loaded",
+                    "dimensions": 1024,
+                },
+            ]
         }
     )
 
-    id: str = Field(description="Model id that was loaded.")
+    id: str = Field(description="Model id whose load was requested (or is already loaded).")
     type: Literal["embedder", "reranker", "image_embedder", "multimodal_embedder"] = Field(
         description="Model family the loaded instance belongs to."
     )
-    status: Literal["loaded"] = "loaded"
+    status: Literal["loading", "loaded"] = Field(
+        description=(
+            "`loading` (HTTP 202): the load is running in the background — "
+            "poll `GET /v1/models` and watch the row's `load_status` for "
+            "`loaded` / `failed` (+ `load_error`). `loaded` (HTTP 200): the "
+            "id was already held on the slot (idempotent re-load)."
+        )
+    )
     dimensions: int | None = Field(
         default=None,
         description=(
             "Embedding dimensionality once the model is initialised; "
-            "`null` for rerankers. Idempotent re-loads of the same id "
-            "return the existing dimensions."
+            "`null` while loading and for rerankers. Idempotent re-loads "
+            "of the same id return the existing dimensions."
         ),
     )
 

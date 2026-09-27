@@ -30,6 +30,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from vector_service import __version__
+from vector_service.core.parser_status import parser_status
 from vector_service.core.system_metrics import system_snapshot
 from vector_service.embeddings.image_registry import list_image_embedder_names
 from vector_service.embeddings.multimodal_registry import (
@@ -81,6 +82,23 @@ def _model_summary(request: Request) -> dict[str, Any]:
     }
 
 
+def _parser_summary(request: Request) -> dict[str, Any]:
+    """Per-profile Docling parser status (warm profiles + components).
+
+    Prefer the parser the lifespan warmed on ``app.state``; fall back
+    to the process singleton. Fail-open like the store probe.
+    """
+    parser = getattr(request.app.state, "parser", None)
+    if parser is None:
+        from vector_service.parsers.docling_parser import get_docling_parser
+
+        parser = get_docling_parser()
+    try:
+        return parser_status(parser)
+    except Exception as e:  # noqa: BLE001 — status must stay fail-open
+        return {"backend": "docling", "status": "down", "error": str(e)}
+
+
 def _store_summary(request: Request) -> dict[str, Any]:
     """Connection state + database count for the configured vector store.
 
@@ -126,10 +144,11 @@ def _store_summary(request: Request) -> dict[str, Any]:
     summary="Service + machine overview",
     description=(
         "Aggregated dashboard payload: service version, embedding / store "
-        "backends, uptime, registered + loaded model counts, vector-store "
-        "connection status, database list, and live machine metrics "
-        "(CPU, memory, disk, GPU). Fail-open — a degraded subsystem is "
-        "reported as a `status: down` field, not a 5xx."
+        "backends, uptime, registered + loaded model counts, per-profile "
+        "Docling parser status, vector-store connection status, database "
+        "list, and live machine metrics (CPU, memory, disk, GPU). "
+        "Fail-open — a degraded subsystem is reported as a `status: down` "
+        "field, not a 5xx."
     ),
 )
 def get_system_status(request: Request) -> JSONResponse:
@@ -149,6 +168,7 @@ def get_system_status(request: Request) -> JSONResponse:
             "uptime_seconds": uptime,
         },
         "models": _model_summary(request),
+        "parser": _parser_summary(request),
         "store": _store_summary(request),
         "system": snapshot,
     }

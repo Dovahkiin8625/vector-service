@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -125,6 +125,53 @@ class ParserSettings(BaseSettings):
     #: yield 413 from ``POST /v1/parse`` and ``POST /v1/ingest``.
     max_file_size_mb: int = Field(100, ge=1, le=2048)
 
+    #: HuggingFace Hub endpoint Docling will pull its layout/OCR models
+    #: from. Applied as ``HF_ENDPOINT`` before Docling/HF is imported,
+    #: so hosts where huggingface.co is unreachable can point this at
+    #: ``https://hf-mirror.com``. Empty (default) = the upstream
+    #: default; an explicit env var already set in the shell wins.
+    hf_endpoint: str = ""
+
+    #: Inference device for Docling's layout / TableFormer / OCR / VLM
+    #: models. ``auto`` lets Docling pick (CUDA when available, else
+    #: CPU); ``cuda``/``cpu`` force it.
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+
+    #: Persist pictures extracted from parsed documents to disk and
+    #: reference them in the markdown via ``artifacts_url_prefix``
+    #: instead of emitting an ``<!-- image -->`` placeholder. The files
+    #: land under ``artifacts_dir/<doc-stem>/images/`` and are served by
+    #: the ``/artifacts`` static mount.
+    save_images: bool = True
+
+    #: Root directory for per-document artifact folders (extracted
+    #: images). Relative paths resolve against the process working
+    #: directory, like ``data_dir``.
+    artifacts_dir: Path = Path("./data/artifacts")
+
+    #: URL prefix used in the markdown references and mounted as a
+    #: static directory in ``main.py``. Must not carry a trailing slash.
+    artifacts_url_prefix: str = "/artifacts"
+
+    #: PP-OCR / RapidOCR language packs for the OCR engine. ``ch`` is
+    #: the Chinese+English model; other valid values include ``en``,
+    #: ``japan``, ``korean`` (RapidOCR PP-OCRv4 language codes). JSON
+    #: list via env, e.g. ``VS_PARSER__OCR_LANGS='["ch","en"]'``.
+    ocr_langs: list[str] = Field(default_factory=lambda: ["ch"])
+
+    #: Resolution scale at which page pictures are cropped and saved
+    #: (Docling ``images_scale``). Higher = sharper extracted images and
+    #: OCR input, at proportionally higher VRAM and disk use.
+    images_scale: float = Field(2.0, gt=0, le=8)
+
+    #: Preset id for the optional ``vlm`` profile (used only when a
+    #: request explicitly selects it — weights are never downloaded for
+    #: the default ``standard`` profile). Built-ins include
+    #: ``granite_docling`` (default, ibm-granite/granite-docling-258M),
+    #: ``smoldocling``, ``qwen``, ``glm_ocr`` … (see
+    #: ``VlmConvertOptions.list_preset_ids()``).
+    vlm_preset: str = "granite_docling"
+
 
 class ChunkingSettings(BaseSettings):
     """Chunking subsystem configuration.
@@ -134,6 +181,13 @@ class ChunkingSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(env_prefix="VS_CHUNKING__", extra="ignore")
+
+    # Default strategy when a request omits one. Per-request values
+    # come from /v1/chunk and /v1/ingest; see
+    # docs/ingest-pipeline.md for the strategy guide.
+    strategy: Literal[
+        "fixed", "paragraph", "recursive", "semantic", "llm"
+    ] = "recursive"
 
     chunk_size: int = Field(500, ge=1, le=8192)
     chunk_overlap: int = Field(75, ge=0, le=4096)
@@ -147,6 +201,40 @@ class ChunkingSettings(BaseSettings):
                 f"chunk_overlap ({v}) must be < chunk_size ({chunk_size})"
             )
         return v
+
+
+class LLMSettings(BaseSettings):
+    """External OpenAI-compatible chat backend configuration.
+
+    Used by the ``llm`` chunking strategy and by contextual chunk
+    enrichment (Anthropic contextual retrieval) — the service
+    itself serves embeddings/rerank, never chat, so the model lives
+    elsewhere. Any endpoint speaking ``POST /chat/completions``
+    works (OpenAI, vLLM, LM Studio, DashScope compat mode …).
+
+    Env prefix: ``VS_LLM__``. Left empty by default; LLM features
+    return ``503 llm_unavailable`` until configured.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_LLM__", extra="ignore")
+
+    base_url: str = Field(
+        default="",
+        description="Root URL of the OpenAI-compatible API, e.g. https://api.openai.com/v1",
+    )
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Bearer API key. Sent in the Authorization header.",
+    )
+    model: str = Field(
+        default="",
+        description="Chat model name to send in the request payload.",
+    )
+    timeout_seconds: float = Field(60.0, ge=1.0, le=600.0)
+    max_concurrency: int = Field(
+        4, ge=1, le=32,
+        description="Bound on concurrent chat calls during contextualization.",
+    )
 
 
 class MultimodalEmbeddingSettings(BaseSettings):
@@ -250,6 +338,9 @@ class Settings(BaseSettings):
 
     # Chunking (nested; env prefix VS_CHUNKING__)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
+
+    # External LLM chat backend (nested; env prefix VS_LLM__)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",

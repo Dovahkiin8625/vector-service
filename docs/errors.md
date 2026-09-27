@@ -39,14 +39,15 @@
 | `too_many_images` / `image_too_large` / `image_decode_failed` / `unsupported_mime` | 图像输入超限 | 422 |
 | `too_many_items` | 跨模态输入 item 数超限 | 422 |
 | `invalid_request` | pydantic 校验失败 | 422 |
-| `model_busy` | 同族并发 load/unload | 409 |
+| `model_busy` | 同族并发 load/unload（含后台加载进行中再发 load/unload） | 409 |
 | `conflict_loaded` | 同族已加载了不同 id | 409 |
-| `model_load_failed` | load 路由的 factory 或实例 `load()` 抛异常 | 503 |
+| `model_load_failed` | 后台加载时 factory 或实例 `load()` 抛异常；**不再同步返回**，改为在 `GET /v1/models` 该 id 的 `load_status="failed"` / `load_error` 中观测（POST 返回 202） | 202 → 轮询 |
 | `not_loaded` | 对一个空 slot 做 unload | 409 |
-| `unsupported_mime` | `/v1/parse` 或 `/v1/ingest` 上传了不支持的 MIME | 415 |
+| `unsupported_mime` | `/v1/parse` 或 `/v1/ingest` 上传了不支持的 MIME（支持 PDF / Office / HTML / jpg·png·tiff·webp·bmp / md / txt） | 415 |
 | `file_too_large` | 上传文件超过 `VS_PARSER__MAX_FILE_SIZE_MB` | 413 |
-| `parse_failed` | Docling 解析失败 | 500 |
-| `parser_unavailable` | Docling converter 未就绪 / 推理失败 | 503 |
+| `invalid_profile` | `profile` 字段不在 `auto` / `standard` / `native` / `vlm` 中；预检阶段返回，错误体含 `got` / `allowed` | 400 |
+| `parser_failed` | Docling 解析失败 | 500 |
+| `parser_unavailable` | Docling converter 构建失败（依赖缺失等） | 503 |
 | `chunk_failed` | 分片器内部错误 | 500 |
 | `retrieval_empty_query` | 检索 query 为空 | 422 |
 | `retrieval_channel_unsupported` | BM25 channel 需要 schema v2（错误体带 `channels` / `migration_available`） | 422 |

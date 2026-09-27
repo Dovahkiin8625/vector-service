@@ -240,6 +240,99 @@ def test_delete_does_not_refresh_load():
     a._client.refresh_load.assert_not_called()
 
 
+# ---- post-delete freshness: cache invalidation + live count -------------
+
+
+def test_delete_invalidates_schema_and_has_caches():
+    """A successful delete must drop both the cached describe payload
+    (which carries the stale ``count``) and the has_collection entry, so
+    the next read re-queries the backend instead of serving pre-delete
+    data for up to the schema-cache TTL."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.get_load_state.return_value = {"state": "Loaded"}
+    a._client.delete.return_value = {"delete_count": 2}
+    a._schema_cache[("db1", "c1")] = (
+        9e9,
+        {
+            "primary_field": "id",
+            "vector_field": "vector",
+            "dim": 4,
+            "metric": "cosine",
+            "count": 99,
+            "fields": [{"name": "id", "dtype": "varchar", "is_primary": True}],
+        },
+    )
+    a._has_cache[("db1", "c1")] = (9e9, True)
+
+    assert a.delete("db1", "c1", "id", ["a", "b"]) == 2
+    assert ("db1", "c1") not in a._schema_cache
+    assert ("db1", "c1") not in a._has_cache
+
+
+def test_count_runs_strong_count_star_query():
+    """count() is a ``count(*)`` query at Strong consistency so it
+    reflects tombstones immediately, unlike get_collection_stats."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.query.return_value = [{"count(*)": 5}]
+
+    assert a.count("db1", "c1") == 5
+
+    kwargs = a._client.query.call_args.kwargs
+    assert kwargs["output_fields"] == ["count(*)"]
+    assert kwargs["consistency_level"] == "Strong"
+    assert kwargs["filter"] == ""
+
+
+def test_count_passes_filter_expr_for_filtered_total():
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.query.return_value = [{"count(*)": 0}]
+
+    assert a.count("db1", "c1", filter_expr="category == 'x'") == 0
+    assert a._client.query.call_args.kwargs["filter"] == "category == 'x'"
+
+
+def test_count_empty_result_is_zero():
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.query.return_value = []
+    assert a.count("db1", "c1") == 0
+
+
+def test_count_missing_collection_raises_not_found():
+    a = _adapter()
+    a._client.has_collection.return_value = False
+    with pytest.raises(CollectionNotFound):
+        a.count("db1", "ghost")
+    a._client.query.assert_not_called()
+
+
+def test_count_query_failure_is_backend_error():
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    a._client.query.side_effect = RuntimeError("rpc broken")
+    with pytest.raises(BackendError):
+        a.count("db1", "c1")
+
+
+def test_browse_reads_under_strong_consistency():
+    """browse() must query at Strong so a delete issued by another worker
+    is visible on the next page load instead of a stale page."""
+    a = _adapter()
+    a._client.has_collection.return_value = True
+    _prime_schema(a, [
+        {"name": "id", "dtype": "varchar", "is_primary": True, "max_length": 64},
+        {"name": "vector", "dtype": "float_vector", "dim": 4},
+    ])
+    a._client.query.return_value = [{"id": "r1"}]
+
+    rows = a.browse("db1", "c1", "id", limit=20, offset=0)
+    assert rows == [{"id": "r1", "fields": {}}]
+    assert a._client.query.call_args.kwargs["consistency_level"] == "Strong"
+
+
 # ---- upsert varchar truncation ------------------------------------------
 
 def _prime_schema(a, fields, dim=4, vector_field="vector", primary="id"):

@@ -8,15 +8,22 @@ The routes live on the existing ``models`` router:
 Behaviour under test:
 
 - 404 ``model_not_found`` for unknown model ids.
-- 200 ``loaded`` with ``{id, type, status, dimensions}`` on successful load.
-- Load is idempotent for the same id; a different id while one is loaded
-  surfaces 409 ``conflict_loaded`` (caller must unload first).
-- A load failure (e.g. backend raises ``ModelNotLoaded``) surfaces as
-  503 ``model_load_failed`` and leaves the slot in its prior state.
-- Unload clears the slot and returns 200 ``unloaded``; unloading a slot
-  that is already empty returns 409 ``not_loaded``.
+- Load is asynchronous: POST returns **202** ``{status: "loading"}`` at
+  once and the build/load continues on a worker; clients observe the
+  outcome by polling ``GET /v1/models`` — the row ends at
+  ``load_status="loaded"`` (dimensions populated, mirror installed) or
+  ``load_status="failed"`` with a ``load_error`` message.
+- Load is idempotent for the same id: a second POST while loaded returns
+  **200** ``loaded`` without rebuilding. A different id while one is
+  loaded surfaces 409 ``conflict_loaded`` (caller must unload first).
+- A load failure (e.g. backend raises ``EmbedderError``) leaves the slot
+  empty and surfaces asynchronously via ``load_status="failed"`` — there
+  is no synchronous 503 anymore.
+- Unload stays synchronous: clears the slot and returns 200 ``unloaded``;
+  unloading a slot that is already empty returns 409 ``not_loaded``.
 - Per-family ``ModelSlot`` exposes a non-blocking lock so concurrent
-  load/unload calls return 409 ``model_busy``.
+  load/unload calls return 409 ``model_busy`` — including a load/unload
+  arriving while a background load is in flight.
 """
 from __future__ import annotations
 
@@ -236,7 +243,12 @@ def app(monkeypatch):
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    # Context-managed: a persistent anyio portal/event loop across
+    # requests, so a background load task spawned by POST survives until
+    # the polling GETs observe it. A bare ``TestClient(app)`` tears the
+    # loop down after every request and cancels the task.
+    with TestClient(app) as client:
+        yield client
 
 
 class _SettingsStub:
@@ -251,6 +263,47 @@ class _SettingsStub:
 
 class _DummySettings:
     pass
+
+
+# ---- async-load polling helper -------------------------------------------
+
+
+def _wait_row(client, model_id, target, *, timeout=5.0):
+    """Poll GET /v1/models until ``model_id``'s ``load_status`` reaches
+    ``target`` (or the opposite terminal state), returning the row.
+
+    The background load runs on the persistent TestClient event loop in
+    an anyio portal thread, so it makes progress while this test thread
+    sleeps.
+    """
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        rows = client.get("/v1/models").json()["data"]
+        last = next((m for m in rows if m["id"] == model_id), None)
+        assert last is not None, f"{model_id} vanished from GET /v1/models"
+        if last["load_status"] == target:
+            return last
+        if last["load_status"] in ("loaded", "failed"):
+            raise AssertionError(
+                f"{model_id} settled at {last['load_status']} "
+                f"(wanted {target}); error={last.get('load_error')!r}"
+            )
+        time.sleep(0.01)
+    raise AssertionError(
+        f"timed out waiting for {model_id} load_status={target}; last={last}"
+    )
+
+
+def _post_load(client, model_id):
+    """POST /load and assert the immediate 202 ``loading`` envelope."""
+    r = client.post(f"/v1/models/{model_id}/load")
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["id"] == model_id
+    assert body["status"] == "loading"
+    assert body["dimensions"] is None
+    return body
 
 
 # ---- ModelSlot unit tests ------------------------------------------------
@@ -325,6 +378,11 @@ class TestModelSlot:
         with pytest.raises(EmbedderError):
             slot.load(_ExploderEmbedder, _factory)
         assert slot.get() is None
+        # The failed load is observable via the state fields.
+        assert slot.load_state == "failed"
+        assert slot.loading_id == "exploder"
+        assert slot.load_error == "backend init failed"
+        assert slot.load_error_type == "EmbedderError"
         # The freshly-built instance had ``unload()`` called so its
         # partial state is cleaned up.
         assert partial and partial[0]._impl is None
@@ -399,6 +457,134 @@ class TestModelSlot:
         slot.unload()
         assert slot.loaded_id is None
 
+    # ---- two-phase begin_load / finish_load ---------------------------
+
+    def test_begin_finish_load_drives_loading_to_loaded(self):
+        slot = ModelSlot("embedder")
+        assert slot.load_state == "unloaded"
+        # begin: lock is held and the slot advertises loading.
+        assert slot.begin_load(_FakeEmbedder) is None
+        assert slot.load_state == "loading"
+        assert slot.loading_id == "fake-embedder"
+        # While begin holds the lock, a concurrent op is rejected.
+        with pytest.raises(ConcurrentModelOperation):
+            slot.unload()
+        # finish: builds, installs, releases the lock.
+        out = slot.finish_load(lambda: _FakeEmbedder())
+        assert isinstance(out, _FakeEmbedder)
+        assert slot.get() is out
+        assert slot.load_state == "loaded"
+        assert slot.loaded_id == "fake-embedder"
+        # Lock was released — a subsequent unload succeeds.
+        assert slot.unload() is True
+
+    def test_begin_load_idempotent_returns_existing_and_releases_lock(self):
+        slot = ModelSlot("embedder")
+        held = slot.load(_FakeEmbedder, lambda: _FakeEmbedder())
+        again = slot.begin_load(_FakeEmbedder)
+        assert again is held
+        assert slot.load_state == "loaded"
+        # Lock must have been released — no spurious busy afterwards.
+        assert slot.begin_load(_FakeEmbedder) is held
+
+    def test_begin_load_conflict_releases_lock(self):
+        slot = ModelSlot("embedder")
+        slot.load(_FakeEmbedder, lambda: _FakeEmbedder())
+
+        class _OtherEmbedder(_FakeEmbedder):
+            model_name = "other-embedder"
+
+        with pytest.raises(DifferentModelLoaded):
+            slot.begin_load(_OtherEmbedder)
+        # Lock released: the existing instance stays usable and can be
+        # unloaded (would raise ConcurrentModelOperation if still held).
+        assert slot.loaded_id == "fake-embedder"
+        assert slot.unload() is True
+
+    def test_finish_load_failure_marks_failed_and_releases_lock(self):
+        slot = ModelSlot("embedder")
+
+        class _Exploder:
+            dim = 0
+            model_name = "exploder"
+
+            def __init__(self, settings=None):
+                self._impl = "partial"
+
+            def load(self):
+                raise EmbedderError("worker boom")
+
+            def unload(self):
+                self._impl = None
+
+        assert slot.begin_load(_Exploder) is None
+        with pytest.raises(EmbedderError):
+            slot.finish_load(lambda: _Exploder())
+        assert slot.get() is None
+        assert slot.load_state == "failed"
+        assert slot.loading_id == "exploder"
+        assert slot.load_error == "worker boom"
+        # Lock released: a retry can begin a new load.
+        assert slot.begin_load(_FakeEmbedder) is None
+        assert slot.finish_load(lambda: _FakeEmbedder()).load_called == 1
+
+    def test_set_instance_marks_state_loaded(self):
+        slot = ModelSlot("image_embedder")
+        inst = _FakeImageEmbedder()
+        slot.set_instance(inst)
+        assert slot.get() is inst
+        assert slot.load_state == "loaded"
+        assert slot.loading_id == "fake-image-embedder"
+        assert slot.load_error is None
+
+    def test_unload_resets_load_state(self):
+        slot = ModelSlot("embedder")
+        slot.load(_FakeEmbedder, lambda: _FakeEmbedder())
+        slot.unload()
+        assert slot.load_state == "unloaded"
+        assert slot.loading_id is None
+        assert slot.load_error is None
+
+    def test_load_records_duration_and_unload_clears_it(self):
+        slot = ModelSlot("embedder")
+        assert slot.load_duration is None
+        slot.load(_FakeEmbedder, lambda: _FakeEmbedder())
+        duration = slot.load_duration
+        assert duration is not None
+        assert duration >= 0.0
+        slot.unload()
+        assert slot.load_duration is None
+
+    def test_finish_load_records_duration(self):
+        slot = ModelSlot("embedder")
+        slot.begin_load(_FakeEmbedder)
+        slot.finish_load(lambda: _FakeEmbedder())
+        assert slot.load_duration is not None
+        assert slot.load_duration >= 0.0
+
+    def test_failed_finish_load_leaves_duration_unset(self):
+        slot = ModelSlot("embedder")
+
+        class _Exploder(_FakeEmbedder):
+            model_name = "exploder-duration"
+
+            def load(self):
+                raise EmbedderError("boom")
+
+        slot.begin_load(_Exploder)
+        with pytest.raises(EmbedderError):
+            slot.finish_load(lambda: _Exploder())
+        assert slot.load_duration is None
+
+    def test_set_instance_accepts_optional_duration(self):
+        slot = ModelSlot("image_embedder")
+        inst = _FakeImageEmbedder()
+        # Default: unknown (lifespan did not measure it).
+        slot.set_instance(inst)
+        assert slot.load_duration is None
+        slot.set_instance(inst, load_duration=3.25)
+        assert slot.load_duration == 3.25
+
 
 # ---- route tests ---------------------------------------------------------
 
@@ -411,40 +597,60 @@ class TestLoadRoute:
         assert body["code"] == "model_not_found"
 
     def test_load_text_embedder_success(self, client):
-        r = client.post("/v1/models/fake-embedder/load")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["id"] == "fake-embedder"
-        assert body["type"] == "embedder"
-        assert body["status"] == "loaded"
-        assert body["dimensions"] == 4
+        _post_load(client, "fake-embedder")
+        row = _wait_row(client, "fake-embedder", "loaded")
+        assert row["type"] == "embedder"
+        assert row["dimensions"] == 4
+        # The inference-side mirror flips only once the worker settles.
+        assert client.app.state.embedder is not None
+        assert client.app.state.embedder.model_name == "fake-embedder"
+
+    def test_loaded_row_carries_model_info(self, client):
+        _post_load(client, "fake-embedder")
+        row = _wait_row(client, "fake-embedder", "loaded")
+        info = row["model_info"]
+        # The fakes hold no torch.nn.Module, so the resource fields are
+        # null — but the slot still reports how long the load took.
+        assert info is not None
+        assert info["param_count"] is None
+        assert info["memory_bytes"] is None
+        assert info["device"] is None
+        assert isinstance(info["load_duration_seconds"], (int, float))
+
+        # Single-model lookup carries the same block.
+        single = client.get("/v1/models/fake-embedder").json()
+        assert single["model_info"] is not None
+        assert single["model_info"]["load_duration_seconds"] is not None
+
+        # Registered-but-unloaded rows expose no info block.
+        rows = client.get("/v1/models").json()["data"]
+        by_id = {m["id"]: m for m in rows}
+        assert by_id["fake-image-embedder"]["model_info"] is None
+        assert by_id["fake-reranker"]["model_info"] is None
 
     def test_load_image_embedder_success(self, client):
-        r = client.post("/v1/models/fake-image-embedder/load")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["id"] == "fake-image-embedder"
-        assert body["type"] == "image_embedder"
-        assert body["status"] == "loaded"
-        assert body["dimensions"] == 8
+        _post_load(client, "fake-image-embedder")
+        row = _wait_row(client, "fake-image-embedder", "loaded")
+        assert row["type"] == "image_embedder"
+        assert row["dimensions"] == 8
+        assert client.app.state.image_embedder.model_name == "fake-image-embedder"
 
     def test_load_multimodal_embedder_success(self, client):
-        r = client.post("/v1/models/fake-multimodal-embedder/load")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["id"] == "fake-multimodal-embedder"
-        assert body["type"] == "multimodal_embedder"
-        assert body["status"] == "loaded"
-        assert body["dimensions"] == 16
+        _post_load(client, "fake-multimodal-embedder")
+        row = _wait_row(client, "fake-multimodal-embedder", "loaded")
+        assert row["type"] == "multimodal_embedder"
+        assert row["dimensions"] == 16
+        assert (
+            client.app.state.multimodal_embedder.model_name
+            == "fake-multimodal-embedder"
+        )
 
     def test_load_reranker_success(self, client):
-        r = client.post("/v1/models/fake-reranker/load")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["id"] == "fake-reranker"
-        assert body["type"] == "reranker"
-        assert body["status"] == "loaded"
-        assert body["dimensions"] is None
+        _post_load(client, "fake-reranker")
+        row = _wait_row(client, "fake-reranker", "loaded")
+        assert row["type"] == "reranker"
+        assert row["dimensions"] is None
+        assert client.app.state.reranker.model_name == "fake-reranker"
 
     def test_list_models_reports_loaded_for_each_family(self, client):
         """Regression: ``GET /v1/models`` must set ``loaded=True`` for
@@ -454,10 +660,14 @@ class TestLoadRoute:
         ``dimensions``, so a missing or stale ``loaded`` flag would
         leave the load button stuck after a successful ``/load``.
         """
-        client.post("/v1/models/fake-embedder/load")
-        client.post("/v1/models/fake-image-embedder/load")
-        client.post("/v1/models/fake-multimodal-embedder/load")
-        client.post("/v1/models/fake-reranker/load")
+        for mid in (
+            "fake-embedder",
+            "fake-image-embedder",
+            "fake-multimodal-embedder",
+            "fake-reranker",
+        ):
+            client.post(f"/v1/models/{mid}/load")
+            _wait_row(client, mid, "loaded")
 
         listed = client.get("/v1/models").json()["data"]
         by_id = {m["id"]: m for m in listed}
@@ -484,12 +694,15 @@ class TestLoadRoute:
             assert m["loaded"] is False, (
                 f"{m['id']} unexpectedly reports loaded=True before any /load call"
             )
+            assert m["load_status"] == "unloaded", m
+            assert m["load_error"] is None, m
 
     def test_unload_clears_loaded_flag(self, client):
         """After ``/unload`` the corresponding ``GET /v1/models`` row
         must flip back to ``loaded=False`` so the dashboard re-renders
         the load button."""
         client.post("/v1/models/fake-reranker/load")
+        _wait_row(client, "fake-reranker", "loaded")
         before = next(
             m for m in client.get("/v1/models").json()["data"]
             if m["id"] == "fake-reranker"
@@ -502,25 +715,26 @@ class TestLoadRoute:
             if m["id"] == "fake-reranker"
         )
         assert after["loaded"] is False
+        assert after["load_status"] == "unloaded"
 
     def test_load_is_idempotent_for_same_id(self, client):
         r1 = client.post("/v1/models/fake-embedder/load")
+        # First call starts the background load: 202.
+        assert r1.status_code == 202
+        _wait_row(client, "fake-embedder", "loaded")
+        # Second call while the id is held: synchronous 200, no rebuild.
         r2 = client.post("/v1/models/fake-embedder/load")
-        assert r1.status_code == r2.status_code == 200
+        assert r2.status_code == 200
+        assert r2.json()["status"] == "loaded"
+        assert r2.json()["dimensions"] == 4
         # Exactly one constructor call across both requests.
         assert len(_FakeEmbedder.instances) == 1
 
-    def test_load_failure_returns_503_and_keeps_slot_empty(self, client, monkeypatch):
-        from vector_service.core.model_lifecycle import ModelSlot
-
-        def _boom():
-            raise EmbedderError("nope")
-
-        # Patch the slot's load path for one model id by monkeypatching the
-        # factory function the route picks. We do this by overriding the
-        # slot directly: the route consults settings.embedding etc., so
-        # the cleanest patch is to swap the registered class to one whose
-        # load() always raises.
+    def test_load_failure_surfaces_via_poll_and_keeps_slot_empty(self, client, monkeypatch):
+        # Swap the registered class for one whose load() always raises.
+        # The request itself is accepted (202); the failure surfaces
+        # asynchronously on GET /v1/models (load_status=failed) rather
+        # than as a synchronous 503.
         from vector_service.embeddings import registry as emb_registry
 
         class _Exploder:
@@ -533,6 +747,9 @@ class TestLoadRoute:
             def load(self):
                 raise EmbedderError("backend down")
 
+            def unload(self):
+                pass
+
             def embed_documents(self, texts):
                 return []
 
@@ -541,17 +758,107 @@ class TestLoadRoute:
 
         monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "fake-embedder", _Exploder)
 
-        r = client.post("/v1/models/fake-embedder/load")
-        assert r.status_code == 503
-        body = r.json()["error"]
-        assert body["code"] == "model_load_failed"
-        # Slot is still empty — failure must not leave a half-loaded instance.
+        assert client.post("/v1/models/fake-embedder/load").status_code == 202
+        row = _wait_row(client, "fake-embedder", "failed")
+        assert row["loaded"] is False
+        assert row["load_error"] == "backend down"
+        # Slot is still empty and the inference mirror unset — failure
+        # must not leave a half-loaded instance.
         slot = client.app.state._slot_embedder
         assert slot.get() is None
+        assert slot.load_error_type == "EmbedderError"
+        # No inference-side mirror installed (the no-lifespan test app
+        # never creates the attribute at all).
+        assert getattr(client.app.state, "embedder", None) is None
+
+    def test_loading_state_only_targets_requested_id(self, client, monkeypatch):
+        """Immediately after POST, the target id advertises ``loading``
+        while every other registered id (including same-family ones)
+        stays ``unloaded``."""
+        from vector_service.embeddings import registry as emb_registry
+
+        proceed = threading.Event()
+
+        class _SlowEmbedder:
+            dim = 4
+            model_name = "slow-embedder"
+
+            def __init__(self, settings=None):
+                pass
+
+            def load(self):
+                proceed.wait(timeout=5.0)
+
+            def unload(self):
+                pass
+
+            def embed_documents(self, texts):
+                return []
+
+            def embed_query(self, text):
+                return []
+
+        monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "slow-embedder", _SlowEmbedder)
+        try:
+            assert client.post("/v1/models/slow-embedder/load").status_code == 202
+            by_id = {
+                m["id"]: m
+                for m in client.get("/v1/models").json()["data"]
+            }
+            assert by_id["slow-embedder"]["load_status"] == "loading"
+            assert by_id["slow-embedder"]["loaded"] is False
+            # Another registered embedder id is NOT dragged into loading.
+            assert by_id["fake-embedder"]["load_status"] == "unloaded"
+
+            # Unload while loading: lock held -> 409 model_busy.
+            busy = client.post("/v1/models/slow-embedder/unload")
+            assert busy.status_code == 409
+            assert busy.json()["error"]["code"] == "model_busy"
+
+            proceed.set()
+            row = _wait_row(client, "slow-embedder", "loaded")
+            assert row["dimensions"] == 4
+        finally:
+            proceed.set()
+
+    def test_failed_load_can_be_retried(self, client, monkeypatch):
+        """After a failed background load the slot is unlocked; swapping
+        in a healthy class and POSTing again loads normally."""
+        from vector_service.embeddings import registry as emb_registry
+
+        class _Exploder:
+            dim = 0
+            model_name = "fake-embedder"
+
+            def __init__(self, settings=None):
+                pass
+
+            def load(self):
+                raise EmbedderError("backend down")
+
+            def unload(self):
+                pass
+
+            def embed_documents(self, texts):
+                return []
+
+            def embed_query(self, text):
+                return []
+
+        monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "fake-embedder", _Exploder)
+        client.post("/v1/models/fake-embedder/load")
+        _wait_row(client, "fake-embedder", "failed")
+
+        monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "fake-embedder", _FakeEmbedder)
+        client.post("/v1/models/fake-embedder/load")
+        row = _wait_row(client, "fake-embedder", "loaded")
+        assert row["dimensions"] == 4
+        assert row["load_error"] is None
 
     def test_load_different_id_while_loaded_returns_409(self, client, monkeypatch):
         # Load the embedder first, then try to load a *different* embedder.
         client.post("/v1/models/fake-embedder/load")
+        _wait_row(client, "fake-embedder", "loaded")
 
         from vector_service.embeddings import registry as emb_registry
 
@@ -619,6 +926,7 @@ class TestUnloadRoute:
     def test_unload_embedder_success(self, client):
         # Pre-load so there is something to unload.
         client.post("/v1/models/fake-embedder/load")
+        _wait_row(client, "fake-embedder", "loaded")
         r = client.post("/v1/models/fake-embedder/unload")
         assert r.status_code == 200
         body = r.json()
@@ -630,6 +938,7 @@ class TestUnloadRoute:
 
     def test_unload_image_embedder_success(self, client):
         client.post("/v1/models/fake-image-embedder/load")
+        _wait_row(client, "fake-image-embedder", "loaded")
         r = client.post("/v1/models/fake-image-embedder/unload")
         assert r.status_code == 200
         assert r.json()["status"] == "unloaded"
@@ -637,6 +946,7 @@ class TestUnloadRoute:
 
     def test_unload_reranker_success(self, client):
         client.post("/v1/models/fake-reranker/load")
+        _wait_row(client, "fake-reranker", "loaded")
         r = client.post("/v1/models/fake-reranker/unload")
         assert r.status_code == 200
         assert r.json()["status"] == "unloaded"
@@ -650,6 +960,7 @@ class TestUnloadRoute:
 
     def test_unload_returns_409_busy_when_lock_held(self, client):
         client.post("/v1/models/fake-embedder/load")
+        _wait_row(client, "fake-embedder", "loaded")
         slot: ModelSlot = client.app.state._slot_embedder
         ready = threading.Event()
         release = threading.Event()
@@ -675,6 +986,7 @@ class TestUnloadRoute:
 
     def test_unload_calls_instance_unload(self, client):
         client.post("/v1/models/fake-embedder/load")
+        _wait_row(client, "fake-embedder", "loaded")
         # The single instance the load created should receive unload().
         instance = _FakeEmbedder.instances[0]
         client.post("/v1/models/fake-embedder/unload")
@@ -717,7 +1029,7 @@ def test_lookup_prefers_embedder_over_reranker_when_id_collides(monkeypatch):
 
     attach_default_slots(app, settings=_SettingsStub())
 
-    client = TestClient(app)
-    r = client.post("/v1/models/dup/load")
-    assert r.status_code == 200
-    assert r.json()["type"] == "embedder"
+    with TestClient(app) as client:
+        assert client.post("/v1/models/dup/load").status_code == 202
+        row = _wait_row(client, "dup", "loaded")
+        assert row["type"] == "embedder"

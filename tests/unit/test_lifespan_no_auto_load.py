@@ -10,6 +10,8 @@ inference routes.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -326,12 +328,22 @@ def test_post_load_unblocks_inference(client, app, monkeypatch):
     monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "bge-m3", _StubEmbedder)
 
     with TestClient(app) as c:
-        # Step 1: load.
+        # Step 1: request the load — accepted immediately (202) and
+        # completed in the background.
         r = c.post("/v1/models/bge-m3/load")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["status"] == "loaded"
-        assert body["dimensions"] == 4
+        assert r.status_code == 202
+        assert r.json()["status"] == "loading"
+
+        # Poll until the background load settles.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            rows = c.get("/v1/models").json()["data"]
+            row = next(m for m in rows if m["id"] == "bge-m3")
+            if row["load_status"] in ("loaded", "failed"):
+                break
+            time.sleep(0.01)
+        assert row["load_status"] == "loaded", row
+        assert row["dimensions"] == 4
 
         # Step 2: now /v1/embeddings works (we don't have a real store
         # to validate against here, but the 503 path is gone).

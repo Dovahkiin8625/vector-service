@@ -44,17 +44,15 @@ const I18N = {
     'nav.image_embeddings': '图像嵌入',
     'nav.multimodal_embeddings': '图文嵌入',
     'nav.rerank': '重排',
-    'nav.text_similarity': '文本相似度',
-    'nav.image_similarity': '图像相似度',
-    'nav.mm_similarity': '图文相似度',
+    'nav.similarity': '相似度',
     'nav.databases': '数据库管理',
     'nav.collections': '集合管理',
     'nav.records': '记录',
     'nav.search': '检索',
     'nav.browse': '浏览数据',
     'nav.parse': '文档解析',
-    'nav.chunk': '文本分片',
-    'nav.ingest': '一体化摄取',
+    'nav.chunk': '分片测试',
+    'nav.ingest': '一键入库',
     'nav.retrieval': '分片检索',
     'retrieval.title': '分片检索',
     'retrieval.modes.basic': '基础',
@@ -68,6 +66,7 @@ const I18N = {
     'retrieval.v1_banner': 'schema v1：BM25 全文检索不可用',
     'retrieval.llm_hint': 'LLM 未配置',
     'retrieval.trace': '检索追踪',
+    'nav.chunks_view': '入库浏览',
     'nav.Navigation': '导航 · Navigation',
     'nav.Overview': '概览',
     'nav.Models': '模型',
@@ -92,6 +91,33 @@ const I18N = {
     'overview.status_label': '状态',
     'overview.db_count': '数据库数量',
     'overview.auto_refresh': '自动刷新 · 每 5 秒',
+    'overview.capabilities': '已加载能力与资源占用',
+    'overview.capabilities_sub': '当前后台持有模型权重 / 会话的所有组件',
+    'overview.cap_inference': '推理模型',
+    'overview.cap_parser': '文档解析引擎',
+    'overview.cap_inference_empty': '暂无已加载的推理模型，可在「模型列表」中加载。',
+
+    // Parser capability cards (shared by overview + parse pane)
+    'cap.warm': '已预热',
+    'cap.cold': '未预热',
+    'cap.model_free': '无模型 · 轻量管道（model-free）',
+    'cap.warm_idle': '转换器已构建；模型管道将在首次解析时加载。',
+    'cap.cold_hint': '尚未构建转换器；可点「预热」提前加载，或直接解析时自动构建。',
+    'cap.warm_btn': '预热',
+    'cap.evict_btn': '清空缓存',
+    'cap.warming': '预热中…',
+    'cap.evicting': '清空中…',
+    'cap.rebuild_note': '清空缓存不会停止解析服务：下次使用该方案时转换器会自动重建（重新加载 / 下载权重）。',
+    'cap.resource_hidden': '占用无法通过 torch 统计',
+    'cap.onnx_note': '注：RapidOCR 基于 ONNX Runtime 运行，其权重占用无法通过 torch 内省，未计入上方数字。',
+    'cap.total_weights': '权重合计',
+    'cap.warm_failed': '预热失败',
+    'cap.evict_failed': '清空缓存失败',
+    'cap.kind.layout': 'DocLayNet 版面分析',
+    'cap.kind.table': 'TableFormer 表格识别',
+    'cap.kind.ocr': 'RapidOCR 文字识别',
+    'cap.kind.vlm': 'Granite 视觉语言模型',
+    'cap.kind.other': '辅助模型',
 
     // Common
     'common.refresh': '刷新',
@@ -122,6 +148,14 @@ const I18N = {
     'models.auto_refresh_label': '自动刷新:',
     'models.load': '加载',
     'models.unload': '卸载',
+    'models.loading': '加载中…',
+    'models.unloading': '卸载中…',
+    'models.load_failed': '加载失败',
+    'models.unload_failed': '卸载失败',
+    'models.meta_params': '参数量',
+    'models.meta_vram': '显存占用',
+    'models.meta_ram': '内存占用',
+    'models.meta_load_time': '加载耗时',
 
     // Databases panel
     'databases.coll_count': '集合数',
@@ -165,8 +199,154 @@ const I18N = {
     'modals.add_index': '＋ 添加一个索引',
     'modals.create_collection': '创建集合',
     'modals.name_hint': '1-64 字符,字母 / 数字 / 下划线',
+
+    // Ingest panel (upload progress + result cards)
+    'ingest.upload': '上传',
+    'ingest.uploading': '上传中…',
+    'ingest.processing': '处理中…',
+    'ingest.group.file': '源文件',
+    'ingest.group.parse': '解析设置',
+    'ingest.group.chunk': '分片设置',
+    'ingest.group.dest': '嵌入与写入',
+    'ingest.stage.upload': '上传',
+    'ingest.stage.parse': '解析',
+    'ingest.stage.chunk': '分片',
+    'ingest.stage.embed': '嵌入',
+    'ingest.stage.upsert': '写入',
+    'ingest.stage_hint.parse': '正在解析文档内容…',
+    'ingest.stage_hint.chunk': '正在按 token 数切分文本…',
+    'ingest.stage_hint.embed': '正在调用嵌入模型生成向量…',
+    'ingest.stage_hint.upsert': '正在写入向量库…',
+    'ingest.failed_at': '失败阶段：',
+    'ingest.success': '摄取成功',
+    'ingest.success_empty': '摄取完成,但文档未产生任何分片',
+    'ingest.failed': '摄取失败',
+    'ingest.banner_ok': '成功',
+    'ingest.banner_empty': '空文档',
+    'ingest.stat.chunks': '分片数',
+    'ingest.stat.pages': '页数',
+    'ingest.stat.tokens': 'tokens',
+    'ingest.stat.duration': '耗时',
+    'ingest.stat.size': '文件大小',
+    'ingest.stat.model': '嵌入模型',
+    'ingest.doc_id': 'doc_id',
+    'ingest.copy': '复制',
+    'ingest.copied': '已复制 ✓',
+    'ingest.raw': '原始响应 JSON',
+    'ingest.metadata_hint': '可选,仅 title / author / filename / page_count 会写入标量字段',
+    'ingest.no_dbs': '（暂无数据库,请先在数据库管理中创建）',
+    'ingest.err.no_db': '请先选择数据库。',
+    'ingest.err.no_file': '请先选择要上传的文件。',
+    'ingest.err.bad_meta': 'metadata 必须是合法的 JSON 对象,例如 {"title":"年度报告"}。',
+    'ingest.err.bad_size': 'chunk size 必须在 1–8192 之间。',
+    'ingest.err.bad_overlap': 'chunk overlap 必须满足 0 ≤ overlap < chunk size。',
+    'ingest.err.network': '网络错误,请求未完成。',
+    'ingest.parse_pages_prefix': '已解析 ',
+    'ingest.parse_pages_suffix': ' 页',
+
+    // Parse 面板（上传字节进度 + 逐页解析进度）
+    'parse.upload': '解析',
+    'parse.uploading': '上传中…',
+    'parse.parsing': '解析中…',
+    'parse.failed': '解析失败',
+    'parse.pages_prefix': '已解析 ',
+    'parse.pages_suffix': ' 页',
+    'parse.hint.parse': '正在解析文档内容,大文件可能需要数分钟…',
+    'parse.err.no_file': '请先选择要解析的文件。',
+    'parse.err.network': '网络错误,请求未完成。',
+    'parse.stat.chars': '文本字符',
+    'parse.stat.pages': '页数',
+    'parse.stat.images': '图片',
+    'parse.stat.tables': '表格',
+    'parse.stat.ocr': 'OCR 页数',
+    'parse.stat.duration': '总耗时',
+    'parse.engine_status': '解析引擎状态（预热 / 缓存）',
+
+    // 文本分片策略（chunking 包注册的 strategy 名称）
+    'chunk.strategy.fixed': '固定窗口（按 token 硬切）',
+    'chunk.strategy.paragraph': '段落分片（段落优先打包）',
+    'chunk.strategy.recursive': '递归分片（Markdown 感知，默认）',
+    'chunk.strategy.semantic': '语义分片（嵌入断点）',
+    'chunk.strategy.llm': 'LLM 分片（智能主题边界）',
+    'chunk.add_context': '上下文增强（LLM 为每个分片生成上下文前缀）',
+    'chunk.context_prefix': '上下文：',
+
+    // 入库浏览
+    'chunks.page_size': '每页条数',
+    'chunks.doc_filter': 'doc_id 精确匹配',
+    'chunks.name_filter': '文件名关键字',
+    'chunks.query': '查询',
+    'chunks.reset': '重置',
+    'chunks.count': '分片总数',
+    'chunks.stat_total': '分片总数',
+    'chunks.stat_page': '页码',
+    'chunks.stat_returned': '本页条数',
+    'chunks.no_collection': 'ingest 集合尚不存在,请先通过「一键入库」写入文档。',
+    'chunks.no_match': '没有符合条件的分片。',
+
+    // 解析 profile（PDF 管线）
+    'profile.label': '解析方案',
+    'profile.auto': '自动（按文档类型）',
+    'profile.standard': '标准版（版面+表格+选择性 OCR）',
+    'profile.native': '原生提取（快速，纯数字 PDF）',
+    'profile.vlm': '视觉大模型（VLM）',
+    'profile.desc.auto': '根据文档类型自动选择：带文本层的数字 PDF 使用快速原生提取；扫描件、混合 PDF 及图片使用版面分析 + OCR；Word / PPT / HTML 使用无模型快速通道。',
+    'profile.desc.standard': 'DocLayNet 版面分析 + TableFormer 表格识别 + 选择性 RapidOCR：数字页面跳过 OCR，扫描页面自动识别。适用于绝大多数 PDF 与图片。',
+    'profile.desc.native': '基于 docling-parse 的纯文本提取，无需加载模型、速度极快；但无法识别扫描件，表格还原较弱。仅适用于带文本层的数字 PDF。',
+    'profile.desc.vlm': '端到端视觉语言模型（默认 Granite-Docling-258M）直接理解整页版面，适合复杂排版；速度较慢，首次使用需下载模型权重。',
   },
   en: {
+    // Brand + topbar
+    'brand.dashboard': 'Dashboard',
+    'topbar.dim_unit': 'dim',
+    'status.SVC': 'SVC',
+    'status.VER': 'VER',
+    'status.EMB': 'EMB',
+    'status.STORE': 'STORE',
+    'status.LOADED': 'LOADED',
+
+    // Sidebar nav
+    'nav.overview': 'Overview',
+    'nav.models': 'Model List',
+    'nav.embeddings': 'Text Embed',
+    'nav.image_embeddings': 'Image Embed',
+    'nav.multimodal_embeddings': 'Multimodal Embed',
+    'nav.rerank': 'Rerank',
+    'nav.similarity': 'Similarity',
+    'nav.databases': 'Databases',
+    'nav.collections': 'Collections',
+    'nav.records': 'Records',
+    'nav.search': 'Search',
+    'nav.browse': 'Browse',
+    'nav.parse': 'Parse',
+    'nav.chunk': 'Chunk Tester',
+    'nav.ingest': 'One-Click Ingest',
+    'nav.retrieval': 'Retrieval',
+    'retrieval.title': 'Retrieval',
+    'retrieval.modes.basic': 'Basic',
+    'retrieval.modes.hybrid': 'Hybrid',
+    'retrieval.modes.advanced': 'Advanced',
+    'retrieval.modes.custom': 'Custom',
+    'retrieval.run': 'Retrieve',
+    'retrieval.running': 'Retrieving…',
+    'retrieval.migrate': 'Migrate to v2',
+    'retrieval.migrating': 'Migrating…',
+    'retrieval.v1_banner': 'Schema v1: BM25 full-text unavailable',
+    'retrieval.llm_hint': 'LLM not configured',
+    'retrieval.trace': 'Retrieval trace',
+    'nav.chunks_view': 'Stored Chunks',
+    'nav.Navigation': 'Navigation',
+    'nav.Overview': 'Overview',
+    'nav.Models': 'Models',
+    'nav.Vector Store': 'Vector Store',
+    'nav.Knowledge Base': 'Knowledge Base',
+
+    // Breadcrumb cats
+    'cat.overview': 'Overview',
+    'cat.models': 'Models',
+    'cat.store': 'Vector Store',
+    'cat.kb': 'Knowledge Base',
+
     'overview.version': 'version',
     'overview.uptime': 'uptime',
     'overview.uptime_sub': 'since startup',
@@ -178,6 +358,33 @@ const I18N = {
     'overview.status_label': 'status',
     'overview.db_count': 'db count',
     'overview.auto_refresh': 'auto-refresh · every 5s',
+    'overview.capabilities': 'Loaded capabilities & resources',
+    'overview.capabilities_sub': 'Every component currently holding model weights / a session in the backend',
+    'overview.cap_inference': 'Inference models',
+    'overview.cap_parser': 'Document parsing engine',
+    'overview.cap_inference_empty': 'No inference models loaded yet — load one in "Model List".',
+
+    // Parser capability cards (shared by overview + parse pane)
+    'cap.warm': 'warm',
+    'cap.cold': 'cold',
+    'cap.model_free': 'model-free · lightweight pipeline',
+    'cap.warm_idle': 'Converter built; model pipelines load on the first parse.',
+    'cap.cold_hint': 'Converter not built yet — warm it up ahead of time, or let it build on the first parse.',
+    'cap.warm_btn': 'Warm up',
+    'cap.evict_btn': 'Evict cache',
+    'cap.warming': 'warming…',
+    'cap.evicting': 'evicting…',
+    'cap.rebuild_note': 'Evicting the cache does NOT stop parsing: the converter rebuilds automatically on the next use of this profile (reloading / re-downloading weights).',
+    'cap.resource_hidden': 'resource usage invisible to torch introspection',
+    'cap.onnx_note': 'Note: RapidOCR runs on ONNX Runtime; its weight footprint is invisible to torch introspection and is not included in the figures above.',
+    'cap.total_weights': 'total weights',
+    'cap.warm_failed': 'Warm-up failed',
+    'cap.evict_failed': 'Evict failed',
+    'cap.kind.layout': 'DocLayNet layout analysis',
+    'cap.kind.table': 'TableFormer table recognition',
+    'cap.kind.ocr': 'RapidOCR text recognition',
+    'cap.kind.vlm': 'Granite vision-language model',
+    'cap.kind.other': 'helper model',
 
     'common.refresh': 'refresh',
     'common.cancel': 'cancel',
@@ -206,6 +413,14 @@ const I18N = {
     'models.auto_refresh_label': 'auto-refresh:',
     'models.load': 'load',
     'models.unload': 'unload',
+    'models.loading': 'loading…',
+    'models.unloading': 'unloading…',
+    'models.load_failed': 'load failed',
+    'models.unload_failed': 'unload failed',
+    'models.meta_params': 'parameters',
+    'models.meta_vram': 'VRAM',
+    'models.meta_ram': 'RAM',
+    'models.meta_load_time': 'load time',
 
     'databases.coll_count': 'collection count',
     'databases.meta_count': 'metadata fields',
@@ -247,56 +462,101 @@ const I18N = {
     'modals.add_index': '+ add index',
     'modals.create_collection': 'create collection',
     'modals.name_hint': '1-64 chars, alphanumeric / underscore',
-  },
-  en: {
-    'brand.dashboard': 'Dashboard',
-    'topbar.dim_unit': 'dim',
-    'status.SVC': 'SVC',
-    'status.VER': 'VER',
-    'status.EMB': 'EMB',
-    'status.STORE': 'STORE',
-    'status.LOADED': 'LOADED',
 
-    'nav.overview': 'Overview',
-    'nav.models': 'Model List',
-    'nav.embeddings': 'Text Embed',
-    'nav.image_embeddings': 'Image Embed',
-    'nav.multimodal_embeddings': 'Multimodal Embed',
-    'nav.rerank': 'Rerank',
-    'nav.text_similarity': 'Text Similarity',
-    'nav.image_similarity': 'Image Similarity',
-    'nav.mm_similarity': 'Multimodal Similarity',
-    'nav.databases': 'Databases',
-    'nav.collections': 'Collections',
-    'nav.records': 'Records',
-    'nav.search': 'Search',
-    'nav.browse': 'Browse',
-    'nav.parse': 'Parse',
-    'nav.chunk': 'Chunk',
-    'nav.ingest': 'Ingest',
-    'nav.retrieval': 'Retrieval',
-    'retrieval.title': 'Retrieval',
-    'retrieval.modes.basic': 'Basic',
-    'retrieval.modes.hybrid': 'Hybrid',
-    'retrieval.modes.advanced': 'Advanced',
-    'retrieval.modes.custom': 'Custom',
-    'retrieval.run': 'Retrieve',
-    'retrieval.running': 'Retrieving…',
-    'retrieval.migrate': 'Migrate to v2',
-    'retrieval.migrating': 'Migrating…',
-    'retrieval.v1_banner': 'Schema v1: BM25 full-text unavailable',
-    'retrieval.llm_hint': 'LLM not configured',
-    'retrieval.trace': 'Retrieval trace',
-    'nav.Navigation': 'Navigation',
-    'nav.Overview': 'Overview',
-    'nav.Models': 'Models',
-    'nav.Vector Store': 'Vector Store',
-    'nav.Knowledge Base': 'Knowledge Base',
+    // Ingest panel (upload progress + result cards)
+    'ingest.upload': 'upload',
+    'ingest.uploading': 'uploading…',
+    'ingest.processing': 'processing…',
+    'ingest.group.file': 'source file',
+    'ingest.group.parse': 'parsing',
+    'ingest.group.chunk': 'chunking',
+    'ingest.group.dest': 'embedding & storage',
+    'ingest.stage.upload': 'upload',
+    'ingest.stage.parse': 'parse',
+    'ingest.stage.chunk': 'chunk',
+    'ingest.stage.embed': 'embed',
+    'ingest.stage.upsert': 'upsert',
+    'ingest.stage_hint.parse': 'Parsing the document…',
+    'ingest.stage_hint.chunk': 'Splitting text into token chunks…',
+    'ingest.stage_hint.embed': 'Calling the embedding model…',
+    'ingest.stage_hint.upsert': 'Writing vectors to the store…',
+    'ingest.failed_at': 'Failed at stage: ',
+    'ingest.success': 'Ingest succeeded',
+    'ingest.success_empty': 'Ingest finished, but no chunks were produced',
+    'ingest.failed': 'Ingest failed',
+    'ingest.banner_ok': 'SUCCESS',
+    'ingest.banner_empty': 'EMPTY',
+    'ingest.stat.chunks': 'chunks',
+    'ingest.stat.pages': 'pages',
+    'ingest.stat.tokens': 'tokens',
+    'ingest.stat.duration': 'duration',
+    'ingest.stat.size': 'file size',
+    'ingest.stat.model': 'embed model',
+    'ingest.doc_id': 'doc_id',
+    'ingest.copy': 'copy',
+    'ingest.copied': 'copied ✓',
+    'ingest.raw': 'raw response JSON',
+    'ingest.metadata_hint': 'optional; only title / author / filename / page_count stored as scalar fields',
+    'ingest.no_dbs': '(no databases — create one in Databases first)',
+    'ingest.err.no_db': 'Select a database first.',
+    'ingest.err.no_file': 'Select a file to upload.',
+    'ingest.err.bad_meta': 'metadata must be a valid JSON object, e.g. {"title":"annual report"}.',
+    'ingest.err.bad_size': 'chunk size must be between 1 and 8192.',
+    'ingest.err.bad_overlap': 'chunk overlap must satisfy 0 ≤ overlap < chunk size.',
+    'ingest.err.network': 'Network error — the request did not complete.',
+    'ingest.parse_pages_prefix': 'parsed ',
+    'ingest.parse_pages_suffix': ' pages',
 
-    'cat.overview': 'Overview',
-    'cat.models': 'Models',
-    'cat.store': 'Vector Store',
-    'cat.kb': 'Knowledge Base',
+    // Parse panel (byte-upload progress + per-page parse progress)
+    'parse.upload': 'parse',
+    'parse.uploading': 'uploading…',
+    'parse.parsing': 'parsing…',
+    'parse.failed': 'Parse failed',
+    'parse.pages_prefix': 'parsed ',
+    'parse.pages_suffix': ' pages',
+    'parse.hint.parse': 'Parsing the document — large files can take a few minutes…',
+    'parse.err.no_file': 'Select a file to parse.',
+    'parse.err.network': 'Network error — the request did not complete.',
+    'parse.stat.chars': 'text chars',
+    'parse.stat.pages': 'pages',
+    'parse.stat.images': 'images',
+    'parse.stat.tables': 'tables',
+    'parse.stat.ocr': 'OCR pages',
+    'parse.stat.duration': 'total time',
+    'parse.engine_status': 'Parsing engine status (warm / cache)',
+
+    // Chunking strategies (names registered by the chunking package)
+    'chunk.strategy.fixed': 'fixed windows (hard token split)',
+    'chunk.strategy.paragraph': 'paragraph (paragraph-first packing)',
+    'chunk.strategy.recursive': 'recursive (markdown-aware, default)',
+    'chunk.strategy.semantic': 'semantic (embedding breakpoints)',
+    'chunk.strategy.llm': 'LLM (smart topic boundaries)',
+    'chunk.add_context': 'contextual enrichment (LLM context prefix per chunk)',
+    'chunk.context_prefix': 'Context: ',
+
+    // Ingested-chunks browser
+    'chunks.page_size': 'per page',
+    'chunks.doc_filter': 'doc_id (exact)',
+    'chunks.name_filter': 'filename keyword',
+    'chunks.query': 'query',
+    'chunks.reset': 'reset',
+    'chunks.count': 'total chunks',
+    'chunks.stat_total': 'total chunks',
+    'chunks.stat_page': 'page',
+    'chunks.stat_returned': 'returned',
+    'chunks.no_collection': 'The ingest collection does not exist yet — ingest a document with "One-Click Ingest" first.',
+    'chunks.no_match': 'No chunks match the filter.',
+
+    // Parse profiles (PDF pipelines)
+    'profile.label': 'profile',
+    'profile.auto': 'auto (by document type)',
+    'profile.standard': 'standard (layout + tables + selective OCR)',
+    'profile.native': 'native extraction (fast, digital PDF)',
+    'profile.vlm': 'vision-language model (VLM)',
+    'profile.desc.auto': 'Picks automatically by document type: digital PDFs with a text layer use fast native extraction; scanned/mixed PDFs and images use layout analysis + OCR; Word / PPT / HTML use the model-free fast path.',
+    'profile.desc.standard': 'DocLayNet layout analysis + TableFormer table recognition + selective RapidOCR: digital pages skip OCR while scanned pages are recognized automatically. Fits most PDFs and images.',
+    'profile.desc.native': 'Plain text extraction via docling-parse — no model loading, near-instant; cannot read scans and table recovery is weak. Digital PDFs with a text layer only.',
+    'profile.desc.vlm': 'End-to-end vision-language model (Granite-Docling-258M by default) reads whole pages directly — great for complex layouts; slower, and weights download on first use.',
   },
 };
 
@@ -331,12 +591,75 @@ export function extractApiError(e, fallback) {
   return String(e);
 }
 
+// One alert per id+error message: while polling repeats the same
+// `failed` row every few seconds we must not re-pop the alert. Keyed by
+// model id; cleared when that id leaves the failed state (retry / load
+// success / unload).
+const alertedLoadError = Object.create(null);
+
+// Reconcile a fresh GET /v1/models payload into the store:
+//  - drives per-card optimistic busy flags (busy[id] holds the verb of
+//    the request WE fired: 'load' | 'unload'), clearing each only after
+//    the server-polled state settles for THAT verb,
+//  - alerts exactly once on a loading -> failed transition,
+//  - keeps store.embedderDim in sync (previously only the poller did),
+//  - returns true while at least one row is still loading.
+export function applyModelsData(rows) {
+  const prev = new Map((store.models.data || []).map(m => [m.id, m]));
+  store.models.data = rows || [];
+  let anyLoading = false;
+  for (const m of store.models.data) {
+    const before = prev.get(m.id);
+    // The busy verb drives OPTIMISTIC UI: the card switches to its
+    // loading state the instant the button is clicked, before the POST
+    // (or the confirming GET) has returned. It must survive a stale poll
+    // — e.g. a GET fired just before the click that comes back showing
+    // the old unloaded row must not flip the card back mid-request.
+    const busyVerb = store.models.busy[m.id];
+    if (m.load_status === 'loading' || busyVerb === 'load') anyLoading = true;
+
+    if (m.load_status === 'failed') {
+      // Alert when WE watched this id fail: either the polled row just
+      // transitioned out of loading, or our own optimistic load is in
+      // flight and the server already reports failure. Opening the
+      // dashboard on a stale failure shows the inline error, no pop-up.
+      const watched =
+        (before && before.load_status === 'loading') || busyVerb === 'load';
+      if (watched && alertedLoadError[m.id] !== m.load_error) {
+        alertedLoadError[m.id] = m.load_error;
+        alert(t('models.load_failed') + ': ' + (m.load_error || 'unknown'));
+      }
+    } else if (alertedLoadError[m.id] !== undefined) {
+      // Any non-failed row (incl. 'loading' during a retry) rearms the
+      // one-shot alert for the next failure.
+      delete alertedLoadError[m.id];
+    }
+
+    if (busyVerb === 'load') {
+      // Settle once the server confirms the instance (or the failure);
+      // 'unloaded' while our POST is in flight is a stale poll.
+      if (m.loaded || m.load_status === 'loaded' || m.load_status === 'failed') {
+        store.models.busy[m.id] = false;
+      }
+    } else if (busyVerb === 'unload') {
+      // Settle once the live instance is gone. A 'loading' row means
+      // someone else started loading this family — also release.
+      if (!m.loaded && m.load_status !== 'loading') {
+        store.models.busy[m.id] = false;
+      }
+    }
+  }
+  const loaded = store.models.data.find(m => m.type === 'embedder' && m.loaded);
+  store.embedderDim = loaded && loaded.dimensions ? loaded.dimensions : 0;
+  return anyLoading;
+}
+
 export const store = reactive({
   view: 'overview',
   locale: 'zh',                                 // current UI language: 'zh' | 'en'
   health: { healthz: 'unknown', readyz: 'unknown' },
   embedderDim: 0,
-  models: { data: [], busy: Object.create(null), autoRefresh: true, timer: null },
+  models: { data: [], busy: Object.create(null), autoRefresh: true },
   databases: { list: [], detailCache: Object.create(null), expanded: new Set() },
   collections: { list: [], detailCache: Object.create(null), expanded: new Set() },
   modals: { newDb: false, newColl: false },
@@ -359,17 +682,37 @@ function startHealthPolling() {
   healthTimer = setInterval(pollHealth, 5000);
   pollHealth();
 }
+// Adaptive poller: 5s cadence at rest, tightened to 2s while any card
+// reports load_status='loading' so a background load completes visually
+// within ~2s instead of waiting out a full 5s tick. Self-rescheduling
+// setTimeout chain (not setInterval) so the delay can change per tick.
+let modelsTimer = null;
+let modelsPollStopped = false;
 function startModelsAutoRefresh() {
-  if (store.models.timer) return;
-  store.models.timer = setInterval(async () => {
-    if (!store.models.autoRefresh) return;
-    try {
-      const { payload } = await api('GET', '/v1/models');
-      store.models.data = (payload && payload.data) || [];
-      const loaded = (store.models.data || []).find(m => m.type === 'embedder' && m.loaded);
-      store.embedderDim = loaded && loaded.dimensions ? loaded.dimensions : 0;
-    } catch (_e) {}
-  }, 5000);
+  if (modelsTimer !== null) return;
+  modelsPollStopped = false;
+  const schedule = (delay) => {
+    modelsTimer = setTimeout(async () => {
+      modelsTimer = null;
+      if (modelsPollStopped) return;
+      let anyLoading = false;
+      if (store.models.autoRefresh) {
+        try {
+          const { payload } = await api('GET', '/v1/models');
+          anyLoading = applyModelsData((payload && payload.data) || []);
+        } catch (_e) { /* logged */ }
+      }
+      if (!modelsPollStopped) schedule(anyLoading ? 2000 : 5000);
+    }, delay);
+  };
+  schedule(5000);
+}
+function stopModelsAutoRefresh() {
+  modelsPollStopped = true;
+  if (modelsTimer !== null) {
+    clearTimeout(modelsTimer);
+    modelsTimer = null;
+  }
 }
 
 const NAV_LABELS = {
@@ -379,9 +722,7 @@ const NAV_LABELS = {
   'image-embeddings':    { catKey: 'cat.models',    subKey: 'nav.image_embeddings' },
   'multimodal-embeddings':{ catKey: 'cat.models',   subKey: 'nav.multimodal_embeddings' },
   'rerank':              { catKey: 'cat.models',    subKey: 'nav.rerank' },
-  'text-similarity':     { catKey: 'cat.models',    subKey: 'nav.text_similarity' },
-  'image-similarity':    { catKey: 'cat.models',    subKey: 'nav.image_similarity' },
-  'mm-similarity':       { catKey: 'cat.models',    subKey: 'nav.mm_similarity' },
+  'similarity':          { catKey: 'cat.models',    subKey: 'nav.similarity' },
   'databases':           { catKey: 'cat.store',     subKey: 'nav.databases' },
   'collections':         { catKey: 'cat.store',     subKey: 'nav.collections' },
   'records':             { catKey: 'cat.store',     subKey: 'nav.records' },
@@ -390,6 +731,7 @@ const NAV_LABELS = {
   'parse':               { catKey: 'cat.kb',        subKey: 'nav.parse' },
   'chunk':               { catKey: 'cat.kb',        subKey: 'nav.chunk' },
   'ingest':              { catKey: 'cat.kb',        subKey: 'nav.ingest' },
+  'ingested':            { catKey: 'cat.kb',        subKey: 'nav.chunks_view' },
   'retrieval':           { catKey: 'cat.kb',        subKey: 'nav.retrieval' },
 };
 
@@ -408,7 +750,7 @@ const App = defineComponent({
     });
     onUnmounted(() => {
       if (healthTimer) clearInterval(healthTimer);
-      if (store.models.timer) clearInterval(store.models.timer);
+      stopModelsAutoRefresh();
     });
     return { store, t };
   },
@@ -472,9 +814,7 @@ const App = defineComponent({
               <div :class="['nav-item', store.view === 'image-embeddings' ? 'active' : '']" data-view="image-embeddings" @click="store.view = 'image-embeddings'"><span>{{ t('nav.image_embeddings') }}</span></div>
               <div :class="['nav-item', store.view === 'multimodal-embeddings' ? 'active' : '']" data-view="multimodal-embeddings" @click="store.view = 'multimodal-embeddings'"><span>{{ t('nav.multimodal_embeddings') }}</span></div>
               <div :class="['nav-item', store.view === 'rerank' ? 'active' : '']" data-view="rerank" @click="store.view = 'rerank'"><span>{{ t('nav.rerank') }}</span></div>
-              <div :class="['nav-item', store.view === 'text-similarity' ? 'active' : '']" data-view="text-similarity" @click="store.view = 'text-similarity'"><span>{{ t('nav.text_similarity') }}</span></div>
-              <div :class="['nav-item', store.view === 'image-similarity' ? 'active' : '']" data-view="image-similarity" @click="store.view = 'image-similarity'"><span>{{ t('nav.image_similarity') }}</span></div>
-              <div :class="['nav-item', store.view === 'mm-similarity' ? 'active' : '']" data-view="mm-similarity" @click="store.view = 'mm-similarity'"><span>{{ t('nav.mm_similarity') }}</span></div>
+              <div :class="['nav-item', store.view === 'similarity' ? 'active' : '']" data-view="similarity" @click="store.view = 'similarity'"><span>{{ t('nav.similarity') }}</span></div>
             </div>
           </div>
 
@@ -495,6 +835,7 @@ const App = defineComponent({
               <div :class="['nav-item', store.view === 'parse' ? 'active' : '']" data-view="parse" @click="store.view = 'parse'"><span>{{ t('nav.parse') }}</span></div>
               <div :class="['nav-item', store.view === 'chunk' ? 'active' : '']" data-view="chunk" @click="store.view = 'chunk'"><span>{{ t('nav.chunk') }}</span></div>
               <div :class="['nav-item', store.view === 'ingest' ? 'active' : '']" data-view="ingest" @click="store.view = 'ingest'"><span>{{ t('nav.ingest') }}</span></div>
+              <div :class="['nav-item', store.view === 'ingested' ? 'active' : '']" data-view="ingested" @click="store.view = 'ingested'"><span>{{ t('nav.chunks_view') }}</span></div>
               <div :class="['nav-item', store.view === 'retrieval' ? 'active' : '']" data-view="retrieval" @click="store.view = 'retrieval'"><span>{{ t('nav.retrieval') }}</span></div>
             </div>
           </div>
@@ -517,15 +858,13 @@ const App = defineComponent({
           <embeddings-panel v-show="store.view === 'image-embeddings'" kind="image" />
           <embeddings-panel v-show="store.view === 'multimodal-embeddings'" kind="multimodal" />
           <rerank-panel v-show="store.view === 'rerank'" />
-          <similarity-panel v-show="store.view === 'text-similarity'" kind="text" />
-          <similarity-panel v-show="store.view === 'image-similarity'" kind="image" />
-          <similarity-panel v-show="store.view === 'mm-similarity'" kind="multimodal" />
+          <similarity-panel v-show="store.view === 'similarity'" />
           <databases-panel v-show="store.view === 'databases'" />
           <collections-panel v-show="store.view === 'collections'" />
           <records-panel v-show="store.view === 'records'" />
           <search-panel v-show="store.view === 'search'" />
           <browse-panel v-show="store.view === 'browse'" />
-          <knowledge-base-panel v-show="store.view === 'parse' || store.view === 'chunk' || store.view === 'ingest'" :view="store.view" />
+          <knowledge-base-panel v-show="store.view === 'parse' || store.view === 'chunk' || store.view === 'ingest' || store.view === 'ingested'" :view="store.view" />
           <retrieval-panel v-show="store.view === 'retrieval'" />
         </div>
       </main>

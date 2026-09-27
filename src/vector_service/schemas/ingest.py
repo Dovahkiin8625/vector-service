@@ -39,6 +39,11 @@ class ParseMetadata(BaseModel):
                 "title": "Annual Report",
                 "author": "Acme Inc.",
                 "mime_type": "application/pdf",
+                "doc_kind": "digital",
+                "profile": "standard",
+                "images_count": 3,
+                "ocr_pages": 1,
+                "tables_count": 4,
             }
         }
     )
@@ -66,6 +71,63 @@ class ParseMetadata(BaseModel):
         description="Source MIME type the parser accepted.",
         examples=["application/pdf"],
     )
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Docling pipeline that actually ran: ``standard`` (layout + "
+            "TableFormer + selective RapidOCR), ``native`` (model-free "
+            "PDF text extraction), or ``vlm`` (vision-language model). "
+            "``None`` for text passthrough formats."
+        ),
+        examples=["standard"],
+    )
+    doc_kind: str | None = Field(
+        default=None,
+        description=(
+            "PDF text-layer classification from the cheap pre-parse "
+            "probe: ``digital`` (real text layer), ``scanned`` (image "
+            "pages requiring OCR), ``mixed``, or ``unknown`` when the "
+            "probe could not read the file. ``None`` for non-PDF input."
+        ),
+        examples=["digital"],
+    )
+    scanned_pages: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Number of pages without a usable text layer (0 for a fully "
+            "digital PDF). ``None`` for non-PDF input or when probing "
+            "failed."
+        ),
+        examples=[0],
+    )
+    images_count: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Number of pictures extracted from the document and saved "
+            "under the artifacts directory; 0 for text-only documents."
+        ),
+        examples=[3],
+    )
+    ocr_pages: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Number of pages that passed through the OCR stage: 0 for "
+            "native / VLM / model-free SimplePipeline runs, the "
+            "text-layer-less page count for standard PDFs, every image "
+            "page for raster inputs. ``None`` when the count is "
+            "unavailable (e.g. an unprobeable PDF)."
+        ),
+        examples=[2],
+    )
+    tables_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Number of tables recovered from the document.",
+        examples=[4],
+    )
 
 
 class ParseResponse(BaseModel):
@@ -82,13 +144,20 @@ class ParseResponse(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "markdown": "# Introduction\n\nThis is the first paragraph...",
+                "markdown": (
+                    "# Introduction\n\nThis is the first paragraph...\n\n"
+                    "![](/artifacts/0a1b…/images/image_000000_ab12.png)"
+                ),
                 "metadata": {
                     "page_count": 12,
                     "title": "Annual Report",
                     "author": "Acme Inc.",
                     "mime_type": "application/pdf",
+                    "doc_kind": "digital",
+                    "profile": "standard",
+                    "images_count": 1,
                 },
+                "images": ["/artifacts/0a1b…/images/image_000000_ab12.png"],
             }
         }
     )
@@ -98,6 +167,15 @@ class ParseResponse(BaseModel):
     )
     metadata: ParseMetadata = Field(
         description="Parser-supplied metadata about the source document.",
+    )
+    images: list[str] = Field(
+        default_factory=list,
+        description=(
+            "URLs of pictures extracted from the document and saved to "
+            "the artifacts directory (same URIs embedded in the "
+            "markdown). Empty for text-only documents or when image "
+            "saving is disabled."
+        ),
     )
 
 
@@ -121,6 +199,7 @@ class ChunkItem(BaseModel):
                 "token_count": 487,
                 "section_header": "1. Introduction > 1.1 Background",
                 "page_number": 1,
+                "context": None,
             }
         }
     )
@@ -149,6 +228,14 @@ class ChunkItem(BaseModel):
             "``None`` for sources without pages (markdown, plain text)."
         ),
         examples=[1],
+    )
+    context: str | None = Field(
+        default=None,
+        description=(
+            "LLM-generated situating prefix (contextual retrieval) "
+            "to prepend at embed time. ``None`` when enrichment is "
+            "off or failed. Not part of the stored chunk text."
+        ),
     )
 
 
