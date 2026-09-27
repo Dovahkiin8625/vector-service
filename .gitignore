@@ -22,6 +22,7 @@ logs/
 
 # --- Tooling runtime artifacts ---
 .pytest_cache/
+.pytest_tmp/
 .run-dev/
 .playwright-mcp/
 
