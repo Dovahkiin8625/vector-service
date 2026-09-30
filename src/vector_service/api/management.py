@@ -21,6 +21,7 @@ field names in their request bodies.
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from typing import Any
 
@@ -43,6 +44,11 @@ from vector_service.core.errors import (
     UnsupportedMime,
 )
 from vector_service.core.logging import get_logger
+from vector_service.core.threadpools import (
+    run_in_model,
+    run_in_sqlite,
+    run_in_store,
+)
 from vector_service.core.metrics import (
     STORE_COLLECTIONS,
     STORE_DATABASES,
@@ -172,16 +178,45 @@ def _timed(op: str, backend: str, database: str, fn, *args, **kwargs):
 
 
 async def _timed_async(op: str, backend: str, database: str, fn, *args, **kwargs):
-    loop = asyncio.get_running_loop()
-
     def _call() -> Any:
         return _timed(op, backend, database, fn, *args, **kwargs)
 
-    return await loop.run_in_executor(None, _call)
+    return await run_in_store(_call)
 
 
 def _backend(store) -> str:
-    return getattr(store, "backend_name", "milvus")
+    return store.backend_name
+
+
+async def _chunk_ids_under_filter(
+    store: Any, database: str, collection: str, primary_field: str,
+    filter_expr: str, *, page_size: int = 200,
+) -> list[str]:
+    """Resolve a filter expression to matching row ids via the store.
+
+    Pages ``store.browse`` over the matching rows. Used before a bulk
+    delete on a corpus-backed collection so the same chunks can be
+    removed from the system of record afterwards (post-delete nothing
+    remains to resolve). Filters match individual chunks, not documents,
+    so sibling chunks are deliberately left alone.
+    """
+    chunk_ids: list[str] = []
+    offset = 0
+    while True:
+        rows = await run_in_store(
+            functools.partial(
+                store.browse,
+                database, collection, primary_field,
+                limit=page_size, offset=offset, filter_expr=filter_expr,
+            ),
+        )
+        if not rows:
+            break
+        chunk_ids.extend(row["id"] for row in rows if "id" in row)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return chunk_ids
 
 
 # ---- image-embedder helpers ----
@@ -208,7 +243,7 @@ def _resolve_image_embedder_or_404(request: Request, model_id: str):
             "model": model_id,
             "exception_type": type(e).__name__,
         }})
-    embedder = getattr(request.app.state, "image_embedder", None)
+    embedder = request.app.state.image_embedder
     # Constraint: the service only ever keeps one image embedder loaded
     # at a time. A request naming a *registered* but *not currently
     # loaded* model id must be told the embedder is unavailable rather
@@ -244,17 +279,20 @@ def _decode_image_or_422(request: Request, b64: str, mime: str, *, index: int | 
     except UnsupportedMime as e:
         extras: dict = {"got": e.got, "allowed": e.allowed}
         code = "unsupported_mime"
+        message = str(e) or code
     except ImageTooLarge as e:
         extras = {"got": e.got, "max": e.max}
         code = "image_too_large"
+        message = str(e) or code
     except ImageDecodeError as e:
         extras = {}
         code = "image_decode_failed"
+        message = str(e) or code
     if index is not None:
         extras["index"] = index
     raise HTTPException(status_code=422, detail={"error": {
         "code": code,
-        "message": str(e) or code,
+        "message": message,
         **extras,
     }})
 
@@ -342,10 +380,29 @@ async def get_database(name: str, request: Request):
 )
 async def drop_database(name: str, request: Request):
     store = request.app.state.store
+    repo = request.app.state.corpus
+    bm25 = request.app.state.bm25
+    # Capture logical collections + bindings before the drop so every
+    # derived BM25 state file (including rebuilt physical refs) can be
+    # discarded afterwards.
+    corpus_collections = await run_in_sqlite(repo.corpus_collections, name)
+    bindings = await run_in_sqlite(repo.list_bindings, name)
+    refs = set(corpus_collections)
+    for binding in bindings:
+        refs.add(binding["active_ref"])
+        if binding["canary_ref"]:
+            refs.add(binding["canary_ref"])
     try:
         await _timed_async("db_drop", _backend(store), name, store.drop_database, name)
     except (DatabaseNotFound, StoreError, BackendError) as e:
         raise _http_from_store_error(e)
+    orphaned = await run_in_sqlite(repo.delete_for_database, name)
+    for digest in orphaned:
+        await asyncio.to_thread(
+            request.app.state.blob_store.delete, digest
+        )
+    for ref in refs:
+        await asyncio.to_thread(bm25.discard, name, ref)
     STORE_DATABASES.labels(backend=_backend(store)).dec()
     return {"deleted": name}
 
@@ -452,12 +509,46 @@ async def create_collection(db: str, body: CreateCollectionRequest, request: Req
 )
 async def drop_collection(db: str, name: str, request: Request):
     store = request.app.state.store
-    try:
-        await _timed_async(
-            "coll_drop", _backend(store), db, store.drop_collection, db, name,
-        )
-    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
-        raise _http_from_store_error(e)
+    repo = request.app.state.corpus
+    bm25 = request.app.state.bm25
+    is_corpus_collection = await run_in_sqlite(
+        repo.is_corpus_collection, db, name
+    )
+    # A corpus collection may live behind one or two physical names
+    # (active + canary); without a binding physical == logical.
+    binding = None
+    if is_corpus_collection:
+        binding = await run_in_sqlite(repo.get_binding, db, name)
+    if binding is None:
+        refs = [name]
+    else:
+        refs = [str(binding["active_ref"])]
+        if binding["canary_ref"]:
+            refs.append(str(binding["canary_ref"]))
+
+    for ref_index, ref in enumerate(refs):
+        try:
+            await _timed_async(
+                "coll_drop", _backend(store), db,
+                store.drop_collection, db, ref,
+            )
+        except CollectionNotFound:
+            # A canary binding may point at an already-gone ref; but the
+            # primary (first) ref missing is a real 404 for the caller.
+            if ref_index == 0:
+                raise _http_from_store_error(
+                    CollectionNotFound(ref)
+                )
+        except (DatabaseNotFound, StoreError, BackendError) as e:
+            raise _http_from_store_error(e)
+    if is_corpus_collection:
+        orphaned = await run_in_sqlite(repo.delete_for_collection, db, name)
+        for digest in orphaned:
+            await asyncio.to_thread(
+                request.app.state.blob_store.delete, digest
+            )
+        for ref in refs:
+            await asyncio.to_thread(bm25.discard, db, ref)
     STORE_COLLECTIONS.labels(backend=_backend(store), database=db).dec()
     return {"deleted": name}
 
@@ -579,7 +670,7 @@ async def drop_collection_index(
 async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request: Request):
     store = request.app.state.store
     embedder = request.app.state.embedder
-    settings = getattr(request.app.state, "settings", None)
+    settings = request.app.state.settings
 
     op_label = "upsert"
     if body.texts is not None:
@@ -592,12 +683,11 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
                 ),
                 "text_count": len(body.texts),
             }})
-        loop = asyncio.get_running_loop()
-        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+        timeout_s = settings.inference_timeout_seconds
         try:
             try:
                 vectors = await asyncio.wait_for(
-                    loop.run_in_executor(None, embedder.embed_documents, body.texts),
+                    run_in_model(embedder.embed_documents, body.texts),
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError:
@@ -620,14 +710,11 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
         op_label = "upsert_image"
         image_embedder = _resolve_image_embedder_or_404(request, body.model)
         decoded = _decode_images_batch(request, body.images, body.image_mimes)
-        loop = asyncio.get_running_loop()
-        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+        timeout_s = settings.inference_timeout_seconds
         try:
             try:
                 vectors = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, image_embedder.embed_images, decoded,
-                    ),
+                    run_in_model(image_embedder.embed_images, decoded),
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError:
@@ -691,21 +778,74 @@ async def upsert_vectors(db: str, name: str, body: UpsertVectorsRequest, request
 )
 async def delete_vectors(db: str, name: str, body: DeleteVectorsRequest, request: Request):
     store = request.app.state.store
-    try:
-        deleted = await _timed_async(
-            "delete", _backend(store), db, store.delete,
-            db, name, body.primary_field, body.ids,
-            filter_expr=body.filter_expr,
-        )
-    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
-        raise _http_from_store_error(e)
-    # Fall back to ``len(ids)`` only when the adapter couldn't
-    # report a real count (older paths still benefit from at least
-    # the input size). Filter-based deletes always return a real
-    # count from Milvus.
-    count = int(deleted) if deleted else (len(body.ids or []))
-    STORE_VECTORS_TOTAL.labels(op="delete", backend=_backend(store), database=db).inc(count)
-    return {"deleted": count}
+    repo = request.app.state.corpus
+
+    is_corpus_collection = await run_in_sqlite(
+        repo.is_corpus_collection, db, name
+    )
+    # A corpus collection may be mirrored in two physical collections
+    # (active + canary) — the same rows must leave each.
+    binding = None
+    if is_corpus_collection:
+        binding = await run_in_sqlite(repo.get_binding, db, name)
+    if binding is None:
+        physical_refs = [name]
+    else:
+        physical_refs = [str(binding["active_ref"])]
+        if binding["canary_ref"]:
+            physical_refs.append(str(binding["canary_ref"]))
+
+    # Filter deletes must resolve their rows BEFORE the rows are gone;
+    # ids deletes already name the exact rows. Resolve per physical ref
+    # and union: post-delete nothing remains to resolve from.
+    ids_by_ref: dict[str, list[str]] = {}
+    if is_corpus_collection:
+        for ref in physical_refs:
+            if body.ids is not None:
+                ids_by_ref[ref] = body.ids
+            else:
+                ids_by_ref[ref] = await _chunk_ids_under_filter(
+                    store, db, ref, body.primary_field, body.filter_expr,
+                )
+
+    deleted_total = 0
+    for ref in physical_refs:
+        try:
+            if is_corpus_collection:
+                deleted = await _timed_async(
+                    "delete", _backend(store), db, store.delete,
+                    db, ref, body.primary_field, ids_by_ref[ref],
+                )
+            else:
+                deleted = await _timed_async(
+                    "delete", _backend(store), db, store.delete,
+                    db, ref, body.primary_field, body.ids,
+                    filter_expr=body.filter_expr,
+                )
+        except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+            raise _http_from_store_error(e)
+        deleted_total += int(deleted)
+
+    if is_corpus_collection:
+        corpus_chunk_ids = sorted({
+            chunk_id
+            for ids in ids_by_ref.values()
+            for chunk_id in ids
+        })
+        orphaned = await run_in_sqlite(repo.delete_chunks, corpus_chunk_ids)
+        for digest in orphaned:
+            await asyncio.to_thread(
+                request.app.state.blob_store.delete, digest
+            )
+        # Removing leaves invalidates BM25 statistics in every physical
+        # ref — discard so the next query refits over surviving leaves.
+        for ref in physical_refs:
+            await asyncio.to_thread(
+                request.app.state.bm25.discard, db, ref
+            )
+
+    STORE_VECTORS_TOTAL.labels(op="delete", backend=_backend(store), database=db).inc(deleted_total)
+    return {"deleted": deleted_total}
 
 
 @router.post(
@@ -747,38 +887,52 @@ async def get_vectors(db: str, name: str, body: GetVectorsRequest, request: Requ
 )
 async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request):
     store = request.app.state.store
-    # ``total`` starts from collection metadata (cheap, but Milvus keeps
-    # counting tombstoned rows there until compaction, so the pager would
-    # look unrefreshed right after a delete). Stores exposing a live,
-    # tombstone-aware ``count_rows`` override it with a Strong-consistency
-    # ``count(*)``; with ``filter_expr`` the count is restricted to the
-    # same filter, so it is the exact denominator for filtered pages.
-    # The metadata read still runs for the not-found/404 side effect and
-    # as the fallback for backends without ``count_rows``. Collection-
-    # not-found and invalid filters share the browse call's error envelope.
-    try:
-        info = await _timed_async(
-            "coll_info", _backend(store), db, store.collection_info, db, name,
+    repo = request.app.state.corpus
+
+    # Corpus-backed collections: content lives in SQLite, not the thin
+    # derived index — page over the corpus regardless of Milvus state.
+    # filter_expr / output_fields from the body are not applied on this
+    # path (the corpus serves its fixed content-field vocabulary); the
+    # dashboard sends neither.
+    is_corpus_collection = await run_in_sqlite(
+        repo.is_corpus_collection, db, name
+    )
+    if is_corpus_collection:
+        rows, total = await run_in_sqlite(
+            functools.partial(
+                repo.browse, db, name,
+                limit=body.limit, offset=body.offset,
+            ),
         )
-        total = int(info.count)
-        counter = getattr(store, "count_rows", None)
-        if callable(counter):
-            live_total = await _timed_async(
-                "count", _backend(store), db, counter,
-                db, name, filter_expr=body.filter_expr,
+        total = int(total)
+    else:
+        # ``total`` comes from a live ``count_rows`` query: Milvus's
+        # collection metadata keeps counting tombstoned rows until
+        # compaction, so the pager would look unrefreshed right after a
+        # delete. With ``filter_expr`` the count is restricted to the
+        # same filter — the exact denominator for filtered pages. The
+        # collection_info read runs first for its not-found/404 side
+        # effect. Collection-not-found and invalid filters share the
+        # browse call's error envelope.
+        try:
+            info = await _timed_async(
+                "coll_info", _backend(store), db, store.collection_info, db, name,
             )
-            if live_total is not None:
-                total = int(live_total)
-        rows = await _timed_async(
-            "browse", _backend(store), db, store.browse,
-            db, name, body.primary_field,
-            limit=body.limit,
-            offset=body.offset,
-            filter_expr=body.filter_expr,
-            output_fields=body.output_fields,
-        )
-    except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
-        raise _http_from_store_error(e)
+            total = int(info.count)
+            total = int(await _timed_async(
+                "count", _backend(store), db, store.count_rows,
+                db, name, filter_expr=body.filter_expr,
+            ))
+            rows = await _timed_async(
+                "browse", _backend(store), db, store.browse,
+                db, name, body.primary_field,
+                limit=body.limit,
+                offset=body.offset,
+                filter_expr=body.filter_expr,
+                output_fields=body.output_fields,
+            )
+        except (DatabaseNotFound, CollectionNotFound, StoreError, BackendError) as e:
+            raise _http_from_store_error(e)
 
     items = [GetVectorItem(**r) for r in rows]
     returned = len(items)
@@ -811,7 +965,7 @@ async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request)
 async def search(db: str, name: str, body: SearchRequest, request: Request):
     store = request.app.state.store
     embedder = request.app.state.embedder
-    settings = getattr(request.app.state, "settings", None)
+    settings = request.app.state.settings
 
     image_query = body.query_image is not None
     if body.query_text is not None:
@@ -823,12 +977,11 @@ async def search(db: str, name: str, body: SearchRequest, request: Request):
                     "call POST /v1/models/{id}/load first"
                 ),
             }})
-        loop = asyncio.get_running_loop()
-        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+        timeout_s = settings.inference_timeout_seconds
         try:
             try:
                 qvec = await asyncio.wait_for(
-                    loop.run_in_executor(None, embedder.embed_query, body.query_text),
+                    run_in_model(embedder.embed_query, body.query_text),
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError:
@@ -851,14 +1004,11 @@ async def search(db: str, name: str, body: SearchRequest, request: Request):
         qimg = _decode_image_or_422(
             request, body.query_image, body.query_image_mime, index=0,
         )
-        loop = asyncio.get_running_loop()
-        timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+        timeout_s = settings.inference_timeout_seconds
         try:
             try:
                 qvec = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, image_embedder.embed_query_image, qimg,
-                    ),
+                    run_in_model(image_embedder.embed_query_image, qimg),
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError:

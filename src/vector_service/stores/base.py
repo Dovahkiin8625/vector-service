@@ -14,8 +14,9 @@ Two-level hierarchy:
 - **Collection** — a vector index living inside a single database. All
   vector operations are scoped by ``(database, collection)``.
 
-All methods are synchronous and blocking. Async dispatch is the caller's
-responsibility (use :func:`asyncio.get_running_loop().run_in_executor`).
+All methods are synchronous and blocking. Async routes dispatch them via
+the isolated store thread pool — ``run_in_store`` in
+:mod:`vector_service.core.threadpools` — never inline on the event loop.
 """
 from __future__ import annotations
 
@@ -68,9 +69,8 @@ class FieldSpec:
     (single) primary key; ``max_length`` is required for ``varchar``.
     The dense vector field is identified by ``dtype == "float_vector"``.
 
-    For a varchar field, ``enable_analyzer`` + ``analyzer`` turn on the
-    Milvus 2.5 text analyzer (paired with a
-    ``sparse_float_vector`` field and a BM25 Function).
+    The derived index stores no text and runs no analyzer: sparse
+    vectors are produced client-side and written as data.
     """
 
     name: str
@@ -80,8 +80,6 @@ class FieldSpec:
     max_length: int | None = None
     nullable: bool = False
     default_value: Any | None = None
-    enable_analyzer: bool = False
-    analyzer: dict | None = None
 
 
 @dataclass
@@ -135,14 +133,17 @@ class VectorStore(ABC):
         vector_field: FieldSpec,
         scalar_fields: list[FieldSpec],
         indexes: list[IndexSpec] | None = None,
+        extra_vector_fields: list[FieldSpec] | None = None,
     ) -> CollectionInfo:
         """Create a collection with a caller-defined schema.
 
         Implementations must enforce at minimum:
 
         - exactly one VARCHAR primary key in ``scalar_fields``
-        - exactly one FLOAT_VECTOR entry in ``vector_field``
-        - one index covering the vector field (auto-default if ``indexes`` is empty)
+        - one primary FLOAT_VECTOR entry (``vector_field``), plus any
+          additional FLOAT_VECTOR entries in ``extra_vector_fields``
+        - one index covering the primary vector field (auto-default if
+          ``indexes`` is empty)
 
         Raises :class:`DatabaseNotFound` or :class:`CollectionAlreadyExists`.
         """
@@ -201,10 +202,14 @@ class VectorStore(ABC):
         ids: list[str],
         vectors: list[list[float]],
         fields: list[dict] | None = None,
+        extra_vectors: dict[str, list[list[float]]] | None = None,
+        sparse_vectors: dict[str, list[dict]] | None = None,
     ) -> None:
         """Insert or update rows. ``fields`` is per-row scalar values
         keyed by scalar field name (excluding the primary key, which is in
-        ``ids``)."""
+        ``ids``). ``extra_vectors`` maps an extra dense vector field name
+        to one vector per row; ``sparse_vectors`` maps a sparse vector
+        field name to one sparse dict (``{term_id: weight}``) per row."""
 
     @abstractmethod
     def delete(
@@ -264,24 +269,22 @@ class VectorStore(ABC):
         ``{"id": <primary>, "vector": None, "fields": {scalar: value}}``.
         """
 
+    @abstractmethod
     def count_rows(
         self,
         database: str,
         collection: str,
         *,
         filter_expr: str | None = None,
-    ) -> int | None:
+    ) -> int:
         """Return an authoritative, tombstone-aware row count.
 
-        Defaults to ``None``, which tells callers to fall back to
-        :meth:`collection_info`'s ``count``. Metadata-based counts can
-        lag deletes (Milvus does not subtract tombstoned rows until
-        compaction), so backends able to run a live ``count(*)`` query
-        — Milvus — override this. When ``filter_expr`` is given, only
-        matching rows are counted (the correct denominator for paged
-        browse results).
+        A live ``count(*)`` query reflects deletes immediately, unlike
+        the metadata count in :meth:`collection_info` (which Milvus
+        does not adjust until compaction). When ``filter_expr`` is
+        given, only matching rows are counted — the correct denominator
+        for paged browse results.
         """
-        return None
 
     @abstractmethod
     def search(
@@ -297,22 +300,21 @@ class VectorStore(ABC):
         """Top-k nearest neighbours in the given (database, collection)."""
 
     @abstractmethod
-    def search_text(
+    def search_sparse(
         self,
         database: str,
         collection: str,
-        sparse_field: str,
-        query_text: str,
+        vector_field: str,
+        query_sparse: dict,
         top_k: int = 10,
         filter_expr: str | None = None,
         output_fields: list[str] | None = None,
     ) -> list[Hit]:
-        """Full-text search over a BM25 sparse field.
+        """Search a sparse vector field with a client-encoded sparse query.
 
-        The server-side analyzer tokenizes ``query_text`` and scores
-        matching rows with BM25; the collection must have a
-        ``sparse_float_vector`` field bound to an analyzed varchar via
-        a BM25 Function.
+        ``query_sparse`` is the ``{term_id: weight}`` vector produced by
+        the retrieval-side sparse encoder (client-side BM25); the index
+        is a ``SPARSE_INVERTED_INDEX`` with ``IP`` metric.
         """
 
     # ---- lifecycle ----

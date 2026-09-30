@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING
 
-from vector_service.core.config import RerankerSettings, Settings, get_settings
+from vector_service.core.config import RerankerSettings, get_settings
 from vector_service.core.errors import RerankerNotLoaded
 from vector_service.embeddings import _common
 from vector_service.rerankers.base import Reranker, ScoredHit
@@ -18,26 +18,11 @@ class CrossEncoderReranker(Reranker):
 
     model_name = "bge-reranker-v2-m3"
 
-    def __init__(self, settings: Settings | RerankerSettings | None = None) -> None:
-        # Two call sites feed us different shapes:
-        #   1. Lifespan eager-load passes the full ``Settings`` (lifespan.py
-        #      builds the reranker with the root config so it can also pass
-        #      it to embedders/multimodal embedders).
-        #   2. The hot-load route ``POST /v1/models/{id}/load`` passes the
-        #      ``RerankerSettings`` block directly (the family table in
-        #      ``api/models.py`` resolves nested blocks).
-        # Unwrap the full Settings when needed so both paths work without
-        # requiring the caller to know which form to send. We duck-type
-        # on ``.reranker`` rather than ``isinstance`` so test stubs that
-        # mimic ``RerankerSettings`` are accepted too.
-        if settings is None:
-            s = get_settings().reranker
-        elif hasattr(settings, "reranker") and not hasattr(settings, "device"):
-            # Likely the full Settings wrapper (has nested .reranker).
-            s = settings.reranker
-        else:
-            # Already the reranker block.
-            s = settings
+    def __init__(self, settings: RerankerSettings | None = None) -> None:
+        # Both call sites (lifespan eager load and the hot-load route)
+        # pass the nested ``RerankerSettings`` block; ``None`` means use
+        # the process settings.
+        s = get_settings().reranker if settings is None else settings
         self._device: str = _common.resolve_device(s.device)
         self._batch_size: int = s.batch_size
         self._max_length: int = s.max_length
@@ -116,8 +101,9 @@ class CrossEncoderReranker(Reranker):
                 from modelscope import snapshot_download
             except ImportError as exc:  # pragma: no cover
                 raise RerankerNotLoaded(
-                    "modelscope is not installed; install the [embed] extra "
-                    "or switch download_source to 'huggingface'"
+                    "modelscope is not installed (run `uv sync` to install "
+                    "all runtime dependencies) or switch download_source "
+                    "to 'huggingface'"
                 ) from exc
             snapshot_download(
                 self._ms_repo, local_dir=self._model_dir

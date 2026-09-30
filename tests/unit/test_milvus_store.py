@@ -141,7 +141,7 @@ def test_validate_indexes_requires_at_least_one():
 
 def test_validate_indexes_unknown_field_raises():
     bad = IndexSpec(field_name="other")
-    with pytest.raises(StoreError, match="not the vector field"):
+    with pytest.raises(StoreError, match="neither a vector field"):
         _validate_indexes(_vec(), [bad])
 
 

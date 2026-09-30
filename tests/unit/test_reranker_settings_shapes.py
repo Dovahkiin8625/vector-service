@@ -1,21 +1,10 @@
-"""Regression test for the hot-load settings-shape mismatch.
+"""Constructor contract for ``CrossEncoderReranker``.
 
-Bug: ``CrossEncoderReranker.__init__`` used to assume the caller always
-passed the full :class:`Settings` instance and reached into
-``.reranker``. The hot-load route ``POST /v1/models/{id}/load`` instead
-passes the ``RerankerSettings`` block directly (the family table in
-``api/models.py`` resolves nested blocks). That combination raised
-``AttributeError: 'RerankerSettings' object has no attribute 'reranker'``
-and a 500 instead of a 503 ``model_load_failed`` envelope.
-
-The constructor now accepts three shapes:
-- the full ``Settings`` (legacy lifespan path),
-- the ``RerankerSettings`` block (hot-load path),
-- ``None`` (falls back to ``get_settings().reranker``).
-
-This test pins the constructor contract by instantiating with each
-shape and verifying the resulting attributes are sourced from the
-correct block.
+Both call sites (lifespan eager load and the hot-load route
+``POST /v1/models/{id}/load``) pass the nested ``RerankerSettings``
+block; ``None`` falls back to ``get_settings().reranker``. The tests
+below pin that contract and verify the resulting attributes are
+sourced from the passed block.
 """
 from __future__ import annotations
 
@@ -41,13 +30,6 @@ class _FakeRerankerSettings:
         self.ms_repo = ms_repo
 
 
-class _FakeFullSettings:
-    """Stand-in for the outer ``Settings`` — must expose ``.reranker``."""
-
-    def __init__(self, block):
-        self.reranker = block
-
-
 def test_constructor_accepts_reranker_settings_block():
     """Hot-load path: factory passes a RerankerSettings block directly."""
     block = _FakeRerankerSettings(device="cuda", batch_size=32, max_length=512)
@@ -59,17 +41,6 @@ def test_constructor_accepts_reranker_settings_block():
     # Auto-discovery fields round-trip too.
     assert r._auto_download is False
     assert r._download_source == "modelscope"
-
-
-def test_constructor_accepts_full_settings_with_reranker_attr():
-    """Legacy lifespan path: passes the root Settings and expects .reranker unwrap."""
-    block = _FakeRerankerSettings(device="cpu", batch_size=16, max_length=128)
-    full = _FakeFullSettings(block)
-    r = CrossEncoderReranker(settings=full)  # type: ignore[arg-type]
-
-    assert r._device == "cpu"
-    assert r._batch_size == 16
-    assert r._max_length == 128
 
 
 def test_constructor_attributes_match_passed_block():

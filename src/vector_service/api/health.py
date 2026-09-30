@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from vector_service.core.metrics import get_content_type, render_metrics
+from vector_service.core.threadpools import run_in_store
 
 router = APIRouter(tags=["health"])
 
@@ -35,8 +36,8 @@ def _reranker_loaded(request: Request) -> bool:
     Looks for the `_impl` attribute set by concrete rerankers after a
     successful load. Diagnostic only — does NOT gate `/readyz` status.
     """
-    reranker = getattr(request.app.state, "reranker", None)
-    return reranker is not None and getattr(reranker, "_impl", None) is not None
+    reranker = request.app.state.reranker
+    return reranker is not None and reranker._impl is not None
 
 
 def _image_embedder_loaded(request: Request) -> bool:
@@ -46,7 +47,7 @@ def _image_embedder_loaded(request: Request) -> bool:
     embedders after a successful load. Falls back to True for embedders
     that don't expose an internal handle (e.g. lightweight fakes).
     """
-    img = getattr(request.app.state, "image_embedder", None)
+    img = request.app.state.image_embedder
     if img is None:
         return False
     for attr in ("_impl", "_model"):
@@ -66,16 +67,16 @@ async def readyz(request: Request):
     per-family load status for observability so a single probe
     surfaces both the store health and the model roster state.
     """
-    store = getattr(request.app.state, "store", None)
-    embedder = getattr(request.app.state, "embedder", None)
-    image_embedder = getattr(request.app.state, "image_embedder", None)
+    store = request.app.state.store
+    embedder = request.app.state.embedder
+    image_embedder = request.app.state.image_embedder
 
     # Probe the store with a cheap list call. Fail open if it errors
     # so /readyz stays informative during transient outages.
     store_ok = False
     if store is not None:
         try:
-            store.list_databases()
+            await run_in_store(store.list_databases)
             store_ok = True
         except Exception:
             store_ok = False
@@ -83,13 +84,9 @@ async def readyz(request: Request):
     embedder_state = "loaded" if _embedder_loaded(embedder) else "not_loaded"
     image_state = "loaded" if _image_embedder_loaded(request) else "not_loaded"
     reranker_state = "ready" if _reranker_loaded(request) else "not_loaded"
+    mm = request.app.state.multimodal_embedder
     mm_state = (
-        "loaded"
-        if getattr(request.app.state, "multimodal_embedder", None)
-        and getattr(
-            getattr(request.app.state, "multimodal_embedder", None), "_model", None
-        ) is not None
-        else "not_loaded"
+        "loaded" if mm is not None and mm._model is not None else "not_loaded"
     )
 
     if store is None:

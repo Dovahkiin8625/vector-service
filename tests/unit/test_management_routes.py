@@ -28,16 +28,20 @@ from vector_service.core.middleware import RequestIDMiddleware
 from vector_service.stores.base import CollectionInfo, DatabaseInfo, Hit
 
 
+class _Settings:
+    inference_timeout_seconds = 60.0
+
+
 class FakeStore:
     backend_name = "fake"
 
     def __init__(self):
         self.calls: list[tuple] = []
-        # Live-count override consulted by POST .../rows. ``None`` makes
-        # the route fall back to collection_info().count (metadata),
-        # mimicking a backend without count_rows; tests set an int to
-        # mimic Milvus's authoritative, tombstone-aware count(*).
-        self.count_rows_result: int | None = None
+        # Live count consulted by POST .../rows — Milvus's
+        # authoritative, tombstone-aware count(*). Defaults to the same
+        # number collection_info reports; tests overwrite it to mimic a
+        # post-delete divergence.
+        self.count_rows_result: int = 3
 
     # database
     def list_databases(self):
@@ -163,13 +167,11 @@ class FakeStore:
         ))
         if collection == "missing":
             raise CollectionNotFound("missing")
-        return None
 
     def drop_index(self, database, collection, *, field_name):
         self.calls.append(("drop_index", database, collection, field_name))
         if collection == "missing":
             raise CollectionNotFound("missing")
-        return None
 
     def search(self, database, collection, vector_field, query_vector, top_k=10, filter_expr=None, output_fields=None):
         self.calls.append(("search", database, collection, vector_field, top_k, filter_expr, output_fields))
@@ -200,6 +202,58 @@ class FakeStore:
 
     def close(self):
         pass
+
+
+class FakeRepo:
+    def __init__(self):
+        self.calls: list[tuple] = []
+        #: Hashes the delete methods will report as orphaned; tests set
+        #: this to verify content-addressed blobs are dropped.
+        self.orphan_hashes: list[str] = []
+
+    def is_corpus_collection(self, database, collection):
+        # These unit tests exercise the Milvus-backed browse path.
+        return False
+
+    def corpus_collections(self, database):
+        self.calls.append(("corpus_collections", database))
+        return []
+
+    def list_bindings(self, database):
+        return []
+
+    def get_binding(self, database, collection):
+        # Default: no binding — physical name == logical name.
+        return None
+
+    def delete_for_database(self, database):
+        self.calls.append(("delete_for_database", database))
+        return list(self.orphan_hashes)
+
+    def delete_for_collection(self, database, collection):
+        self.calls.append(("delete_for_collection", database, collection))
+        return list(self.orphan_hashes)
+
+    def delete_chunks(self, chunk_ids):
+        self.calls.append(("delete_chunks", tuple(chunk_ids)))
+        return list(self.orphan_hashes)
+
+
+class FakeBlobStore:
+    def __init__(self):
+        self.deleted: list[str] = []
+
+    def delete(self, digest):
+        self.deleted.append(digest)
+        return True
+
+
+class FakeBM25:
+    def __init__(self):
+        self.discarded: list[tuple] = []
+
+    def discard(self, database, collection):
+        self.discarded.append((database, collection))
 
 
 class FakeEmbedder:
@@ -274,7 +328,11 @@ def app():
     a.add_exception_handler(HTTPException, _http_error_handler)
     a.add_exception_handler(RequestValidationError, _validation_handler)
     a.state.store = FakeStore()
+    a.state.corpus = FakeRepo()
+    a.state.blob_store = FakeBlobStore()
+    a.state.bm25 = FakeBM25()
     a.state.embedder = FakeEmbedder()
+    a.state.settings = _Settings()
     return a
 
 
@@ -311,6 +369,19 @@ def test_drop_database(client):
     r = client.delete("/v1/databases/alpha")
     assert r.status_code == 200
     assert r.json() == {"deleted": "alpha"}
+
+
+def test_drop_database_corpus_backed_cleans_derived_state(client):
+    repo = client.app.state.corpus
+    bm25 = client.app.state.bm25
+    repo.corpus_collections = lambda name: ["c1", "c2"]
+    repo.orphan_hashes = ["h1", "h2"]
+    r = client.delete("/v1/databases/alpha")
+    assert r.status_code == 200
+    assert ("delete_for_database", "alpha") in repo.calls
+    assert set(bm25.discarded) == {("alpha", "c1"), ("alpha", "c2")}
+    # Orphaned originals dropped from the content-addressed store.
+    assert client.app.state.blob_store.deleted == ["h1", "h2"]
 
 
 def test_database_info_not_found(client):
@@ -476,6 +547,18 @@ def test_drop_collection_not_found(client):
     r = client.delete("/v1/databases/alpha/collections/missing")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "collection_not_found"
+
+
+def test_drop_collection_corpus_backed_cleans_corpus_and_bm25(client):
+    repo = client.app.state.corpus
+    bm25 = client.app.state.bm25
+    repo.is_corpus_collection = lambda db, coll: True
+    repo.orphan_hashes = ["h3"]
+    r = client.delete("/v1/databases/alpha/collections/c1")
+    assert r.status_code == 200
+    assert ("delete_for_collection", "alpha", "c1") in repo.calls
+    assert bm25.discarded == [("alpha", "c1")]
+    assert client.app.state.blob_store.deleted == ["h3"]
 
 
 # ---- vectors / search ----
@@ -703,11 +786,10 @@ def test_browse_filter_expr_too_long_rejected(client):
     assert r.json()["error"]["code"] == "invalid_request"
 
 
-# ---- browse total: live count_rows vs metadata fallback ----
+# ---- browse total: live count_rows ----
 
-def test_browse_total_falls_back_to_metadata_count(client):
-    """With count_rows returning None, total comes from collection_info
-    (metadata count=3), but count_rows is still consulted."""
+def test_browse_total_comes_from_live_count_rows(client):
+    """total is the live count_rows(*) result, not the metadata count."""
     r = client.post(
         "/v1/databases/alpha/collections/c1/rows",
         json={"primary_field": "id"},
@@ -863,6 +945,49 @@ def test_delete_collection_not_found(client):
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "collection_not_found"
+
+
+def test_delete_corpus_backed_ids_mirrors_into_corpus(client):
+    # Flip the collection to corpus-backed; the deleted chunk ids must
+    # reach the system of record after the store delete succeeds.
+    client.app.state.corpus.is_corpus_collection = lambda db, coll: True
+    client.app.state.corpus.orphan_hashes = ["h4"]
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "ids": ["a", "b"]},
+    )
+    assert r.status_code == 200
+    assert ("delete_chunks", ("a", "b")) in client.app.state.corpus.calls
+    assert client.app.state.blob_store.deleted == ["h4"]
+
+
+def test_delete_corpus_backed_filter_resolves_then_mirrors(client):
+    # Filter mode cannot be re-resolved after the delete: the route must
+    # page browse FIRST, then delete the same chunk ids from the corpus.
+    client.app.state.corpus.is_corpus_collection = lambda db, coll: True
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "filter_expr": "category == 'mouse'"},
+    )
+    assert r.status_code == 200
+    store_calls = client.app.state.store.calls
+    browse_idx = max(i for i, c in enumerate(store_calls) if c[0] == "browse")
+    delete_idx = max(i for i, c in enumerate(store_calls) if c[0] == "delete")
+    assert browse_idx < delete_idx
+    # FakeStore browse returns ids k-0/k-1 on its single page.
+    assert ("delete_chunks", ("k-0", "k-1")) in client.app.state.corpus.calls
+
+
+def test_delete_non_corpus_collection_skips_corpus(client):
+    # Default FakeRepo says "not corpus": no chunk deletions there.
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/vectors/delete",
+        json={"primary_field": "id", "ids": ["a"]},
+    )
+    assert r.status_code == 200
+    assert not [
+        c for c in client.app.state.corpus.calls if c[0] == "delete_chunks"
+    ]
 
 
 # ---- index management ----

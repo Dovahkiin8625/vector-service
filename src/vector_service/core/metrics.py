@@ -142,6 +142,78 @@ RERANK_REQUESTS_TOTAL = Counter(
 )
 
 
+# ---- retrieval pipeline ----------------------------------------------
+
+RETRIEVAL_REQUESTS_TOTAL = Counter(
+    "vs_retrieval_requests_total",
+    "Total retrieval pipeline runs that reached execution.",
+    registry=REGISTRY,
+)
+
+RETRIEVAL_CHANNEL_RUNS_TOTAL = Counter(
+    "vs_retrieval_channel_runs_total",
+    "Recall legs fired, labelled by channel and outcome (ok/empty).",
+    labelnames=("channel", "status"),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_RECALLED_HITS_TOTAL = Counter(
+    "vs_retrieval_recalled_hits_total",
+    "Raw hits returned at recall, per channel (recall volume).",
+    labelnames=("channel",),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_FUSION_INPUT_TOTAL = Counter(
+    "vs_retrieval_fusion_input_total",
+    "Unique chunks entering fusion, per fusion method.",
+    labelnames=("method",),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_FUSION_OUTPUT_TOTAL = Counter(
+    "vs_retrieval_fusion_output_total",
+    "Chunks emitted by fusion, per fusion method. Output/input ratio "
+    "is the post-fusion survival rate.",
+    labelnames=("method",),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_CHANNEL_HIT_REQUESTS_TOTAL = Counter(
+    "vs_retrieval_channel_hit_requests_total",
+    "Requests in which a channel contributed at least one final result "
+    "(channel hit rate denominator: vs_retrieval_requests_total).",
+    labelnames=("channel",),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_RERANK_STAGE_DURATION_SECONDS = Histogram(
+    "vs_retrieval_rerank_stage_duration_seconds",
+    "Rerank stage latency inside the retrieval pipeline.",
+    labelnames=("model",),
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_RERANK_INPUT_CHARS = Histogram(
+    "vs_retrieval_rerank_input_chars",
+    "Total candidate-text characters fed to the rerank stage.",
+    labelnames=("model",),
+    buckets=(
+        100, 500, 1000, 2500, 5000, 10000, 20000, 50000, 100000,
+    ),
+    registry=REGISTRY,
+)
+
+RETRIEVAL_RERANK_CANDIDATES = Histogram(
+    "vs_retrieval_rerank_candidates",
+    "Number of candidate chunks fed to the rerank stage.",
+    labelnames=("model",),
+    buckets=(1, 5, 10, 20, 30, 50, 75, 100),
+    registry=REGISTRY,
+)
+
+
 def render_metrics() -> str:
     """Render Prometheus exposition format text."""
     return generate_latest(REGISTRY).decode("utf-8")

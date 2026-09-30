@@ -283,3 +283,143 @@ def test_search_dimension_mismatch(store):
         s.search(db_name, coll, "vector", [1.0, 2.0])  # 2-dim query
     s.drop_collection(db_name, coll)
     s.drop_database(db_name)
+
+
+# ---- multi-vector + BM25 -----------------------------------------------
+
+# Dim here is tiny (4) so vectors can be hand-written; production uses
+# embedder.dim (BGE-M3 = 1024) for both vector fields.
+_SCHEMA_DIM = 4
+
+
+def _text_scalar() -> FieldSpec:
+    return FieldSpec(name="text", dtype="varchar", max_length=2048)
+
+
+def _sparse_scalar() -> FieldSpec:
+    return FieldSpec(name="sparse", dtype="sparse_float_vector")
+
+
+def _summary_scalar() -> FieldSpec:
+    return FieldSpec(name="summary", dtype="varchar", max_length=2048,
+                     nullable=True)
+
+
+def _summary_vec_field(dim: int = _SCHEMA_DIM) -> FieldSpec:
+    return FieldSpec(name="summary_vector", dtype="float_vector", dim=dim)
+
+
+def _ingest_indexes() -> list[IndexSpec]:
+    return [
+        IndexSpec(field_name="vector", metric_type="cosine", index_type="HNSW",
+                  params={"M": 16, "efConstruction": 200}),
+        IndexSpec(field_name="sparse", metric_type="ip",
+                  index_type="SPARSE_INVERTED_INDEX", params={}),
+        IndexSpec(field_name="summary_vector", metric_type="cosine",
+                  index_type="HNSW",
+                  params={"M": 16, "efConstruction": 200}),
+    ]
+
+
+def test_multi_vector_and_bm25_roundtrip(store):
+    """The multi-vector schema against real Milvus:
+
+    - two FLOAT_VECTOR fields round-trip through create/upsert/search;
+    - client-encoded sparse dicts are written as data (no server-side
+      analyzer / Function) and ranked via IP;
+    - regression: sparse search must NOT request the sparse field back —
+      the server rejects "not allowed to retrieve raw data of field sparse".
+    """
+    s, db_name = store
+    s.create_database(db_name)
+    coll = f"c_{secrets.token_hex(4)}"
+    info = s.create_collection(
+        db_name, coll,
+        primary_field="id",
+        vector_field=_vec_field(dim=_SCHEMA_DIM),
+        scalar_fields=[
+            _id_scalar(), _text_scalar(), _sparse_scalar(), _summary_scalar(),
+        ],
+        indexes=_ingest_indexes(),
+        extra_vector_fields=[_summary_vec_field()],
+    )
+    by_name = {f["name"]: f for f in info.fields}
+    assert by_name["vector"]["dim"] == _SCHEMA_DIM
+    assert by_name["summary_vector"]["dim"] == _SCHEMA_DIM
+    assert {i.field_name for i in _ingest_indexes()} == {
+        "vector", "sparse", "summary_vector",
+    }
+
+    ids = ["a", "b", "c"]
+    vecs = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+    # Summary vectors deliberately point in different directions than the
+    # chunk-text vectors so the two ANN legs are independently testable.
+    summary_vecs = [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+    ]
+    fields = [
+        {"text": "向量数据库支持高维相似度检索", "summary": "向量库做相似检索"},
+        {"text": "全文检索依靠分词与倒排索引", "summary": "全文检索用倒排索引"},
+        {"text": "混合检索融合多路召回结果", "summary": "混合检索融合多路召回"},
+    ]
+    # Sparse vectors come precomputed: each row gets a distinct term so
+    # the IP-ranked sparse leg is independently testable.
+    sparse_rows = [{1: 1.0}, {2: 1.0}, {3: 1.0}]
+    s.upsert(
+        db_name, coll, "id", "vector", ids, vecs, fields,
+        extra_vectors={"summary_vector": summary_vecs},
+        sparse_vectors={"sparse": sparse_rows},
+    )
+
+    import time as _t
+    _t.sleep(2.0)
+
+    projection = ["text", "summary"]
+
+    # Dense ANN over the chunk-text vector.
+    hits = s.search(db_name, coll, "vector", vecs[0], top_k=2,
+                    output_fields=projection)
+    assert hits and hits[0].id == "a"
+    assert hits[0].fields.get("summary") == "向量库做相似检索"
+    assert "sparse" not in hits[0].fields
+
+    # Dense ANN over the summary vector — closest row differs from the
+    # chunk-text leg by construction.
+    sum_hits = s.search(db_name, coll, "summary_vector", summary_vecs[0],
+                        top_k=2, output_fields=projection)
+    assert sum_hits and sum_hits[0].id == "a"
+    assert sum_hits[0].fields.get("text")
+
+    # Sparse full-text leg (client-encoded query, IP index). This is the
+    # regression: the adapter must never put ``sparse`` in output_fields —
+    # Milvus raises code=1100 "not allowed to retrieve raw data of field
+    # sparse". Term 1 is unique to row "a".
+    bm25_hits = s.search_sparse(db_name, coll, "sparse", {1: 1.0},
+                                top_k=3, output_fields=projection)
+    assert bm25_hits, "sparse leg returned no matches"
+    assert bm25_hits[0].id == "a"
+    for h in bm25_hits:
+        assert "sparse" not in h.fields
+        assert h.fields.get("text")
+
+    # Browse default projection must also drop the non-retrievable
+    # sparse field (and both vector fields).
+    browsed = s.browse(db_name, coll, "id", limit=10)
+    assert {r["id"] for r in browsed} == set(ids)
+    for r in browsed:
+        assert "sparse" not in r["fields"]
+        assert "vector" not in r["fields"]
+        assert "summary_vector" not in r["fields"]
+
+    # Query-vector dim validation is per target field.
+    with pytest.raises(DimensionMismatch):
+        s.search(db_name, coll, "summary_vector", [1.0, 2.0])
+
+    s.drop_collection(db_name, coll)
+    s.drop_database(db_name)

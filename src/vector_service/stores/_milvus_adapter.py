@@ -1,19 +1,12 @@
-"""Adapter around pymilvus ``MilvusClient`` (the post-2.4 non-ORM API).
+"""Adapter around pymilvus ``MilvusClient`` (the non-ORM API).
 
 This module is the only place that talks to pymilvus. ``MilvusStore``
 delegates every operation here so we can keep the public ``VectorStore``
 interface clean and isolate the SDK quirks (error codes, has-collection
-pre-checks, scalar/vector type mapping, ``get`` returning string reprs
-on 2.4.x, ...) behind a single boundary.
-
-Two pymilvus subsystems are in play:
-
-- ``MilvusClient`` — collection / vector CRUD, search / query, schema
-  introspection, ``using_database``. This is the API that pymilvus
-  will keep in 3.x.
-- ``pymilvus.db`` — database-level operations (``list_database`` /
-  ``create_database`` / ``drop_database``). Not yet on ``MilvusClient``
-  on 2.4, so we open a separate ORM connection just for those calls.
+pre-checks, scalar/vector type mapping, ``get`` returning string reprs,
+...) behind a single boundary. ``MilvusClient`` covers everything,
+including database-level operations (``list_databases`` /
+``create_database`` / ``drop_database``).
 
 The adapter enforces its own locking for ``using_database`` because
 pymilvus alias / client state is process-global; concurrent FastAPI
@@ -35,11 +28,7 @@ from typing import Any
 
 from pymilvus import (
     DataType,
-    Function,
-    FunctionType,
     MilvusClient,
-    connections,
-    db as milvus_db,
 )
 from pymilvus.exceptions import MilvusException
 
@@ -64,10 +53,10 @@ _SCHEMA_CACHE_TTL_S = 300.0
 
 log = get_logger(__name__)
 
-# pymilvus error codes (stable across 2.4.x; see pymilvus/exception.py)
+# pymilvus error codes (see pymilvus/exception.py)
 _ERR_DB_NOT_FOUND = 800
-_ERR_COLLECTION_NOT_FOUND = 800  # collection not found also reports 800 on 2.4
-_ERR_DB_ALREADY_EXISTS = 1100  # "database already exist" in 2.4.x
+_ERR_COLLECTION_NOT_FOUND = 800  # collection not found also reports 800
+_ERR_DB_ALREADY_EXISTS = 1100  # "database already exist"
 _ERR_NOT_CONNECTED = 1
 
 # Scalar dtype map (public name → pymilvus DataType). Float_vector is
@@ -85,7 +74,7 @@ _SCALAR_DTYPE = {
     "sparse_float_vector": DataType.SPARSE_FLOAT_VECTOR,
 }
 
-_METRIC = {"cosine": "COSINE", "ip": "IP", "l2": "L2", "bm25": "BM25"}
+_METRIC = {"cosine": "COSINE", "ip": "IP", "l2": "L2"}
 _INV_METRIC = {v: k for k, v in _METRIC.items()}
 
 
@@ -106,19 +95,16 @@ class MilvusAdapter:
         token: str = "",
         timeout: float = 30.0,
         db_name: str = "default",
-        alias: str = "default",
     ) -> None:
         self._uri = uri
         self._user = user
         self._password = password
         self._token = token
         self._timeout = float(timeout)
-        self._alias = alias
         self._bound_db = db_name
 
         self._client: MilvusClient | None = None
         self._lock = threading.Lock()
-        self._orm_connected = False
         # Schema cache: ``(database, collection)`` → ``(expires_at, value)``.
         # Reads happen on every upsert/get/delete/search; writes happen
         # only inside ``create_collection`` / ``drop_collection`` /
@@ -146,17 +132,6 @@ class MilvusAdapter:
             self._client = MilvusClient(**kwargs)
         except Exception as e:
             raise BackendError(f"failed to connect to Milvus at {self._uri}: {e}") from e
-
-        # Separate ORM connection for db.* helpers. Sharing with MilvusClient
-        # is unsupported because db.* uses the ORM registry, while MilvusClient
-        # uses its own connection pool.
-        try:
-            connections.connect(alias=self._alias, uri=self._uri, timeout=self._timeout,
-                                user=self._user or "", password=self._password or "",
-                                token=self._token or "")
-            self._orm_connected = True
-        except Exception:
-            self._orm_connected = False
 
     def _using_db(self, db_name: str) -> None:
         """Bind the client to a database. Serialised — pymilvus alias
@@ -189,12 +164,6 @@ class MilvusAdapter:
             except Exception:
                 pass
             self._client = None
-        if self._orm_connected:
-            try:
-                connections.disconnect(self._alias)
-            except Exception:
-                pass
-            self._orm_connected = False
 
     # ------------------------------------------------------------------
     # databases
@@ -203,7 +172,7 @@ class MilvusAdapter:
     def list_databases(self) -> list[str]:
         self._ensure_connected()
         try:
-            return sorted(milvus_db.list_database(using=self._alias))
+            return sorted(self._client.list_databases())
         except Exception as e:
             raise BackendError(f"list_databases failed: {e}") from e
 
@@ -214,7 +183,7 @@ class MilvusAdapter:
                 f"database {name!r} already exists", name=name
             )
         try:
-            milvus_db.create_database(name, using=self._alias)
+            self._client.create_database(name)
         except MilvusException as e:
             msg = str(e).lower()
             if e.code == _ERR_DB_ALREADY_EXISTS or "already exist" in msg:
@@ -231,8 +200,8 @@ class MilvusAdapter:
 
     def drop_database(self, name: str) -> None:
         self._ensure_connected()
-        # pymilvus 2.4's db.drop_database is a no-op when the database
-        # doesn't exist; check first so callers get a clean 404.
+        # drop_database is a no-op when the database doesn't exist;
+        # check first so callers get a clean 404.
         if name not in self.list_databases():
             raise DatabaseNotFound(
                 f"database {name!r} does not exist", name=name
@@ -262,7 +231,7 @@ class MilvusAdapter:
                     f"drop_collection {c!r} in database {name!r} failed: {e}"
                 ) from e
         try:
-            milvus_db.drop_database(name, using=self._alias)
+            self._client.drop_database(name)
         except MilvusException as e:
             if e.code == _ERR_DB_NOT_FOUND:
                 raise DatabaseNotFound(
@@ -351,6 +320,7 @@ class MilvusAdapter:
         vector_metric: str,
         scalar_fields: list[dict[str, Any]],
         indexes: list[dict[str, Any]],
+        extra_vector_fields: list[dict[str, Any]] | None = None,
     ) -> None:
         self._ensure_connected()
         self._using_db(database)
@@ -361,17 +331,19 @@ class MilvusAdapter:
         sparse_names = {
             f["name"] for f in scalar_fields if f["dtype"] == "sparse_float_vector"
         }
+        extra_names = {f["name"] for f in extra_vector_fields or []}
         for ip in indexes:
             target = ip.get("field_name")
             metric = ip.get("metric_type")
-            if target == vector_field_name:
+            if target == vector_field_name or target in extra_names:
                 allowed = ("cosine", "ip", "l2")
             elif target in sparse_names:
-                allowed = ("bm25",)
+                allowed = ("ip",)
             else:
                 raise StoreError(
-                    f"index target {target!r} is neither the vector field "
-                    f"{vector_field_name!r} nor a sparse field {sorted(sparse_names)}"
+                    f"index target {target!r} is neither a vector field "
+                    f"({vector_field_name!r} / {sorted(extra_names)}) "
+                    f"nor a sparse field {sorted(sparse_names)}"
                 )
             if metric not in allowed:
                 raise StoreError(
@@ -383,7 +355,6 @@ class MilvusAdapter:
             schema = self._client.create_schema(
                 auto_id=False, enable_dynamic_field=False,
             )
-            analyzed_varchars: list[str] = []
             for f in scalar_fields:
                 dtype = _SCALAR_DTYPE.get(f["dtype"])
                 if dtype is None:
@@ -397,35 +368,16 @@ class MilvusAdapter:
                             f"varchar field {f['name']!r} must set max_length"
                         )
                     kwargs["max_length"] = int(f["max_length"])
-                    if f.get("enable_analyzer"):
-                        kwargs["enable_analyzer"] = True
-                        kwargs["analyzer_params"] = dict(f.get("analyzer") or {})
-                        kwargs["enable_match"] = True
-                        analyzed_varchars.append(f["name"])
-                elif f["dtype"] == "sparse_float_vector":
-                    if f.get("enable_analyzer"):
-                        raise StoreError(
-                            f"sparse field {f['name']!r} cannot have enable_analyzer"
-                        )
-                else:
-                    if f.get("enable_analyzer"):
-                        raise StoreError(
-                            f"field {f['name']!r}: analyzer requires dtype varchar"
-                        )
                 if f.get("nullable"):
                     kwargs["nullable"] = True
                 if f.get("default_value") is not None:
                     kwargs["default_value"] = f["default_value"]
                 schema.add_field(f["name"], dtype, **kwargs)
             schema.add_field(vector_field_name, DataType.FLOAT_VECTOR, dim=vector_dim)
-            if analyzed_varchars and sparse_names:
-                sparse_list = sorted(sparse_names)
-                schema.add_function(Function(
-                    name=f"bm25_{sparse_list[0]}",
-                    function_type=FunctionType.BM25,
-                    input_field_names=analyzed_varchars,
-                    output_field_names=sparse_list,
-                ))
+            for ef in extra_vector_fields or []:
+                schema.add_field(
+                    ef["name"], DataType.FLOAT_VECTOR, dim=int(ef["dim"]),
+                )
         except StoreError:
             raise
         except Exception as e:
@@ -493,7 +445,7 @@ class MilvusAdapter:
         index_type: str = "HNSW",
         params: dict | None = None,
     ) -> None:
-        # Milvus 2.4's create_index replaces an existing index on the
+        # Milvus's create_index replaces an existing index on the
         # same field — there's no separate "rebuild" path. We still
         # best-effort drop the old one first so the operator's intent
         # ("rebuild") reads correctly in the request log and any
@@ -657,10 +609,16 @@ class MilvusAdapter:
                 entry["default_value"] = f["default_value"]
             params = f.get("params") or {}
             if dtype_name == "float_vector":
-                vector_field_name = f["name"]
+                this_dim = int(params.get("dim") or 0)
                 vector_field_names.append(f["name"])
-                vector_dim = int(params.get("dim") or 0)
-                entry["dim"] = vector_dim
+                # First vector field is the canonical one — with
+                # multi-vector collections reassigning here would make
+                # every later entry (e.g. summary_vector) hijack the
+                # collection-level vector_field/dim/metric.
+                if not vector_field_name:
+                    vector_field_name = f["name"]
+                    vector_dim = this_dim
+                entry["dim"] = this_dim
                 fields_out.append(entry)
             else:
                 if "max_length" in params:
@@ -753,6 +711,8 @@ class MilvusAdapter:
         ids: list[str],
         vectors: list[list[float]],
         fields: list[dict[str, Any]] | None,
+        extra_vectors: dict[str, list[list[float]]] | None = None,
+        sparse_vectors: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         self._ensure_connected()
         self._using_db(database)
@@ -770,13 +730,79 @@ class MilvusAdapter:
             raise StoreError(
                 f"vector_field {vector_field!r} is not in the collection schema"
             )
-        expected_dim = schema["dim"]
+        # Per-field dims — multi-vector collections may give every vector
+        # field its own dim, so the check cannot reuse schema["dim"].
+        vector_dims = {
+            f["name"]: int(f["dim"])
+            for f in schema["fields"]
+            if f.get("dtype") == "float_vector"
+        }
+        sparse_fields = {
+            f["name"]
+            for f in schema["fields"]
+            if f.get("dtype") == "sparse_float_vector"
+        }
+        expected_dim = vector_dims.get(vector_field, schema["dim"])
         for i, v in enumerate(vectors):
             if len(v) != expected_dim:
                 raise DimensionMismatch(
-                    f"vector[{i}] dim {len(v)} != collection dim {expected_dim}",
+                    f"vector[{i}] dim {len(v)} != field {vector_field!r} dim "
+                    f"{expected_dim}",
                     expected=expected_dim, got=len(v),
                 )
+
+        extra_batches: dict[str, list[list[float]]] = {}
+        for name, batch in (extra_vectors or {}).items():
+            if name not in vector_dims:
+                raise StoreError(
+                    f"extra vector field {name!r} is not in the collection "
+                    f"schema; declared vector fields: {sorted(vector_dims)}"
+                )
+            if len(batch) != len(ids):
+                raise StoreError(
+                    f"extra vectors for {name!r}: got {len(batch)} rows, "
+                    f"expected {len(ids)} (one per id)"
+                )
+            field_dim = vector_dims[name]
+            for i, v in enumerate(batch):
+                if len(v) != field_dim:
+                    raise DimensionMismatch(
+                        f"extra {name}[{i}] dim {len(v)} != field dim "
+                        f"{field_dim}",
+                        expected=field_dim, got=len(v),
+                    )
+            extra_batches[name] = list(batch)
+
+        sparse_batches: dict[str, list[dict[int, float]]] = {}
+        for name, batch in (sparse_vectors or {}).items():
+            if name not in sparse_fields:
+                raise StoreError(
+                    f"sparse vector field {name!r} is not in the collection "
+                    f"schema; declared sparse fields: {sorted(sparse_fields)}"
+                )
+            if len(batch) != len(ids):
+                raise StoreError(
+                    f"sparse vectors for {name!r}: got {len(batch)} rows, "
+                    f"expected {len(ids)} (one per id)"
+                )
+            for i, sv in enumerate(batch):
+                if not isinstance(sv, dict) or not sv:
+                    raise StoreError(
+                        f"sparse {name}[{i}] must be a non-empty "
+                        f"{{term_id: weight}} dict, got {sv!r}"
+                    )
+                for term_id, weight in sv.items():
+                    if not isinstance(term_id, int) or isinstance(term_id, bool):
+                        raise StoreError(
+                            f"sparse {name}[{i}] term ids must be ints, "
+                            f"got {term_id!r}"
+                        )
+                    if not isinstance(weight, (int, float)) or isinstance(weight, bool):
+                        raise StoreError(
+                            f"sparse {name}[{i}] weights must be numeric, "
+                            f"got {weight!r}"
+                        )
+            sparse_batches[name] = list(batch)
 
         rows: list[dict[str, Any]] = []
         # Cap every VARCHAR value at its declared ``max_length`` (in *bytes*,
@@ -809,6 +835,12 @@ class MilvusAdapter:
                             row[k] = v
                     else:
                         row[k] = v
+            for name, batch in extra_batches.items():
+                row[name] = [float(x) for x in batch[i]]
+            for name, batch in sparse_batches.items():
+                # Sparse rows pass through as plain {int: float} dicts;
+                # pymilvus accepts exactly that shape.
+                row[name] = dict(batch[i])
             rows.append(row)
 
         try:
@@ -848,9 +880,9 @@ class MilvusAdapter:
                 f"primary_field {primary_field!r} is not in the collection schema"
             )
 
-        # pymilvus 2.4's ``delete`` accepts either ``ids`` or ``filter``
-        # (mutually exclusive on its side too). Build the kwargs
-        # accordingly and let the SDK reject ambiguous calls.
+        # ``delete`` accepts either ``ids`` or ``filter`` (mutually
+        # exclusive on its side too). Build the kwargs accordingly and
+        # let the SDK reject ambiguous calls.
         try:
             self._ensure_loaded(collection)
             if has_ids:
@@ -958,8 +990,8 @@ class MilvusAdapter:
                 )
 
         output = list({primary_field, *(output_fields or [])})
-        # pymilvus's ``get`` returns string reprs on 2.4 — fall back to
-        # ``query`` with an explicit filter for structured dicts.
+        # Fetch via ``query`` with an explicit id filter: the result rows
+        # are structured dicts (pymilvus ``get`` stringifies some types).
         expr = " or ".join(
             f'{primary_field} == "{_escape(vid)}"' for vid in ids
         )
@@ -970,6 +1002,9 @@ class MilvusAdapter:
                 filter=expr,
                 output_fields=output,
                 ids=None,
+                # Read-your-writes: a delete issued on another call must be
+                # reflected on the next get (browse uses Strong too).
+                consistency_level="Strong",
             )
         except (CollectionNotFound, StoreError):
             raise
@@ -1006,9 +1041,9 @@ class MilvusAdapter:
         """Paginated, filterable list view over a collection.
 
         Maps directly onto ``MilvusClient.query``: ``limit`` caps the
-        returned row count, ``offset`` skips that many matching rows
-        (pymilvus 2.4 supports both), and ``output_fields`` selects the
-        scalar columns to materialise. The vector column is never
+        returned row count, ``offset`` skips that many matching rows,
+        and ``output_fields`` selects the scalar columns to
+        materialise. The vector column is never
         materialised by default — even if the caller puts it in
         ``output_fields``, we drop it before issuing the RPC, so a
         wide-vector collection cannot be accidentally pulled through
@@ -1036,13 +1071,28 @@ class MilvusAdapter:
             )
 
         # Resolve "all scalar fields" when the caller didn't pick any.
-        # The vector field is always excluded — a 1024-dim float vector
+        # Every float vector field is excluded — a 1024-dim float vector
         # per row would balloon responses on a wide embedder and is not
-        # what a dashboard browse view is for.
+        # what a dashboard browse view is for. Multi-vector collections
+        # carry several (vector / summary_vector / ...).
+        vector_field_names = {
+            f["name"] for f in schema["fields"]
+            if f.get("dtype") == "float_vector"
+        }
+        # Sparse vector data is never retrieved — Milvus rejects raw
+        # reads of sparse fields — so it is excluded even with
+        # include_vectors.
+        sparse_field_names = {
+            f["name"] for f in schema["fields"]
+            if f.get("dtype") == "sparse_float_vector"
+        }
         if output_fields is None:
-            output = [f["name"] for f in schema["fields"]
-                      if include_vectors
-                      or f["name"] != schema.get("vector_field")]
+            output = [
+                f["name"] for f in schema["fields"]
+                if f["name"] not in sparse_field_names
+                and (include_vectors
+                     or f["name"] not in vector_field_names)
+            ]
         else:
             unknown = [
                 f for f in output_fields
@@ -1053,8 +1103,11 @@ class MilvusAdapter:
                     f"unknown output_fields {unknown}; declared: "
                     f"{sorted(schema_names)}"
                 )
-            output = [f for f in output_fields
-                      if include_vectors or f != schema.get("vector_field")]
+            output = [
+                f for f in output_fields
+                if f not in sparse_field_names
+                and (include_vectors or f not in vector_field_names)
+            ]
         # Always include the primary key in the projection so we can
         # wrap each row into the standard ``{"id", "fields"}`` shape.
         if primary_field not in output:
@@ -1105,14 +1158,21 @@ class MilvusAdapter:
                 f"collection {collection!r} does not exist in database {database!r}"
             )
         schema = self.describe_collection(database, collection)
-        if vector_field not in {f["name"] for f in schema["fields"]}:
+        vector_dims = {
+            f["name"]: int(f["dim"])
+            for f in schema["fields"]
+            if f.get("dtype") == "float_vector"
+        }
+        if vector_field not in vector_dims:
             raise StoreError(
-                f"vector_field {vector_field!r} is not in the collection schema"
+                f"vector_field {vector_field!r} is not a float_vector field "
+                f"in the collection schema"
             )
-        expected_dim = schema["dim"]
+        expected_dim = vector_dims[vector_field]
         if len(query_vector) != expected_dim:
             raise DimensionMismatch(
-                f"query dim {len(query_vector)} != collection dim {expected_dim}",
+                f"query dim {len(query_vector)} != field {vector_field!r} dim "
+                f"{expected_dim}",
                 expected=expected_dim, got=len(query_vector),
             )
         if output_fields:
@@ -1135,6 +1195,10 @@ class MilvusAdapter:
                 limit=top_k,
                 filter=filter_expr or "",
                 output_fields=list({vector_field, *(output_fields or [])}),
+                # Strong: rows committed moments ago (ingest, repair)
+                # must be visible — Bounded's staleness window returned
+                # zero results on immediate retrieval.
+                consistency_level="Strong",
             )
         except (DimensionMismatch, StoreError, CollectionNotFound):
             raise
@@ -1162,17 +1226,23 @@ class MilvusAdapter:
                 })
         return hits
 
-    def search_text(
+    def search_sparse(
         self,
         database: str,
         collection: str,
-        sparse_field: str,
-        query_text: str,
+        vector_field: str,
+        query_sparse: dict[int, float],
         top_k: int = 10,
         filter_expr: str | None = None,
         output_fields: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """BM25 full-text leg; mirrors :meth:`search` result shape."""
+        """Search one sparse field with a client-encoded query.
+
+        The caller (client-side BM25 encoder) supplies the
+        ``{term_id: weight}`` vector; the field is a
+        ``SPARSE_INVERTED_INDEX`` with ``IP`` metric. Mirrors
+        :meth:`search` result shape.
+        """
         self._ensure_connected()
         self._using_db(database)
         if not self.has_collection(database, collection):
@@ -1180,34 +1250,42 @@ class MilvusAdapter:
                 f"collection {collection!r} does not exist in database {database!r}"
             )
         schema = self.describe_collection(database, collection)
-        declared = {f["name"] for f in schema["fields"]}
-        if sparse_field not in declared:
+        field_dtypes = {f["name"]: f.get("dtype") for f in schema["fields"]}
+        if field_dtypes.get(vector_field) != "sparse_float_vector":
             raise StoreError(
-                f"sparse_field {sparse_field!r} is not in the collection schema"
+                f"vector_field {vector_field!r} is not a sparse_float_vector "
+                f"in the collection schema"
             )
         if output_fields:
-            unknown = [f for f in output_fields if f not in declared]
+            unknown = [f for f in output_fields if f not in field_dtypes]
             if unknown:
                 raise StoreError(
-                    f"unknown output_fields {unknown}; declared: {sorted(declared)}"
+                    f"unknown output_fields {unknown}; declared: {sorted(field_dtypes)}"
                 )
+        if not query_sparse:
+            # An empty sparse query matches nothing on an IP index; avoid
+            # sending it (Milvus rejects zero-dimensional sparse data).
+            return []
 
         try:
             self._ensure_loaded(collection)
             results = self._client.search(
                 collection,
-                data=[query_text],
-                anns_field=sparse_field,
+                data=[query_sparse],
+                anns_field=vector_field,
                 limit=top_k,
                 filter=filter_expr or "",
-                output_fields=list({sparse_field, *(output_fields or [])}),
-                search_params={"metric_type": "BM25"},
+                output_fields=list(output_fields or []),
+                search_params={"metric_type": "IP"},
+                # Strong for the same reason as dense search: the just
+                # fitted/repaired sparse rows must be searchable now.
+                consistency_level="Strong",
             )
         except (StoreError, CollectionNotFound):
             raise
         except Exception as e:
             raise BackendError(
-                f"search_text failed for {database!r}/{collection!r}: {e}"
+                f"search_sparse failed for {database!r}/{collection!r}: {e}"
             ) from e
 
         hits: list[dict[str, Any]] = []
@@ -1217,7 +1295,7 @@ class MilvusAdapter:
                 fields: dict[str, Any] = {}
                 if isinstance(entity, dict):
                     raw = dict(entity)
-                    raw.pop(sparse_field, None)
+                    raw.pop(vector_field, None)
                     if output_fields:
                         fields = {k: raw.get(k) for k in output_fields}
                     else:
@@ -1232,10 +1310,11 @@ class MilvusAdapter:
     def insert_rows(
         self, database: str, collection: str, rows: list[dict[str, Any]]
     ) -> None:
-        """Raw row insert (migration bulk-copy path).
+        """Raw row insert (bulk-copy path).
 
-        Callers provide every field except function-generated ones:
-        the BM25 Function populates ``sparse`` from ``text`` itself.
+        Callers provide every field explicitly — sparse vectors are not
+        generated server-side; build them with the client-side BM25
+        encoder and include them in each row.
         """
         self._ensure_connected()
         self._using_db(database)

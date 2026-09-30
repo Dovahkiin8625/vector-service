@@ -15,6 +15,7 @@ from vector_service.core.config import Settings
 from vector_service.core.errors import RerankerError, RerankerNotLoaded
 from vector_service.core.logging import get_logger, request_id_var
 from vector_service.core.metrics import RERANK_DURATION_SECONDS, RERANK_REQUESTS_TOTAL
+from vector_service.core.threadpools import run_in_model
 from vector_service.rerankers.base import Reranker
 from vector_service.rerankers.registry import list_reranker_names
 from vector_service.schemas.rerank import (
@@ -42,7 +43,7 @@ def _bad_request(code: str, message: str, extra: dict | None = None) -> HTTPExce
 @router.post("/rerank", response_model=RerankResponse)
 async def rerank(req: RerankRequest, request: Request) -> RerankResponse:
     settings: Settings = request.app.state.settings
-    reranker: Reranker | None = getattr(request.app.state, "reranker", None)
+    reranker: Reranker | None = request.app.state.reranker
     model = req.model or settings.reranker.backend
 
     # ---- registry check (404) --------------------------------------
@@ -55,7 +56,7 @@ async def rerank(req: RerankRequest, request: Request) -> RerankResponse:
         )
 
     # ---- instance check (503) --------------------------------------
-    if reranker is None or getattr(reranker, "_impl", None) is None:
+    if reranker is None or reranker._impl is None:
         raise RerankerNotLoaded(f"reranker {model!r} is not loaded")
 
     # ---- input limits (422) ----------------------------------------
@@ -90,15 +91,12 @@ async def rerank(req: RerankRequest, request: Request) -> RerankResponse:
 
     # ---- inference -------------------------------------------------
     RERANK_REQUESTS_TOTAL.labels(model, "received").inc()
-    loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
-    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+    timeout_s = settings.inference_timeout_seconds
     try:
         try:
             hits = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, reranker.rerank, req.query, req.documents, top_n
-                ),
+                run_in_model(reranker.rerank, req.query, req.documents, top_n),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:

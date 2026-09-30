@@ -440,6 +440,14 @@ def attach_default_slots(app, *, settings) -> None:
     app.state._slot_image = ModelSlot("image_embedder")
     app.state._slot_multimodal = ModelSlot("multimodal_embedder")
     app.state._slot_reranker = ModelSlot("reranker")
+    # Family mirrors start empty; lifespan and the hot-load routes replace
+    # these as instances become available, and inference routes read them
+    # directly — so every mirror must exist from the start.
+    app.state.embedder = None
+    app.state.image_embedder = None
+    app.state.multimodal_embedder = None
+    app.state.reranker = None
+    app.state.parser = None
     # Strong refs to in-flight async-load tasks so the garbage collector
     # can't reap a task mid-load; each task removes itself on completion.
     app.state._model_tasks = set()

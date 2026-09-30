@@ -145,7 +145,7 @@ def text_app():
 
     stub = _StubTextEmbedder()
     stub.load()
-    settings = type("S", (), {})()
+    settings = type("S", (), {"inference_timeout_seconds": 60.0})()
     app, client = _build_app(sim_router, "embedder", stub, settings)
     return app, client, stub
 
@@ -160,6 +160,7 @@ def image_app():
         "S",
         (),
         {
+            "inference_timeout_seconds": 60.0,
             "image_embedding": type(
                 "IE",
                 (),
@@ -184,6 +185,7 @@ def mm_app():
         "S",
         (),
         {
+            "inference_timeout_seconds": 60.0,
             "multimodal_embedding": type(
                 "ME",
                 (),
@@ -324,7 +326,7 @@ def test_text_similarity_unknown_model_returns_404():
 
     stub = _StubTextEmbedder()
     stub.load()
-    app, client = _build_app(sim_router, "embedder", stub, type("S", (), {})())
+    app, client = _build_app(sim_router, "embedder", stub, type("S", (), {"inference_timeout_seconds": 60.0})())
     r = client.post(
         "/v1/text_similarity",
         json={"model": "does-not-exist", "query": "q", "documents": ["d"]},
@@ -384,7 +386,7 @@ def test_image_similarity_unknown_model_returns_404():
     settings = type(
         "S",
         (),
-        {"image_embedding": type("IE", (), {"max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
+        {"inference_timeout_seconds": 60.0, "image_embedding": type("IE", (), {"max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
     )()
     app, client = _build_app(sim_router, "image_embedder", stub, settings)
     r = client.post(
@@ -468,7 +470,7 @@ def test_multimodal_similarity_rejects_item_with_both_text_and_image(mm_app):
 def test_text_similarity_503_when_embedder_not_loaded():
     from vector_service.api.similarity import router as sim_router
 
-    app, client = _build_app(sim_router, "embedder", None, type("S", (), {})())
+    app, client = _build_app(sim_router, "embedder", None, type("S", (), {"inference_timeout_seconds": 60.0})())
     r = client.post(
         "/v1/text_similarity",
         json={"model": "bge-m3", "query": "q", "documents": ["d"]},
@@ -483,7 +485,7 @@ def test_image_similarity_503_when_embedder_not_loaded():
     settings = type(
         "S",
         (),
-        {"image_embedding": type("IE", (), {"max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
+        {"inference_timeout_seconds": 60.0, "image_embedding": type("IE", (), {"max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
     )()
     app, client = _build_app(sim_router, "image_embedder", None, settings)
     r = client.post(
@@ -504,7 +506,7 @@ def test_multimodal_similarity_503_when_embedder_not_loaded():
     settings = type(
         "S",
         (),
-        {"multimodal_embedding": type("ME", (), {"max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
+        {"inference_timeout_seconds": 60.0, "multimodal_embedding": type("ME", (), {"max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
     )()
     app, client = _build_app(sim_router, "multimodal_embedder", None, settings)
     r = client.post(

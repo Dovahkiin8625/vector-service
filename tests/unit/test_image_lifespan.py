@@ -53,9 +53,8 @@ class _FakeStore:
 
 
 def _enable_auto_load():
-    """Flip every family's auto_load to True so the lifespan mirrors
-    the legacy eager-load behaviour these regression tests were
-    written against."""
+    """Flip every family's auto_load to True so the lifespan exercises
+    the eager-load paths these regression tests cover."""
     from vector_service.core.config import get_settings
 
     s = get_settings()
@@ -79,7 +78,7 @@ def patched_lifespan_deps(monkeypatch):
     monkeypatch.setattr(
         lifespan_mod,
         "build_reranker",
-        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+        lambda s: type("R", (), {"model_name": "r", "_impl": object(), "load": lambda self: None})(),
     )
 
     from fastapi import FastAPI
@@ -138,7 +137,7 @@ def test_readyz_reports_image_embedder_not_loaded_on_failure(monkeypatch):
     monkeypatch.setattr(
         lifespan_mod,
         "build_reranker",
-        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+        lambda s: type("R", (), {"model_name": "r", "_impl": object(), "load": lambda self: None})(),
     )
 
     from fastapi import FastAPI
@@ -188,7 +187,7 @@ def test_lifespan_fails_open_on_unexpected_image_embedder_exception(monkeypatch)
     monkeypatch.setattr(
         lifespan_mod,
         "build_reranker",
-        lambda s: type("R", (), {"model_name": "r", "load": lambda self: None})(),
+        lambda s: type("R", (), {"model_name": "r", "_impl": object(), "load": lambda self: None})(),
     )
 
     from fastapi import FastAPI

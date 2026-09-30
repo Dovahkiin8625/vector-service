@@ -131,10 +131,9 @@ def test_bge_m3_load_propagates_model_not_loaded(monkeypatch, tmp_path):
 def _settings_with_auto_load():
     """Build a Settings instance with every family's auto_load flipped on.
 
-    The lifespan tests below mirror the legacy eager-load behaviour; the
-    production default is now ``auto_load=False``, so we have to opt back
-    in via the Settings instance that ``get_settings()`` returns inside
-    lifespan.
+    The lifespan tests below exercise eager loading; the production
+    default is ``auto_load=False``, so opt in via the Settings instance
+    that ``get_settings()`` returns inside lifespan.
     """
     from vector_service.core.config import get_settings
 
@@ -184,11 +183,15 @@ class _RecordingReranker(Reranker):
     def __init__(self, raise_on_load: Exception | None = None):
         self.load_called = 0
         self._raise = raise_on_load
+        # Mirror the CrossEncoderReranker _impl convention so health's
+        # reranker-state check can observe the load.
+        self._impl = None
 
     def load(self) -> None:
         self.load_called += 1
         if self._raise is not None:
             raise self._raise
+        self._impl = object()
 
     def rerank(self, query, documents, top_n=None):
         from vector_service.rerankers.base import ScoredHit
@@ -202,12 +205,6 @@ def test_lifespan_calls_embedder_load(monkeypatch):
     from vector_service.core import lifespan as lifespan_mod
 
     _settings_with_auto_load()
-
-    embedder = _RecordingEmbedder()
-    """The real `lifespan()` must invoke `embedder.load()` exactly once
-    during startup. We monkeypatch `build_store` + `build_embedder` to
-    avoid standing up Milvus or a real model."""
-    from vector_service.core import lifespan as lifespan_mod
 
     embedder = _RecordingEmbedder()
     fake_store = type("S", (), {

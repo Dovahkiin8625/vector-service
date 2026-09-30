@@ -29,6 +29,7 @@ from vector_service.core.errors import (
     SimilarityError,
 )
 from vector_service.core.logging import get_logger
+from vector_service.core.threadpools import run_in_model
 from vector_service.embeddings.image_decoding import (
     decode_batch_or_422,
     fail_envelope_422,
@@ -64,17 +65,16 @@ def _http_error(status: int, code: str, message: str, **extra) -> HTTPException:
 
 
 async def _dispatch_embed(
-    loop: asyncio.AbstractEventLoop,
     fn,
     *args,
     timeout_s: float,
 ):
-    """Wrap ``fn(*args)`` in ``run_in_executor`` + ``wait_for`` and translate
+    """Wrap ``fn(*args)`` in the model pool + ``wait_for`` and translate
     timeouts into ``SimilarityError``. Mirrors the inference-route idiom
     used elsewhere in the API."""
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(None, fn, *args),
+            run_in_model(fn, *args),
             timeout=timeout_s,
         )
     except asyncio.TimeoutError as e:
@@ -116,15 +116,14 @@ async def text_similarity(body: TextSimilarityRequest, request: Request) -> Simi
         )
 
     # ---- 503: embedder not loaded -----------------------------------
-    embedder = getattr(request.app.state, "embedder", None)
+    embedder = request.app.state.embedder
     if embedder is None:
         raise ModelNotLoadedForSimilarity(
             f"text embedder {body.model!r} is not loaded"
         )
 
     metric = validate_metric(body.metric)
-    timeout_s = getattr(request.app.state.settings, "inference_timeout_seconds", 60.0)
-    loop = asyncio.get_running_loop()
+    timeout_s = request.app.state.settings.inference_timeout_seconds
     t0 = time.perf_counter()
 
     try:
@@ -132,7 +131,7 @@ async def text_similarity(body: TextSimilarityRequest, request: Request) -> Simi
         # preprocessing, no asymmetry between sides.
         all_texts = [body.query, *body.documents]
         vecs = await _dispatch_embed(
-            loop, embedder.embed_documents, all_texts,
+            embedder.embed_documents, all_texts,
             timeout_s=timeout_s,
         )
     except SimilarityError as e:
@@ -197,7 +196,7 @@ async def image_similarity(body: ImageSimilarityRequest, request: Request) -> Si
         )
 
     # ---- 503: embedder not loaded -----------------------------------
-    embedder = getattr(request.app.state, "image_embedder", None)
+    embedder = request.app.state.image_embedder
     if embedder is None:
         raise ModelNotLoadedForSimilarity(
             f"image embedder {body.model!r} is not loaded"
@@ -223,13 +222,12 @@ async def image_similarity(body: ImageSimilarityRequest, request: Request) -> Si
         extras = {k: v for k, v in env.items() if k not in ("code", "message")}
         raise _http_error(422, code, message, **extras)
 
-    timeout_s = getattr(request.app.state.settings, "inference_timeout_seconds", 60.0)
-    loop = asyncio.get_running_loop()
+    timeout_s = request.app.state.settings.inference_timeout_seconds
     t0 = time.perf_counter()
 
     try:
         vecs = await _dispatch_embed(
-            loop, embedder.embed_images, decoded,
+            embedder.embed_images, decoded,
             timeout_s=timeout_s,
         )
     except SimilarityError as e:
@@ -295,7 +293,7 @@ async def multimodal_similarity(body: MultimodalSimilarityRequest, request: Requ
         )
 
     # ---- 503: embedder not loaded -----------------------------------
-    embedder = getattr(request.app.state, "multimodal_embedder", None)
+    embedder = request.app.state.multimodal_embedder
     if embedder is None:
         raise ModelNotLoadedForSimilarity(
             f"multimodal embedder {body.model!r} is not loaded"
@@ -343,21 +341,20 @@ async def multimodal_similarity(body: MultimodalSimilarityRequest, request: Requ
         decoded_images = decoded
 
     out_vectors: list[list[float] | None] = [None] * len(all_items)
-    timeout_s = getattr(request.app.state.settings, "inference_timeout_seconds", 60.0)
-    loop = asyncio.get_running_loop()
+    timeout_s = request.app.state.settings.inference_timeout_seconds
     t0 = time.perf_counter()
 
     try:
         if text_payloads:
             text_vecs = await _dispatch_embed(
-                loop, embedder.embed_text, text_payloads,
+                embedder.embed_text, text_payloads,
                 timeout_s=timeout_s,
             )
             for idx, vec in zip(text_indices, text_vecs):
                 out_vectors[idx] = vec
         if decoded_images:
             image_vecs = await _dispatch_embed(
-                loop, embedder.embed_images, decoded_images,
+                embedder.embed_images, decoded_images,
                 timeout_s=timeout_s,
             )
             for idx, vec in zip(image_indices, image_vecs):

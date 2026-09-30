@@ -50,6 +50,9 @@ def test_models_route_includes_image_embedder(monkeypatch):
     # so the route doesn't AttributeError before reaching the image branch.
     app.state.embedder = _StubTextEmbedder()
     app.state.image_embedder = _StubImageEmbedder()
+    app.state.reranker = None
+    app.state.multimodal_embedder = None
+    app.state.parser = None
     client = TestClient(app)
 
     r = client.get("/v1/models")
@@ -101,6 +104,9 @@ def test_get_model_image_dimensions_null_when_id_does_not_match_loaded(monkeypat
     app.include_router(models_router)
     app.state.embedder = _StubTextEmbedder()
     app.state.image_embedder = _LoadedImageEmbedder()
+    app.state.reranker = None
+    app.state.multimodal_embedder = None
+    app.state.parser = None
     client = TestClient(app)
 
     # Query the id that IS loaded — dimensions reported.

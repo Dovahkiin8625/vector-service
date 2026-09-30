@@ -24,6 +24,7 @@ from vector_service.core.errors import (
     UnsupportedMime,
 )
 from vector_service.core.logging import get_logger
+from vector_service.core.threadpools import run_in_model
 from vector_service.embeddings.image_base import ImageInput
 from vector_service.embeddings.image_decoding import (
     decode_batch_or_422,
@@ -94,7 +95,7 @@ async def create_multimodal_embeddings(
             }},
         )
 
-    embedder = getattr(request.app.state, "multimodal_embedder", None)
+    embedder = request.app.state.multimodal_embedder
     if embedder is None:
         raise HTTPException(
             status_code=503,
@@ -165,27 +166,22 @@ async def create_multimodal_embeddings(
 
     # Allocate output slots in input order; fill them per modality.
     out_vectors: list[list[float] | None] = [None] * len(items)
-    loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
-    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+    timeout_s = request.app.state.settings.inference_timeout_seconds
 
     try:
         try:
             if text_payloads:
                 text_vecs = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, embedder.embed_text, text_payloads
-                    ),
+                    run_in_model(embedder.embed_text, text_payloads),
                     timeout=timeout_s,
                 )
                 for idx, vec in zip(text_indices, text_vecs):
                     out_vectors[idx] = vec
             if decoded_images:
                 image_vecs = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, embedder.embed_images, decoded_images
-                    ),
+                    run_in_model(embedder.embed_images, decoded_images),
                     timeout=timeout_s,
                 )
                 for idx, vec in zip(image_indices, image_vecs):

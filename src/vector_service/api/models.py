@@ -29,6 +29,7 @@ from vector_service.core.model_lifecycle import (
     DifferentModelLoaded,
     ModelSlot,
 )
+from vector_service.core.threadpools import run_in_model
 from vector_service.embeddings.image_registry import (
     IMAGE_EMBEDDER_REGISTRY,
     get_image_embedder_class,
@@ -78,12 +79,10 @@ _FamilyLiteral = str  # one of: embedder | image_embedder | multimodal_embedder 
     ),
 )
 def list_models(request: Request):
-    # Defensive ``getattr`` everywhere — the four family slots are
-    # populated by lifespan in production, but test fixtures that build
-    # an app without lifespan never set them, and ``request.app.state``
-    # raises AttributeError on missing keys.
+    # Lifespan always initialises the four family mirrors (empty slot →
+    # None), so read them straight off app.state.
     app_state = request.app.state
-    embedder = getattr(app_state, "embedder", None)
+    embedder = app_state.embedder
     embedder_slot = _slot_for(app_state, "embedder")
     models: list[Model] = []
     for name in list_embedder_names():
@@ -102,7 +101,7 @@ def list_models(request: Request):
         # Rerankers don't expose a dimension. ``loaded`` is the only signal
         # the dashboard (or any other consumer) has to tell apart a loaded
         # reranker from a registered-but-unloaded one.
-        reranker = getattr(app_state, "reranker", None)
+        reranker = app_state.reranker
         reranker_slot = _slot_for(app_state, "reranker")
         loaded = bool(reranker and reranker.model_name == name)
         effective_reranker = reranker if loaded else None
@@ -112,7 +111,7 @@ def list_models(request: Request):
             load_status=load_status, load_error=load_error,
             model_info=_model_info(effective_reranker, reranker_slot),
         ))
-    image_embedder = getattr(app_state, "image_embedder", None)
+    image_embedder = app_state.image_embedder
     image_slot = _slot_for(app_state, "image_embedder")
     for name in list_image_embedder_names():
         # Constraint: only the embedder that is actually loaded on
@@ -136,7 +135,7 @@ def list_models(request: Request):
             load_status=load_status, load_error=load_error,
             model_info=_model_info(effective, image_slot),
         ))
-    multimodal_embedder = getattr(app_state, "multimodal_embedder", None)
+    multimodal_embedder = app_state.multimodal_embedder
     multimodal_slot = _slot_for(app_state, "multimodal_embedder")
     for name in list_multimodal_embedder_names():
         effective = (
@@ -184,9 +183,7 @@ def get_model(model_id: str, request: Request):
     if model_id in list_reranker_names():
         # Rerankers don't expose a dimension; ``loaded`` is the only
         # signal that the queried id is currently held on app.state.
-        # ``getattr`` so test harnesses that skip lifespan (and therefore
-        # never set ``app.state.reranker``) don't crash.
-        reranker = getattr(app_state, "reranker", None)
+        reranker = app_state.reranker
         reranker_slot = _slot_for(app_state, "reranker")
         loaded = bool(reranker and reranker.model_name == model_id)
         load_status, load_error = _row_load_state(reranker_slot, model_id)
@@ -211,7 +208,7 @@ def get_model(model_id: str, request: Request):
             model_info=_model_info(image_embedder if loaded else None, image_slot),
         )
     if model_id in MULTIMODAL_EMBEDDER_REGISTRY:
-        multimodal_embedder = getattr(app_state, "multimodal_embedder", None)
+        multimodal_embedder = app_state.multimodal_embedder
         loaded = bool(multimodal_embedder and multimodal_embedder.model_name == model_id)
         dim = multimodal_embedder.dim if loaded else None
         multimodal_slot = _slot_for(app_state, "multimodal_embedder")
@@ -249,9 +246,9 @@ def get_model(model_id: str, request: Request):
 # and returns HTTP 202; clients poll GET /v1/models for ``load_status``.
 # Unload stays synchronous — it only releases local resources.
 
-# Lookup table: family name → (registry_dict, slot attr on app.state,
-# settings block attribute, class lookup callable, app.state mirror
-# attr). ``settings_attr=None`` means the family expects the full
+# Lookup table: family name → (slot attr on app.state, settings block
+# attribute, class lookup callable, app.state mirror attr).
+# ``settings_attr=None`` means the family expects the full
 # ``Settings`` instance (rather than a nested block) — that's the
 # case for the text embedder, whose constructor signature is
 # ``Embedder(settings: Settings)``. All other families take a nested
@@ -261,7 +258,8 @@ def get_model(model_id: str, request: Request):
 # ``(slot_attr, settings_attr, class_lookup, state_attr)``: the
 # slot attribute on ``app.state``, the nested settings block (or
 # ``None`` to pass the whole ``Settings``), the registry-lookup
-# callable, and the legacy ``app.state.<family>`` mirror name.
+# callable, and the ``app.state.<family>`` mirror that inference
+# routes read for the live instance.
 _FAMILY_TABLE: dict[str, tuple[str, str | None, Callable[[str], Any], str]] = {
     "embedder": (
         "_slot_embedder",
@@ -290,9 +288,7 @@ _FAMILY_TABLE: dict[str, tuple[str, str | None, Callable[[str], Any], str]] = {
 }
 
 # Registry lookup is centralised here so we don't import four different
-# registries inline. We pull the registry dict from the ``embeddings``
-# / ``rerankers`` subpackages rather than from the module-level names
-# in this file (those imports are kept for backwards compatibility).
+# registries inline.
 def _family_registries() -> dict[str, dict[str, type]]:
     return {
         "embedder": EMBEDDER_REGISTRY,
@@ -475,9 +471,8 @@ async def load_model(model_id: str, request: Request, response: Response):
     model_id_local = model_id
 
     async def _settle() -> None:
-        loop = asyncio.get_running_loop()
         try:
-            loaded = await loop.run_in_executor(None, slot.finish_load, factory)
+            loaded = await run_in_model(slot.finish_load, factory)
         except asyncio.CancelledError:
             # Server shutting down mid-load. The executor thread is NOT
             # cancelled: it keeps running finish_load, which settles the
@@ -509,10 +504,9 @@ async def load_model(model_id: str, request: Request, response: Response):
         )
 
     task = asyncio.create_task(_settle())
-    tasks = getattr(app.state, "_model_tasks", None)
-    if tasks is not None:
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+    tasks = app.state._model_tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
     return ModelLoadResponse(
         id=model_id,
         type=family,  # type: ignore[arg-type]
@@ -540,9 +534,8 @@ async def load_model(model_id: str, request: Request, response: Response):
 )
 async def unload_model(model_id: str, request: Request):
     family, slot, _cls, _factory, _settings, state_attr = _resolve_family(request, model_id)
-    loop = asyncio.get_running_loop()
     try:
-        released = await loop.run_in_executor(None, slot.unload)
+        released = await run_in_model(slot.unload)
     except ConcurrentModelOperation as exc:
         raise _http_error(409, "model_busy", str(exc), model=model_id, family=family)
     if not released:

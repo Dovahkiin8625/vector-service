@@ -53,6 +53,7 @@ def app_with_stub(monkeypatch):
     app.include_router(img_router)
     app.state.image_embedder = stub
     app.state.settings = type("S", (), {
+        "inference_timeout_seconds": 60.0,
         "image_embedding": type("IE", (), {
             "max_images_per_request": 2,
             "max_image_bytes": 1024,

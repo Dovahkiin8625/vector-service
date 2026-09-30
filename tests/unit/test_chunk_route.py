@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from vector_service.api import chunk as chunk_mod
 from vector_service.api.chunk import router as chunk_router
 
 
@@ -31,6 +32,13 @@ def app():
 @pytest.fixture
 def client(app):
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_llm(monkeypatch):
+    """Pin LLM as unconfigured regardless of the ambient .env file;
+    the success test overrides this itself."""
+    monkeypatch.setattr(chunk_mod, "is_llm_configured", lambda _s: False)
 
 
 def _body(**overrides) -> dict:

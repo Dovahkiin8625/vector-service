@@ -1,4 +1,5 @@
 """Application lifespan: load model + open vector store."""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -14,6 +15,17 @@ from vector_service.core.errors import (
 from vector_service.core.logging import get_logger, setup_logging
 from vector_service.core.metrics import MODEL_LOADED, VS_INFO
 from vector_service.core.model_lifecycle import attach_default_slots
+from vector_service.core.threadpools import (
+    ThreadPools,
+    bind_pools,
+    run_in_model,
+    run_in_sqlite,
+    run_in_store,
+    unbind_pools,
+)
+from vector_service.corpus import CorpusRepository
+from vector_service.corpus.blobs import BlobStore
+from vector_service.corpus.bm25 import SparseBM25
 from vector_service.embeddings.image_base import ImageEmbedder
 from vector_service.embeddings.image_registry import get_image_embedder_class
 from vector_service.embeddings.multimodal_base import MultimodalEmbedder
@@ -41,12 +53,12 @@ def build_embedder(settings: Settings):
 
 
 def build_reranker(settings: Settings) -> Reranker:
-    """Construct a reranker instance for ``settings.reranker.backend``.
+    """Construct a reranker for ``settings.reranker``.
 
     Raises ``KeyError`` if the backend name is not registered.
     """
     cls = get_reranker_class(settings.reranker.backend)
-    return cls(settings=settings)
+    return cls(settings=settings.reranker)
 
 
 def build_image_embedder(settings: Settings) -> ImageEmbedder:
@@ -79,36 +91,45 @@ async def lifespan(app: "FastAPI"):
 
     app.state.settings = settings
     app.state.startup_ts = time.time()
+
+    # Isolated bounded pools (store RPC / model inference / SQLite).
+    # Bound before any blocking call exists so every call site — routes,
+    # worker, recovery — lands on them; shut down last.
+    thread_pools = ThreadPools(settings.runtime)
+    app.state.thread_pools = thread_pools
+    bind_pools(thread_pools)
+
     app.state.store = build_store(settings)
     store = app.state.store
+
+    # SQLite corpus — system of record for documents/chunks — plus the
+    # client-side BM25 encoder for the thin derived index.
+    corpus = CorpusRepository(settings.corpus_db_path)
+    await run_in_sqlite(corpus.initialize)
+    app.state.corpus = corpus
+    app.state.bm25 = SparseBM25(settings.bm25_state_dir)
+
+    # Content-addressed originals: upload binaries persist here (never
+    # in SQLite), referenced via documents.content_hash.
+    blob_store = BlobStore(settings.originals_dir)
+    app.state.blob_store = blob_store
 
     # Eagerly open the vector-store connection so /readyz can report a
     # truthful state. If Milvus is unreachable at startup we still want
     # the process to come up so embeddings keep working; surface the
     # error in the log and let /readyz return 503.
     try:
-        if hasattr(store, "_ensure_connected"):
-            store._ensure_connected()
-            log.info("store_connected", backend=store.backend_name, uri=getattr(store, "uri", ""))
-        else:
-            log.info("store_opened", backend=store.backend_name, uri=getattr(store, "uri", ""))
+        await run_in_store(store._ensure_connected)
+        log.info("store_connected", backend=store.backend_name, uri=store.uri)
     except Exception as e:
-        log.warning("store_connect_failed", backend=getattr(store, "backend_name", "?"), error=str(e))
+        log.warning("store_connect_failed", backend=store.backend_name, error=str(e))
 
-    # Attach the per-family ``ModelSlot`` holders BEFORE any optional
-    # loads so the hot-reload routes always see the slots. With the
-    # default ``auto_load=false`` for every family the slots start
-    # empty and ``app.state.<family>`` stays ``None`` until an
-    # operator calls ``POST /v1/models/{id}/load``. The ``None`` mirror
-    # attributes below are explicit so legacy fixtures (and routes
-    # that still read ``app.state.<family>``) see a deterministic
-    # attribute instead of raising ``AttributeError``.
+    # Attach the per-family ``ModelSlot`` holders and empty family
+    # mirrors BEFORE any optional loads so the hot-reload and inference
+    # routes always see every attribute. With the default
+    # ``auto_load=false`` for every family the slots and mirrors stay
+    # ``None`` until an operator calls ``POST /v1/models/{id}/load``.
     attach_default_slots(app, settings=settings)
-    app.state.embedder = None
-    app.state.reranker = None
-    app.state.image_embedder = None
-    app.state.multimodal_embedder = None
-    app.state.parser = None
     MODEL_LOADED.labels(kind="embedder").set(0)
     MODEL_LOADED.labels(kind="reranker").set(0)
     MODEL_LOADED.labels(kind="image_embedder").set(0)
@@ -118,30 +139,31 @@ async def lifespan(app: "FastAPI"):
     # ``embedding_auto_load`` defaults to ``False`` so a fresh process
     # starts in a zero-state: no model constructed, no slot populated,
     # /v1/embeddings returns 503. Operators trigger the load via the
-    # dashboard or ``POST /v1/models/{id}/load``. The fail-open
-    # contract from the original behaviour is preserved — a failed
+    # dashboard or ``POST /v1/models/{id}/load``. Fail-open: a failed
     # eager load is logged + surfaced via /readyz but does NOT kill
     # the process.
     if settings.embedding_auto_load:
         t0 = time.perf_counter()
         try:
             embedder = build_embedder(settings)
-            embedder.load()
+            await run_in_model(embedder.load)
         except ModelNotLoaded as e:
             log.error("model_load_failed", error=str(e))
         except Exception as e:
-            log.error("model_load_unexpected", error=str(e), exception_type=type(e).__name__)
+            log.error(
+                "model_load_unexpected", error=str(e), exception_type=type(e).__name__
+            )
         else:
             load_duration = time.perf_counter() - t0
             app.state.embedder = embedder
-            app.state._slot_embedder.set_instance(
-                embedder, load_duration=load_duration
-            )
+            app.state._slot_embedder.set_instance(embedder, load_duration=load_duration)
             MODEL_LOADED.labels(kind="embedder").set(1)
             device = getattr(embedder, "_device", "unknown")
             log.info(
                 "model_loaded",
-                model=embedder.model_name, device=device, dim=embedder.dim,
+                model=embedder.model_name,
+                device=device,
+                dim=embedder.dim,
             )
 
     # ---- reranker (opt-in eager load) ---------------------------
@@ -154,7 +176,7 @@ async def lifespan(app: "FastAPI"):
         t0 = time.perf_counter()
         try:
             reranker = build_reranker(settings)
-            reranker.load()
+            await run_in_model(reranker.load)
         except Exception as exc:  # noqa: BLE001 — fail-open, all families share policy
             log.error(
                 "reranker_load_failed",
@@ -165,9 +187,7 @@ async def lifespan(app: "FastAPI"):
         else:
             load_duration = time.perf_counter() - t0
             app.state.reranker = reranker
-            app.state._slot_reranker.set_instance(
-                reranker, load_duration=load_duration
-            )
+            app.state._slot_reranker.set_instance(reranker, load_duration=load_duration)
             MODEL_LOADED.labels(kind="reranker").set(1)
             log.info(
                 "reranker_loaded",
@@ -180,7 +200,7 @@ async def lifespan(app: "FastAPI"):
         t0 = time.perf_counter()
         try:
             image_embedder = build_image_embedder(settings)
-            image_embedder.load()
+            await run_in_model(image_embedder.load)
         except Exception as exc:  # noqa: BLE001 — fail-open
             log.error(
                 "image_embedder_load_failed",
@@ -207,7 +227,7 @@ async def lifespan(app: "FastAPI"):
         t0 = time.perf_counter()
         try:
             multimodal_embedder = build_multimodal_embedder(settings)
-            multimodal_embedder.load()
+            await run_in_model(multimodal_embedder.load)
         except Exception as exc:  # noqa: BLE001 — fail-open
             log.error(
                 "multimodal_embedder_load_failed",
@@ -242,7 +262,7 @@ async def lifespan(app: "FastAPI"):
             # separately constructed parser would not take the cold
             # model-build cost off the first request.
             parser = get_docling_parser()
-            parser.load()
+            await run_in_model(parser.load)
         except ParserUnavailable as exc:
             # Docling is an optional dep; a host that hasn't
             # installed it can still serve the rest of the API.
@@ -250,13 +270,13 @@ async def lifespan(app: "FastAPI"):
         except Exception as exc:  # noqa: BLE001 — fail-open
             log.error(
                 "parser_load_failed",
-                backend=settings.parser.backend,
+                backend="docling",
                 error=str(exc),
                 exception_type=type(exc).__name__,
             )
         else:
             app.state.parser = parser
-            log.info("parser_loaded", backend=settings.parser.backend)
+            log.info("parser_loaded", backend="docling")
 
     try:
         yield
@@ -278,7 +298,7 @@ async def lifespan(app: "FastAPI"):
                 continue
             try:
                 if slot.get() is not None:
-                    slot.unload()
+                    await run_in_model(slot.unload)
             except Exception as exc:  # noqa: BLE001 — best-effort cleanup
                 log.warning(
                     "shutdown_unload_failed",
@@ -287,7 +307,9 @@ async def lifespan(app: "FastAPI"):
                     exception_type=type(exc).__name__,
                 )
         try:
-            store.close()
+            await run_in_store(store.close)
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
             log.warning("store_close_failed", error=str(exc))
+        unbind_pools()
+        thread_pools.shutdown()
         log.info("shutdown")

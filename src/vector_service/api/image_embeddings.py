@@ -19,6 +19,7 @@ from vector_service.core.metrics import (
     IMAGE_EMBEDDING_INPUTS_TOTAL,
     IMAGE_EMBEDDING_REQUESTS_TOTAL,
 )
+from vector_service.core.threadpools import run_in_model
 from vector_service.embeddings.image_decoding import (
     decode_batch_or_422,
     decode_image,
@@ -81,7 +82,7 @@ async def create_image_embeddings(body: ImageEmbeddingRequest, request: Request)
     # never produced one (weights download failed, model dir missing,
     # etc.) — per spec the route should surface that as
     # 503 image_embedder_unavailable, never a 500 AttributeError.
-    embedder = getattr(request.app.state, "image_embedder", None)
+    embedder = request.app.state.image_embedder
     if embedder is None:
         raise HTTPException(status_code=503, detail={"error": {
             "code": "image_embedder_unavailable",
@@ -113,14 +114,13 @@ async def create_image_embeddings(body: ImageEmbeddingRequest, request: Request)
         allowed_mime=set(settings.allowed_mime),
     )
 
-    loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
-    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+    timeout_s = request.app.state.settings.inference_timeout_seconds
     try:
         try:
             vectors = await asyncio.wait_for(
-                loop.run_in_executor(None, embedder.embed_images, decoded),
+                run_in_model(embedder.embed_images, decoded),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:

@@ -23,8 +23,9 @@ class MultimodalEmbedder(ABC):
 
     ``embed_text`` and ``embed_images`` must produce vectors in the same
     ``dim``-dimensional space so cosine similarity between text and image
-    vectors is meaningful. All methods are synchronous; async dispatch
-    is the caller's job (``loop.run_in_executor``).
+    vectors is meaningful. All methods are synchronous; async routes
+    dispatch them via the isolated model thread pool (``run_in_model``
+    in ``vector_service.core.threadpools``).
     """
 
     dim: int

@@ -4,11 +4,11 @@ Two layers, both without real model loads:
 
 - profile plumbing inside ``DoclingParser`` / ``_build_format_options``
   (option objects construct cheaply; pipelines only build on convert);
-- the ``profile`` form field of /v1/parse and /v1/ingest (both classic
-  and stream routes): unknown values → 400 ``invalid_profile``, the
-  chosen profile is forwarded to the parser, and raster image MIMEs are
-  accepted uploads.
+- the ``profile`` form field of /v1/parse (classic and stream routes):
+  unknown values → 400 ``invalid_profile``, the chosen profile is
+  forwarded to the parser, and raster image MIMEs are accepted uploads.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -16,9 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from vector_service.api import ingest as ingest_mod
 from vector_service.api import parse as parse_mod
-from vector_service.api.ingest import router as ingest_router
 from vector_service.api.parse import router as parse_router
 from vector_service.parsers.base import ParsedDocument
 
@@ -61,16 +59,23 @@ def test_auto_profile_picks_by_document_type():
 
     # Raster images always need layout + OCR.
     for mime in (
-        "image/jpeg", "image/png", "image/tiff", "image/webp", "image/bmp",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/webp",
+        "image/bmp",
     ):
         assert resolve("auto", mime) == "standard"
 
     # Office formats reuse the warm standard converter (Docling routes
     # them through its model-free SimplePipeline underneath).
-    assert resolve(
-        "auto",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ) == "standard"
+    assert (
+        resolve(
+            "auto",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        == "standard"
+    )
 
 
 def test_build_format_options_per_profile():
@@ -84,16 +89,22 @@ def test_build_format_options_per_profile():
         # The three profile names map to three distinct PDF pipeline
         # classes; both PDF and IMAGE are configured for every profile
         # (native stays PDF-only at the pipeline level).
-        assert pdf_opt.pipeline_cls.__name__ == {
-            "standard": "StandardPdfPipeline",
-            "native": "NativePdfPipeline",
-            "vlm": "VlmPipeline",
-        }[profile]
-        assert img_opt.pipeline_cls.__name__ == {
-            "standard": "StandardPdfPipeline",
-            "native": "StandardPdfPipeline",
-            "vlm": "VlmPipeline",
-        }[profile]
+        assert (
+            pdf_opt.pipeline_cls.__name__
+            == {
+                "standard": "StandardPdfPipeline",
+                "native": "NativePdfPipeline",
+                "vlm": "VlmPipeline",
+            }[profile]
+        )
+        assert (
+            img_opt.pipeline_cls.__name__
+            == {
+                "standard": "StandardPdfPipeline",
+                "native": "StandardPdfPipeline",
+                "vlm": "VlmPipeline",
+            }[profile]
+        )
 
 
 def test_profile_selects_distinct_cached_converters(monkeypatch):
@@ -158,10 +169,12 @@ def parse_client(monkeypatch):
     async def _h(_request: Request, exc: HTTPException):
         detail = exc.detail
         if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
-            return JSONResponse(status_code=exc.status_code,
-                                content={"error": detail["error"]})
-        return JSONResponse(status_code=exc.status_code,
-                            content={"error": {"message": str(detail)}})
+            return JSONResponse(
+                status_code=exc.status_code, content={"error": detail["error"]}
+            )
+        return JSONResponse(
+            status_code=exc.status_code, content={"error": {"message": str(detail)}}
+        )
 
     a.recording = recording
     return TestClient(a)
@@ -197,18 +210,23 @@ def test_parse_route_forwards_profile(parse_client):
         data={"profile": "vlm"},
     )
     assert r.status_code == 200
-    assert parse_client.app.recording.calls == [{"mime": "application/pdf", "profile": "vlm"}]
+    assert parse_client.app.recording.calls == [
+        {"mime": "application/pdf", "profile": "vlm"}
+    ]
 
 
-@pytest.mark.parametrize("filename,content_type", [
-    ("scan.jpg", "image/jpeg"),
-    ("scan.jpeg", "image/jpeg"),
-    ("pic.png", "image/png"),
-    ("pic.tif", "image/tiff"),
-    ("pic.tiff", "image/tiff"),
-    ("pic.webp", "image/webp"),
-    ("pic.bmp", "image/bmp"),
-])
+@pytest.mark.parametrize(
+    "filename,content_type",
+    [
+        ("scan.jpg", "image/jpeg"),
+        ("scan.jpeg", "image/jpeg"),
+        ("pic.png", "image/png"),
+        ("pic.tif", "image/tiff"),
+        ("pic.tiff", "image/tiff"),
+        ("pic.webp", "image/webp"),
+        ("pic.bmp", "image/bmp"),
+    ],
+)
 def test_parse_route_accepts_image_uploads(parse_client, filename, content_type):
     r = parse_client.post(
         "/v1/parse",
@@ -225,112 +243,3 @@ def test_parse_route_accepts_image_by_extension_without_content_type(parse_clien
     )
     assert r.status_code == 200
     assert parse_client.app.recording.calls[0]["mime"] == "image/png"
-
-
-# ---- route-level: /v1/ingest ------------------------------------------
-
-
-class _FakeEmbedder:
-    model_name = "fake-model"
-    dim = 4
-
-    def embed_documents(self, texts):
-        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
-
-
-class _FakeStore:
-    def __init__(self):
-        self.dbs = ["default"]
-        self.colls: dict[str, dict] = {}
-
-    def list_databases(self):
-        return list(self.dbs)
-
-    def create_database(self, name, **_opts):
-        self.dbs.append(name)
-
-    def list_collections(self, database):
-        return list(self.colls.get(database, {}))
-
-    def create_collection(self, database, name, primary_field,
-                          vector_field, scalar_fields, indexes=None):
-        self.colls.setdefault(database, {})[name] = vector_field.dim
-
-    def collection_info(self, database, name):
-        return type("Info", (), {"dim": self.colls[database][name]})()
-
-    def upsert(self, *a, **k):
-        pass
-
-
-@pytest.fixture
-def ingest_client(monkeypatch):
-    recording = _RecordingParser()
-    # text/plain goes through MarkdownParser, so image/pdf uploads are
-    # the ones hitting the patched Docling getter.
-    monkeypatch.setattr(ingest_mod, "get_docling_parser", lambda: recording)
-    a = FastAPI()
-    a.include_router(ingest_router)
-    a.state.settings = _FakeSettings()
-    a.state.embedder = _FakeEmbedder()
-    a.state.store = _FakeStore()
-
-    @a.exception_handler(HTTPException)
-    async def _h(_request: Request, exc: HTTPException):
-        detail = exc.detail
-        if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
-            return JSONResponse(status_code=exc.status_code,
-                                content={"error": detail["error"]})
-        return JSONResponse(status_code=exc.status_code,
-                            content={"error": {"message": str(detail)}})
-
-    a.recording = recording
-    return TestClient(a)
-
-
-def _ingest_form(**overrides) -> dict:
-    data = {
-        "database": "default",
-        "collection": "ingest",
-        "embed_model": "fake-model",
-        "chunk_size": "800",
-        "chunk_overlap": "80",
-        "metadata": "{}",
-    }
-    data.update(overrides)
-    return data
-
-
-def test_ingest_route_invalid_profile_returns_400(ingest_client):
-    r = ingest_client.post(
-        "/v1/ingest",
-        data=_ingest_form(profile="turbo"),
-        files={"file": ("doc.pdf", b"%PDF-1.4", "application/pdf")},
-    )
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_profile"
-    assert ingest_client.app.recording.calls == []
-
-
-def test_ingest_stream_invalid_profile_returns_400(ingest_client):
-    r = ingest_client.post(
-        "/v1/ingest/stream",
-        data=_ingest_form(profile="turbo"),
-        files={"file": ("doc.pdf", b"%PDF-1.4", "application/pdf")},
-    )
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "invalid_profile"
-
-
-def test_ingest_route_accepts_image_uploads_and_forwards_profile(ingest_client):
-    r = ingest_client.post(
-        "/v1/ingest",
-        data=_ingest_form(profile="vlm"),
-        files={"file": ("scan.jpg", b"fakepixels", "image/jpeg")},
-    )
-    assert r.status_code == 200
-    call = ingest_client.app.recording.calls[0]
-    assert call["mime"] == "image/jpeg"
-    assert call["profile"] == "vlm"
-    # Artifact stem is the same id returned as doc_id.
-    assert call["artifact_stem"] == r.json()["doc_id"]

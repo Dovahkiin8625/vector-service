@@ -19,6 +19,7 @@ from vector_service.core.metrics import (
     EMBEDDING_TOKENS_TOTAL,
     MODEL_LOADED,
 )
+from vector_service.core.threadpools import run_in_model
 from vector_service.embeddings.registry import get_embedder_class
 from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.openai import (
@@ -111,17 +112,14 @@ async def create_embeddings(body: EmbeddingRequest, request: Request):
             )
 
     total_tokens = sum(_estimate_tokens(t) for t in texts)
-    loop = asyncio.get_running_loop()
     t0 = time.perf_counter()
     status = "ok"
-    # Per-request inference timeout. We use ``getattr`` with a default
-    # so legacy ``_FakeSettings`` test doubles that pre-date the field
-    # continue to work without modification.
-    timeout_s = getattr(settings, "inference_timeout_seconds", 60.0)
+    # Per-request inference timeout.
+    timeout_s = settings.inference_timeout_seconds
     try:
         try:
             vectors = await asyncio.wait_for(
-                loop.run_in_executor(None, embedder.embed_documents, texts),
+                run_in_model(embedder.embed_documents, texts),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:

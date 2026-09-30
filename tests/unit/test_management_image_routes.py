@@ -203,6 +203,7 @@ def app():
     # ``settings.image_embedding``; build a tiny stub with the two
     # fields the helper consults.
     a.state.settings = type("S", (), {
+        "inference_timeout_seconds": 60.0,
         "image_embedding": type("IE", (), {
             "max_image_bytes": 10 * 1024 * 1024,
             "allowed_mime": {"image/jpeg", "image/png", "image/webp"},

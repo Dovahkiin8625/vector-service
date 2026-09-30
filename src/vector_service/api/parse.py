@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from vector_service.core.logging import get_logger
+from vector_service.core.threadpools import run_in_model
 from vector_service.parsers.base import (
     PARSE_PROFILES,
     PROFILE_NATIVE,
@@ -504,10 +505,9 @@ async def parse_document_stream(
 async def warm_parser(body: ParserProfileAction):
     profile = _validate_action_profile(body.profile)
     parser = get_docling_parser()
-    loop = asyncio.get_running_loop()
     try:
-        # Converter build is heavy + synchronous; keep it off the loop.
-        resolved = await loop.run_in_executor(None, parser.warm, profile)
+        # Converter build is heavy + synchronous; ride the model pool.
+        resolved = await run_in_model(parser.warm, profile)
     except ParserUnavailable as e:
         raise _action_http(503, "parser_unavailable", str(e))
     except RuntimeError as e:
@@ -533,6 +533,9 @@ async def warm_parser(body: ParserProfileAction):
 )
 async def evict_parser(body: ParserProfileAction):
     profile = _validate_action_profile(body.profile)
-    released = get_docling_parser().release(profile)
+    # Converter teardown is synchronous; ride the model pool like warm.
+    released = await run_in_model(
+        get_docling_parser().release, profile
+    )
     log.info("parser_evicted", profile=profile, released=released)
     return {"profile": profile, "warm": False, "released": released}

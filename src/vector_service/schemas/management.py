@@ -511,9 +511,7 @@ class DeleteVectorsRequest(BaseModel):
 
     Callers must provide **exactly one** of ``ids`` (delete a known
     list of primary keys) or ``filter_expr`` (delete every row that
-    matches a Milvus-native boolean expression). The legacy
-    ``ids``-only path is preserved for existing callers; new
-    bulk-cleanup flows should use ``filter_expr``.
+    matches a Milvus-native boolean expression).
     """
 
     primary_field: str = Field(description="Primary key field name.")
@@ -649,11 +647,11 @@ class BrowseResponse(BaseModel):
     total: int = Field(
         description=(
             "Live, tombstone-aware total row count (a Strong-consistency "
-            "``count(*)`` on backends that support it; metadata count as a "
-            "fallback). Rows deleted in the current session are already "
-            "subtracted. When ``filter_expr`` is present, only matching "
-            "rows are counted. The page's effective upper bound; "
-            "``has_more`` is derived from this and the requested offset."
+            "``count(*)``). Rows deleted in the current session are "
+            "already subtracted. When ``filter_expr`` is present, only "
+            "matching rows are counted. The page's effective upper "
+            "bound; ``has_more`` is derived from this and the requested "
+            "offset."
         ),
     )
     limit: int = Field(description="Echoes the requested page size.")

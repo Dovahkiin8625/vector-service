@@ -18,8 +18,7 @@ Design notes:
   :mod:`vector_service.core.system_metrics` so both the HTTP route and
   any future in-process consumer share one implementation.
 - ``uptime_seconds`` is measured from ``app.state.startup_ts`` which
-  the lifespan writes once at boot. We fall back to "—" when the
-  attribute is missing (e.g. in tests that bypass lifespan).
+  the lifespan writes once at boot.
 """
 from __future__ import annotations
 
@@ -32,6 +31,7 @@ from fastapi.responses import JSONResponse
 from vector_service import __version__
 from vector_service.core.parser_status import parser_status
 from vector_service.core.system_metrics import system_snapshot
+from vector_service.core.threadpools import run_in_store
 from vector_service.embeddings.image_registry import list_image_embedder_names
 from vector_service.embeddings.multimodal_registry import (
     list_multimodal_embedder_names,
@@ -50,10 +50,10 @@ def _model_summary(request: Request) -> dict[str, Any]:
     the dashboard can render the dim-dots signature without a second
     round-trip to ``GET /v1/models``.
     """
-    embedder = getattr(request.app.state, "embedder", None)
-    image_embedder = getattr(request.app.state, "image_embedder", None)
-    multimodal_embedder = getattr(request.app.state, "multimodal_embedder", None)
-    reranker = getattr(request.app.state, "reranker", None)
+    embedder = request.app.state.embedder
+    image_embedder = request.app.state.image_embedder
+    multimodal_embedder = request.app.state.multimodal_embedder
+    reranker = request.app.state.reranker
 
     def _state(instance: Any) -> dict[str, Any]:
         if instance is None:
@@ -88,7 +88,7 @@ def _parser_summary(request: Request) -> dict[str, Any]:
     Prefer the parser the lifespan warmed on ``app.state``; fall back
     to the process singleton. Fail-open like the store probe.
     """
-    parser = getattr(request.app.state, "parser", None)
+    parser = request.app.state.parser
     if parser is None:
         from vector_service.parsers.docling_parser import get_docling_parser
 
@@ -107,36 +107,35 @@ def _store_summary(request: Request) -> dict[str, Any]:
     - ``"ok"`` — store reachable, databases listed successfully;
     - ``"down"`` — probe raised; the original exception text is kept
       under ``error`` so the operator can pin the failure without
-      grepping server logs;
-    - ``"not_attached"`` — no store on ``app.state`` (e.g. lifespan
-      not yet started in a unit test).
+      grepping server logs.
     """
-    store = getattr(request.app.state, "store", None)
-    settings = getattr(request.app.state, "settings", None)
-    backend = getattr(store, "backend_name", "unknown")
+    store = request.app.state.store
+    settings = request.app.state.settings
     summary: dict[str, Any] = {
-        "backend": backend,
-        "uri": getattr(store, "uri", None),
-        "status": "not_attached",
+        "backend": store.backend_name,
+        "uri": store.uri,
+        "status": "ok",
         "databases": [],
         "database_count": 0,
         "error": None,
+        "configured_backend": settings.vector_store_backend,
     }
-    if store is None:
-        return summary
     try:
         dbs = store.list_databases()
-        summary["status"] = "ok"
         summary["databases"] = list(dbs)
         summary["database_count"] = len(dbs)
     except Exception as e:  # noqa: BLE001 — must fail open
         summary["status"] = "down"
         summary["error"] = "{}: {}".format(type(e).__name__, e)
-    if settings is not None:
-        summary["configured_backend"] = getattr(
-            settings, "vector_store_backend", None
-        )
     return summary
+
+
+def _thread_pool_summary(request: Request) -> dict[str, Any] | None:
+    """Per-pool workers/admission/inflight counters from the lifespan."""
+    thread_pools = getattr(request.app.state, "thread_pools", None)
+    if thread_pools is None:
+        return None
+    return thread_pools.describe()
 
 
 @router.get(
@@ -146,30 +145,30 @@ def _store_summary(request: Request) -> dict[str, Any]:
         "Aggregated dashboard payload: service version, embedding / store "
         "backends, uptime, registered + loaded model counts, per-profile "
         "Docling parser status, vector-store connection status, database "
-        "list, and live machine metrics (CPU, memory, disk, GPU). "
+        "list, isolated thread-pool counters, and live machine metrics "
+        "(CPU, memory, disk, GPU). "
         "Fail-open — a degraded subsystem is reported as a `status: down` "
         "field, not a 5xx."
     ),
 )
-def get_system_status(request: Request) -> JSONResponse:
-    settings = getattr(request.app.state, "settings", None)
+async def get_system_status(request: Request) -> JSONResponse:
+    settings = request.app.state.settings
     snapshot = system_snapshot()
-    startup_ts = float(getattr(request.app.state, "startup_ts", time.time()))
+    startup_ts = float(request.app.state.startup_ts)
     uptime = max(0.0, time.time() - startup_ts)
 
     payload = {
         "service": {
             "version": __version__,
-            "embedding_backend": getattr(settings, "embedding_backend", None),
-            "vector_store_backend": getattr(
-                settings, "vector_store_backend", None
-            ),
+            "embedding_backend": settings.embedding_backend,
+            "vector_store_backend": settings.vector_store_backend,
             "startup_ts": startup_ts,
             "uptime_seconds": uptime,
         },
         "models": _model_summary(request),
         "parser": _parser_summary(request),
-        "store": _store_summary(request),
+        "store": await run_in_store(_store_summary, request),
+        "thread_pools": _thread_pool_summary(request),
         "system": snapshot,
     }
     return JSONResponse(content=payload)

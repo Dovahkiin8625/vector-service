@@ -54,6 +54,7 @@ def app_with_stub():
         "S",
         (),
         {
+            "inference_timeout_seconds": 60.0,
             "multimodal_embedding": type(
                 "ME",
                 (),
@@ -188,7 +189,7 @@ def test_unknown_model_returns_404():
     app.state.settings = type(
         "S",
         (),
-        {"multimodal_embedding": type("ME", (), {"max_items_per_request": 4, "max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
+        {"inference_timeout_seconds": 60.0, "multimodal_embedding": type("ME", (), {"max_items_per_request": 4, "max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
     )()
 
     @app.exception_handler(HTTPException)
@@ -216,11 +217,12 @@ def test_embedder_not_loaded_returns_503():
 
     app = FastAPI()
     app.include_router(mm_router)
-    # Intentionally no multimodal_embedder on app.state.
+    # Mirror lifespan failure: mirror attr present but instance None.
+    app.state.multimodal_embedder = None
     app.state.settings = type(
         "S",
         (),
-        {"multimodal_embedding": type("ME", (), {"max_items_per_request": 4, "max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
+        {"inference_timeout_seconds": 60.0, "multimodal_embedding": type("ME", (), {"max_items_per_request": 4, "max_text_chars": 256, "max_image_bytes": 1024, "allowed_mime": {"image/png"}})()},
     )()
 
     @app.exception_handler(HTTPException)

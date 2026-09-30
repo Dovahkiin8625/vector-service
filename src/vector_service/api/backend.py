@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from vector_service.core.threadpools import run_in_store
 from vector_service.schemas.management import BackendInfo
 
 router = APIRouter(prefix="/backend", tags=["backend"])
@@ -23,7 +24,7 @@ def backend_raw(request: Request):
     store = request.app.state.store
     info: dict[str, Any] = {
         "backend": store.backend_name,
-        "uri": getattr(store, "uri", None),
+        "uri": store.uri,
         "native_methods": [
             "list_databases", "create_database", "drop_database", "database_info",
             "list_collections", "create_collection", "drop_collection", "collection_info",
@@ -50,13 +51,21 @@ async def backend_raw_call(request: Request):
     # Map a small set of read-only passthrough ops.
     try:
         if op == "list_databases":
-            return {"result": store.list_databases()}
+            return {"result": await run_in_store(store.list_databases)}
         if op == "list_collections":
-            return {"result": store.list_collections(args["database"])}
+            return {
+                "result": await run_in_store(
+                    store.list_collections, args["database"]
+                )
+            }
         if op == "database_info":
-            return {"result": store.database_info(args["name"]).__dict__}
+            info = await run_in_store(store.database_info, args["name"])
+            return {"result": info.__dict__}
         if op == "collection_info":
-            return {"result": store.collection_info(args["database"], args["name"]).__dict__}
+            info = await run_in_store(
+                store.collection_info, args["database"], args["name"]
+            )
+            return {"result": info.__dict__}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     raise HTTPException(status_code=400, detail=f"unsupported op {op!r}")

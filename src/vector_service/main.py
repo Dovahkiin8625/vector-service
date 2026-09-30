@@ -23,8 +23,9 @@ from vector_service.api.chunk import router as chunk_router
 from vector_service.api.embeddings import router as embeddings_router
 from vector_service.api.health import router as health_router
 from vector_service.api.image_embeddings import router as image_embeddings_router
-from vector_service.api.ingest import router as ingest_router
-from vector_service.api.multimodal_embeddings import router as multimodal_embeddings_router
+from vector_service.api.multimodal_embeddings import (
+    router as multimodal_embeddings_router,
+)
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
@@ -299,7 +300,9 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(ModelNotLoadedForSimilarity)
-    async def _similarity_not_loaded(request: Request, exc: ModelNotLoadedForSimilarity):
+    async def _similarity_not_loaded(
+        request: Request, exc: ModelNotLoadedForSimilarity
+    ):
         return _err(
             "similarity_unavailable",
             str(exc) or "similarity target model not loaded",
@@ -418,6 +421,7 @@ def create_app() -> FastAPI:
     # resolved relative to this file so the layout works regardless
     # of the cwd the process is launched from.
     from pathlib import Path
+
     _STATIC_DIR = Path(__file__).resolve().parent / "static"
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -429,6 +433,7 @@ def create_app() -> FastAPI:
     # create it eagerly; the mount path follows configuration so the
     # two can never drift.
     from vector_service.core.config import get_settings
+
     _parser_settings = get_settings().parser
     _ARTIFACTS_DIR = Path(_parser_settings.artifacts_dir)
     _ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -451,7 +456,6 @@ def create_app() -> FastAPI:
     app.include_router(similarity_router)
     app.include_router(parse_router)
     app.include_router(chunk_router)
-    app.include_router(ingest_router)
     app.include_router(retrieval_router)
 
     return app

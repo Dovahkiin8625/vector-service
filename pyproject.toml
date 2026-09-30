@@ -26,20 +26,28 @@ dependencies = [
     "markdownify>=0.13",
     "beautifulsoup4>=4.12",
     "tiktoken>=0.8",
-]
-
-[project.optional-dependencies]
-embed = [
+    # multipart/form-data file uploads (/v1/ingest, image embeddings).
+    "python-multipart>=0.0.9",
+    # ---- vector store (thin derived index) ----
+    # Milvus 3.x: sparse vectors written/read directly, and the model
+    # helpers (BM25 EF / Analyzer) live in the separate milvus-model
+    # package. jieba powers the offline-friendly BM25 analyzer.
+    "pymilvus>=3.0.1",
+    "milvus-model>=0.2.12",
+    "jieba>=0.42",
+    # milvus_model.tokenizers imports nltk at module load (even though
+    # our explicit jieba Analyzer never needs its stopword data).
+    "nltk>=3.9.1",
+    # ---- embeddings ----
+    # GPU build on NVIDIA hosts: torch comes from the cu130 wheel index
+    # (see [tool.uv.sources] below); onnxruntime-gpu[cuda] pulls CUDA 13
+    # nvidia-* wheels (cuBLAS/cuFFT/cuRAND/NVRTC — RTX 5070 Ti /
+    # Blackwell needs CUDA 13). No separate cuDNN wheel on win32: cuDNN
+    # ships inside torch/lib, keeping a single cuDNN 9 sub-library set
+    # (two sets make torch fail with CUDNN_STATUS_SUBLIBRARY_VERSION_
+    # MISMATCH). core/cuda_dlls.py registers the DLL directories at
+    # startup. macOS uses the CPU torch/onnxruntime builds.
     "torch>=2.2",
-    # GPU build on NVIDIA hosts: the [cuda] extra pulls CUDA 13
-    # nvidia-* wheels (cuBLAS/cuFFT/cuRAND/NVRTC; aligned with the
-    # cu130 torch in .venv — RTX 5070 Ti / Blackwell needs CUDA 13).
-    # No [cudnn] extra: cuDNN comes from torch/lib instead, which keeps
-    # a single cuDNN 9 sub-library set in the process (two sets make
-    # torch fail with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH).
-    # core/cuda_dlls.py registers the DLL directories at startup.
-    # macOS stays on the CPU build — the nvidia-* wheels publish no
-    # darwin distributions.
     "onnxruntime-gpu[cuda]>=1.29,<2; sys_platform == 'win32' or sys_platform == 'linux'",
     "onnxruntime>=1.18; sys_platform == 'darwin'",
     "FlagEmbedding>=1.2.10",
@@ -47,22 +55,23 @@ embed = [
     "huggingface-hub>=0.23",
     "modelscope>=1.9",
     "sentence-transformers>=2.6",
-]
-store = [
-    "pymilvus>=2.4.3",
-]
-image-embed = [
     "open_clip_torch>=2.24",
-]
-multimodal-embed = [
-    "transformers>=4.41",
-]
-all = [
-    "vector-service[embed,store,image-embed,multimodal-embed]",
+    "opentelemetry-api>=1.45.0",
+    "opentelemetry-sdk>=1.45.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.0",
 ]
 
 [project.scripts]
 vector-service = "vector_service.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "coverage>=7",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -86,3 +95,28 @@ filterwarnings = [
 
 [tool.uv]
 package = true
+# milvus-model and rapidocr hard-require the CPU ``onnxruntime`` wheel,
+# but on win32/linux the embed extra ships onnxruntime-gpu — both
+# packages install into the same ``onnxruntime`` namespace, so a second
+# CPU wheel clobbers the GPU provider's files (DLLs / .so). Keep
+# onnxruntime only on macOS, where the embed extra uses the plain build.
+override-dependencies = [
+    "onnxruntime; sys_platform == 'darwin'",
+]
+
+# GPU torch comes from the official CUDA 13 wheel index, not PyPI (where
+# torch is the CPU build). docling's standard extra also requires torch,
+# so routing the package here keeps every consumer on the same GPU wheel.
+# Explicit index: only packages that name this source use it.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]

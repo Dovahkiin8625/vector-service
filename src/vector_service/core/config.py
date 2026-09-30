@@ -1,11 +1,12 @@
 """Application settings via pydantic-settings."""
+
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,8 +26,7 @@ class RerankerSettings(BaseSettings):
     # Eager-load on startup. When False (default) the lifespan skips
     # constructing AND loading the reranker — ``app.state.reranker``
     # stays ``None`` until ``POST /v1/models/{id}/load`` is called.
-    # Operators who want the legacy behaviour can set
-    # ``VS_RERANKER__AUTO_LOAD=true``.
+    # Set ``VS_RERANKER__AUTO_LOAD=true`` to eager-load.
     auto_load: bool = False
 
     # Model identity
@@ -54,9 +54,7 @@ class RerankerSettings(BaseSettings):
     def _top_n_default_le_max(cls, v: int, info) -> int:
         max_top_n = info.data.get("max_top_n", 64)
         if v > max_top_n:
-            raise ValueError(
-                f"top_n_default ({v}) must be <= max_top_n ({max_top_n})"
-            )
+            raise ValueError(f"top_n_default ({v}) must be <= max_top_n ({max_top_n})")
         return v
 
 
@@ -115,11 +113,6 @@ class ParserSettings(BaseSettings):
     #: the converter). Idempotent and 409-tolerant in the lifespan
     #: handler so concurrent workers can't trip over each other.
     auto_load: bool = False
-
-    #: Backend name — currently only ``"docling"`` is registered.
-    #: Kept as a field for forward compatibility (e.g. adding a
-    #: Marker / Unstructured backend later).
-    backend: str = "docling"
 
     #: Soft cap on per-request upload size. Uploads above this
     #: yield 413 from ``POST /v1/parse`` and ``POST /v1/ingest``.
@@ -185,9 +178,9 @@ class ChunkingSettings(BaseSettings):
     # Default strategy when a request omits one. Per-request values
     # come from /v1/chunk and /v1/ingest; see
     # docs/ingest-pipeline.md for the strategy guide.
-    strategy: Literal[
-        "fixed", "paragraph", "recursive", "semantic", "llm"
-    ] = "recursive"
+    strategy: Literal["fixed", "paragraph", "recursive", "semantic", "llm"] = (
+        "recursive"
+    )
 
     chunk_size: int = Field(500, ge=1, le=8192)
     chunk_overlap: int = Field(75, ge=0, le=4096)
@@ -197,9 +190,7 @@ class ChunkingSettings(BaseSettings):
     def _overlap_lt_size(cls, v: int, info) -> int:
         chunk_size = info.data.get("chunk_size", 500)
         if v >= chunk_size:
-            raise ValueError(
-                f"chunk_overlap ({v}) must be < chunk_size ({chunk_size})"
-            )
+            raise ValueError(f"chunk_overlap ({v}) must be < chunk_size ({chunk_size})")
         return v
 
 
@@ -232,7 +223,9 @@ class LLMSettings(BaseSettings):
     )
     timeout_seconds: float = Field(60.0, ge=1.0, le=600.0)
     max_concurrency: int = Field(
-        4, ge=1, le=32,
+        4,
+        ge=1,
+        le=32,
         description="Bound on concurrent chat calls during contextualization.",
     )
 
@@ -246,7 +239,9 @@ class MultimodalEmbeddingSettings(BaseSettings):
     Chinese-CLIP). Env prefix: ``VS_MULTIMODAL_EMBEDDING__``.
     """
 
-    model_config = SettingsConfigDict(env_prefix="VS_MULTIMODAL_EMBEDDING__", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="VS_MULTIMODAL_EMBEDDING__", extra="ignore"
+    )
 
     backend: str = "chinese-clip-vit-base-patch16"
     model_dir: str = "./models/chinese-clip-vit-base-patch16"
@@ -275,6 +270,80 @@ class MultimodalEmbeddingSettings(BaseSettings):
         return v
 
 
+class PoolSettings(BaseModel):
+    """One isolated thread pool: worker count + admission cap.
+
+    ``max_pending`` bounds running + queued submissions of this pool
+    (async callers queue at this point — backpressure instead of an
+    unbounded work pile) and must cover ``workers``.
+    """
+
+    workers: int = Field(..., ge=1, le=64)
+    max_pending: int = Field(..., ge=1, le=4096)
+
+    @model_validator(mode="after")
+    def _pending_covers_workers(self):
+        if self.max_pending < self.workers:
+            raise ValueError("max_pending must be >= workers")
+        return self
+
+
+class RuntimeSettings(BaseSettings):
+    """Blocking-call isolation: independent bounded pools.
+
+    Env prefix ``VS_RUNTIME__``; pools are ``store`` (vector-store RPC),
+    ``model`` (local model/CPU inference incl. BM25 + parsing) and
+    ``sqlite`` (corpus repository). Anything uncategorized keeps using
+    the asyncio default executor.
+
+    Fields are flat (``store_workers`` / ``store_max_pending`` / ...) so
+    a single env var (e.g. ``VS_RUNTIME__STORE_WORKERS``) can override
+    one knob without replacing — and invalidating — the whole pool
+    object. Typed per-pool views are exposed via the ``store`` /
+    ``model`` / ``sqlite`` properties.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VS_RUNTIME__", extra="ignore"
+    )
+
+    store_workers: int = Field(default=8, ge=1, le=64)
+    store_max_pending: int = Field(default=64, ge=1, le=4096)
+    model_workers: int = Field(default=2, ge=1, le=64)
+    model_max_pending: int = Field(default=16, ge=1, le=4096)
+    sqlite_workers: int = Field(default=4, ge=1, le=64)
+    sqlite_max_pending: int = Field(default=32, ge=1, le=4096)
+
+    @model_validator(mode="after")
+    def _pending_covers_workers(self):
+        for name in ("store", "model", "sqlite"):
+            workers = getattr(self, f"{name}_workers")
+            max_pending = getattr(self, f"{name}_max_pending")
+            if max_pending < workers:
+                raise ValueError(
+                    f"{name}_max_pending must be >= {name}_workers"
+                )
+        return self
+
+    def _pool(self, name: str) -> PoolSettings:
+        return PoolSettings(
+            workers=getattr(self, f"{name}_workers"),
+            max_pending=getattr(self, f"{name}_max_pending"),
+        )
+
+    @property
+    def store(self) -> PoolSettings:
+        return self._pool("store")
+
+    @property
+    def model(self) -> PoolSettings:
+        return self._pool("model")
+
+    @property
+    def sqlite(self) -> PoolSettings:
+        return self._pool("sqlite")
+
+
 class Settings(BaseSettings):
     # 服务
     host: str = "0.0.0.0"
@@ -283,6 +352,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"  # json | console
     debug: bool = False
+
+    #: Per-request timeout for model inference (embeddings / rerank /
+    #: similarity) and the embed legs of the ingest pipeline. Env:
+    #: ``VS_INFERENCE_TIMEOUT_SECONDS``.
+    inference_timeout_seconds: float = Field(60.0, ge=1.0, le=600.0)
 
     # 嵌入
     embedding_backend: str = "bge-m3"
@@ -301,11 +375,6 @@ class Settings(BaseSettings):
     embedding_max_texts_per_request: int = Field(256, ge=1)
     embedding_max_chars_per_text: int = Field(8192, ge=1)
     embedding_hf_repo: str = "BAAI/bge-m3"
-    # Kept for backwards compatibility with external configuration files
-    # and the BGE-M3 design plan. Currently unused — BGE-M3 has no
-    # ONNX code path; see ``bge_m3.py`` for why the CPU backend stays
-    # on PyTorch int8. Documented but not read.
-    embedding_onnx_repo: str = "BAAI/bge-m3-onnx"
     embedding_ms_repo: str = "BAAI/bge-m3"
     # 权重下载来源：huggingface | modelscope
     embedding_download_source: str = "modelscope"
@@ -322,11 +391,33 @@ class Settings(BaseSettings):
     # 运行时
     data_dir: Path = Path("./data")
 
+    #: SQLite corpus database — the system of record for documents and
+    #: chunks. The vector index is derived from it and fully rebuildable.
+    #: Env: ``VS_CORPUS_DB_PATH``.
+    corpus_db_path: Path = Path("./data/corpus/corpus.db")
+
+    #: Directory for per-collection client-side BM25 statistics; also
+    #: derived and rebuilt from the corpus when missing. Env:
+    #: ``VS_BM25_STATE_DIR``.
+    bm25_state_dir: Path = Path("./data/corpus/bm25")
+
+    #: Content-addressed store for original upload binaries. Raw bytes
+    #: never enter SQLite; files live here keyed by SHA-256 and are
+    #: referenced via documents.content_hash. Env: ``VS_ORIGINALS_DIR``.
+    originals_dir: Path = Path("./data/corpus/originals")
+
+    #: Exclusive OS file lock held for the process lifetime. A second
+    #: service against the same corpus directory fails fast at startup.
+    #: Env: ``VS_INSTANCE_LOCK_PATH``.
+    instance_lock_path: Path = Path("./data/corpus/instance.lock")
+
     # Reranker (nested; env prefix VS_RERANKER__)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
 
     # Image embedding (nested; env prefix VS_IMAGE_EMBEDDING__)
-    image_embedding: ImageEmbeddingSettings = Field(default_factory=ImageEmbeddingSettings)
+    image_embedding: ImageEmbeddingSettings = Field(
+        default_factory=ImageEmbeddingSettings
+    )
 
     # Multimodal embedding (nested; env prefix VS_MULTIMODAL_EMBEDDING__)
     multimodal_embedding: MultimodalEmbeddingSettings = Field(
@@ -341,6 +432,9 @@ class Settings(BaseSettings):
 
     # External LLM chat backend (nested; env prefix VS_LLM__)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+
+    # Blocking-call thread pools (nested; env prefix VS_RUNTIME__)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",

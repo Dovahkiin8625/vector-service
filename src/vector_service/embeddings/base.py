@@ -11,8 +11,9 @@ class Embedder(ABC):
     - Set `dim` (int) and `model_name` (str)
     - Implement `embed_documents` and `embed_query`
 
-    Both methods are synchronous. Async dispatch is the caller's job
-    (use `loop.run_in_executor` from FastAPI routes).
+    Both methods are synchronous. Async routes dispatch them via the
+    isolated model thread pool (``run_in_model`` in
+    ``vector_service.core.threadpools``).
     """
 
     dim: int

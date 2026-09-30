@@ -26,6 +26,7 @@ from vector_service.rerankers import cross_encoder  # noqa: F401  registers "bge
 class _FakeSettings:
     embedding_max_texts_per_request = 3
     embedding_max_chars_per_text = 16
+    inference_timeout_seconds = 60.0
 
 
 class FakeEmbedder:
@@ -101,6 +102,9 @@ def app(monkeypatch):
     a.add_exception_handler(RequestValidationError, _validation_handler)
     a.state.settings = _FakeSettings()
     a.state.embedder = FakeEmbedder()
+    a.state.reranker = None
+    a.state.multimodal_embedder = None
+    a.state.parser = None
 
     # Stub image embedder so the /v1/models image branch doesn't AttributeError.
     class _StubImageEmbedder:

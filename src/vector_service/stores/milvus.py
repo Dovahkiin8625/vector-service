@@ -1,16 +1,17 @@
 """Milvus (standalone / cluster) implementation of VectorStore.
 
 Connects to a Milvus server via :class:`vector_service.stores._milvus_adapter.MilvusAdapter`,
-which wraps the post-2.4 ``MilvusClient`` API. This module is the
+which wraps the ``MilvusClient`` API. This module is the
 production backend used when ``VS_VECTOR_STORE_BACKEND=milvus``.
 
 Two-level hierarchy:
 
-- **Database** — Milvus' native database API (2.4+).
+- **Database** — Milvus' native database API.
 - **Collection** — schema is **fully caller-defined**: any number of
-  scalar fields (one of which is the VARCHAR primary key), exactly one
-  FLOAT_VECTOR field, and any number of indexes (typically one on the
-  vector field). The service does not inject any field.
+  scalar fields (one of which is the VARCHAR primary key), one primary
+  FLOAT_VECTOR field plus any number of additional FLOAT_VECTOR fields
+  (multi-vector collections), and any number of indexes (typically one
+  per vector field). The service does not inject any field.
 
 Construction does **not** open the gRPC connection — the handshake is
 deferred to the first call (``_ensure_connected``) so the service can
@@ -41,15 +42,15 @@ from vector_service.stores.base import (
     VectorStore,
 )
 
-_VALID_METRICS = {"cosine", "ip", "l2", "bm25"}
+_VALID_METRICS = {"cosine", "ip", "l2"}
 _VALID_DTYPES = {
     "bool", "int8", "int16", "int32", "int64", "float", "double",
     "varchar", "json", "sparse_float_vector",
 }
-# System-wide convention for the BM25 sparse field name. The ingest v2
-# helper names it ``sparse`` (``_SPARSE_FIELD`` in ``api/ingest.py``);
-# this store-level pass needs no view of the scalar dtypes, and the
-# adapter re-validates the field's dtype when creating the collection.
+# System-wide convention for the sparse field name. The ingest helper
+# names it ``sparse`` (``_SPARSE_FIELD`` in ``api/ingest.py``); sparse
+# indexes are SPARSE_INVERTED_INDEX / IP — the client-side BM25 encoder
+# produces the vectors, Milvus stores no text and runs no analyzer.
 _SPARSE_FIELD_NAME = "sparse"
 _ID_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
@@ -65,6 +66,7 @@ def _validate_schema(
     primary_field: str,
     vector_field: FieldSpec,
     scalar_fields: list[FieldSpec],
+    extra_vector_fields: list[FieldSpec] | None = None,
 ) -> None:
     if vector_field.dtype != "float_vector":
         raise StoreError(
@@ -96,10 +98,6 @@ def _validate_schema(
         raise StoreError("scalar field names must be unique")
 
     for f in scalar_fields:
-        if f.enable_analyzer and f.dtype != "varchar":
-            raise StoreError(
-                f"field {f.name!r}: enable_analyzer requires dtype='varchar'"
-            )
         if f.dtype not in _VALID_DTYPES:
             raise StoreError(
                 f"unsupported scalar dtype {f.dtype!r}; expected one of "
@@ -108,22 +106,51 @@ def _validate_schema(
         if f.dtype == "varchar" and (f.max_length is None or f.max_length < 1):
             raise StoreError(f"varchar field {f.name!r} must set max_length >= 1")
 
+    # Extra dense vector fields (multi-vector collections).
+    extra_names: list[str] = []
+    for f in extra_vector_fields or []:
+        if f.dtype != "float_vector":
+            raise StoreError(
+                f"extra vector field {f.name!r}: dtype must be 'float_vector', "
+                f"got {f.dtype!r}"
+            )
+        if f.dim is None or f.dim < 1:
+            raise StoreError(
+                f"extra vector field {f.name!r}: dim must be a positive integer"
+            )
+        extra_names.append(f.name)
+    if len(set(extra_names)) != len(extra_names):
+        raise StoreError("extra vector field names must be unique")
+    collisions = set(extra_names) & {*names, vector_field.name}
+    if collisions:
+        raise StoreError(
+            f"extra vector field names collide: {sorted(collisions)}"
+        )
+
 
 def _validate_indexes(
     vector_field: FieldSpec,
     indexes: list[IndexSpec],
+    extra_vector_fields: list[FieldSpec] | None = None,
 ) -> None:
     if not indexes:
         raise StoreError("at least one index covering the vector field is required")
+    dense_targets = {
+        vector_field.name,
+        *(f.name for f in extra_vector_fields or []),
+    }
     for ip in indexes:
-        if ip.field_name == vector_field.name:
-            allowed = _VALID_METRICS - {"bm25"}
+        if ip.field_name in dense_targets:
+            allowed = _VALID_METRICS
         elif ip.field_name == _SPARSE_FIELD_NAME:
-            allowed = {"bm25"}
+            # Sparse inverted indexes search with inner product against
+            # client-encoded (BM25) sparse vectors.
+            allowed = {"ip"}
         else:
             raise StoreError(
-                f"index target {ip.field_name!r} is not the vector field "
-                f"{vector_field.name!r}"
+                f"index target {ip.field_name!r} is neither a vector field "
+                f"{sorted(dense_targets)} nor the sparse field "
+                f"{_SPARSE_FIELD_NAME!r}"
             )
         if ip.metric_type not in allowed:
             raise StoreError(
@@ -151,7 +178,6 @@ class MilvusStore(VectorStore):
         password: str | None = None,
         token: str | None = None,
         timeout: float | None = None,
-        alias: str = "default",
         settings: Settings | None = None,
     ):
         s = settings or get_settings()
@@ -163,7 +189,6 @@ class MilvusStore(VectorStore):
             token=token if token is not None else (s.milvus_token or ""),
             timeout=float(timeout) if timeout is not None else float(s.milvus_timeout),
             db_name="default",
-            alias=alias,
         )
 
     # ------------------------------------------------------------------
@@ -184,10 +209,8 @@ class MilvusStore(VectorStore):
 
     @property
     def backend(self) -> Any:
-        # Kept for backward compatibility with the original
-        # ``/backend/raw`` debug introspection endpoint. No callers
-        # in the current codebase reach into ``store.backend.*``; the
-        # proxy here just delegates to ``self._adapter``.
+        # Backs the ``/backend/raw`` debug introspection endpoint:
+        # a thin proxy delegating to ``self._adapter``.
         return _MilvusBackendProxy(self._adapter)
 
     # ------------------------------------------------------------------
@@ -230,13 +253,15 @@ class MilvusStore(VectorStore):
         vector_field: FieldSpec,
         scalar_fields: list[FieldSpec],
         indexes: list[IndexSpec] | None = None,
+        extra_vector_fields: list[FieldSpec] | None = None,
     ) -> CollectionInfo:
         _validate_name(database, "database")
         _validate_name(name, "collection")
         if indexes is None:
             indexes = []
-        _validate_schema(primary_field, vector_field, scalar_fields)
-        _validate_indexes(vector_field, indexes)
+        _validate_schema(primary_field, vector_field, scalar_fields,
+                         extra_vector_fields)
+        _validate_indexes(vector_field, indexes, extra_vector_fields)
 
         if database not in self.list_databases():
             raise DatabaseNotFound(
@@ -259,10 +284,12 @@ class MilvusStore(VectorStore):
                         "max_length": f.max_length,
                         "nullable": bool(f.nullable),
                         "default_value": f.default_value,
-                        "enable_analyzer": bool(f.enable_analyzer),
-                        "analyzer": dict(f.analyzer) if f.analyzer else None,
                     }
                     for f in scalar_fields
+                ],
+                extra_vector_fields=[
+                    {"name": f.name, "dim": int(f.dim or 0)}
+                    for f in extra_vector_fields or []
                 ],
                 indexes=[
                     {
@@ -293,8 +320,6 @@ class MilvusStore(VectorStore):
                 "max_length": f.max_length,
                 "nullable": bool(f.nullable),
                 "default_value": f.default_value,
-                "enable_analyzer": bool(f.enable_analyzer),
-                "analyzer": dict(f.analyzer) if f.analyzer else None,
             }
             for f in scalar_fields
         ]
@@ -306,6 +331,13 @@ class MilvusStore(VectorStore):
                 "dim": int(vector_field.dim or 0),
             }
         )
+        for f in extra_vector_fields or []:
+            fields_payload.append({
+                "name": f.name,
+                "dtype": "float_vector",
+                "is_primary": False,
+                "dim": int(f.dim or 0),
+            })
         indexes_payload: list[dict] = [
             {
                 "field_name": ip.field_name,
@@ -395,6 +427,8 @@ class MilvusStore(VectorStore):
         ids: list[str],
         vectors: list[list[float]],
         fields: list[dict] | None = None,
+        extra_vectors: dict[str, list[list[float]]] | None = None,
+        sparse_vectors: dict[str, list[dict]] | None = None,
     ) -> None:
         self._adapter.upsert(
             database=database,
@@ -404,6 +438,8 @@ class MilvusStore(VectorStore):
             ids=ids,
             vectors=vectors,
             fields=fields,
+            extra_vectors=extra_vectors,
+            sparse_vectors=sparse_vectors,
         )
 
     def delete(
@@ -512,21 +548,21 @@ class MilvusStore(VectorStore):
         )
         return [Hit(id=h["id"], score=h["score"], fields=h["fields"]) for h in hits]
 
-    def search_text(
+    def search_sparse(
         self,
         database: str,
         collection: str,
-        sparse_field: str,
-        query_text: str,
+        vector_field: str,
+        query_sparse: dict,
         top_k: int = 10,
         filter_expr: str | None = None,
         output_fields: list[str] | None = None,
     ) -> list[Hit]:
-        hits = self._adapter.search_text(
+        hits = self._adapter.search_sparse(
             database=database,
             collection=collection,
-            sparse_field=sparse_field,
-            query_text=query_text,
+            vector_field=vector_field,
+            query_sparse=query_sparse,
             top_k=top_k,
             filter_expr=filter_expr,
             output_fields=output_fields,

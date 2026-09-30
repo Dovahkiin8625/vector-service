@@ -73,6 +73,7 @@ def _make_app(reranker):
     # sole variable under test).
     app.state.embedder = _AlwaysLoaded()
     app.state.image_embedder = _AlwaysLoadedImage()
+    app.state.multimodal_embedder = None
     app.state.store = _NoopStore()
     app.state.reranker = reranker
     return app

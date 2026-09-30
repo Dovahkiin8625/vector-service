@@ -39,7 +39,6 @@ converter-build time.
 """
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import os
 import re
@@ -50,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 from vector_service.core.config import get_settings
 from vector_service.core.errors import VectorServiceError
+from vector_service.core.threadpools import run_in_model
 from vector_service.parsers.base import (
     DocumentParser,
     PARSE_PROFILES,
@@ -106,7 +106,7 @@ def _auto_profile(mime: str | None, probe: PdfProbe | None) -> str:
     return PROFILE_STANDARD
 
 # Per-convert progress sink. Docling runs the conversion on a worker
-# thread (the route dispatches via run_in_executor), so the callback
+# thread (call sites dispatch through the model pool), so the callback
 # cannot travel as a plain closure-scoped global — a contextvar set
 # inside the worker thread is visible to every pipeline stage there.
 _current_progress: contextvars.ContextVar[ProgressCallback | None] = contextvars.ContextVar(
@@ -225,7 +225,8 @@ def _wrap_threaded_pdf_pipeline(pipeline: Any) -> Any:
         return pipeline
     create_run_ctx = getattr(pipeline, "_create_run_ctx", None)
     if not callable(create_run_ctx):
-        # Legacy/simple pipeline — no threaded run context.
+        # Non-threaded paginated pipeline (e.g. VlmPipeline) — the
+        # generator wrapper (_wrap_pipeline) carries its progress.
         return pipeline
 
     def _reporting_run_ctx() -> Any:
@@ -261,10 +262,11 @@ def _make_progress_converter(format_options: dict | None = None) -> "DocumentCon
         def _get_pipeline(self, doc_format: Any) -> Any:
             pipeline = super()._get_pipeline(doc_format)
             if pipeline is not None:
-                # docling 2.12+ threaded StandardPdfPipeline first; the
-                # legacy generator pipeline second. Each wrapper is a
-                # no-op on pipelines it doesn't recognise, and both are
-                # idempotent against converter-level pipeline caching.
+                # The threaded wrapper handles 2.12+'s StandardPdfPipeline;
+                # the generator wrapper handles non-threaded paginated
+                # pipelines (VlmPipeline). Each is a no-op on pipeline
+                # types it doesn't recognise and idempotent against
+                # converter-level pipeline caching.
                 _wrap_threaded_pdf_pipeline(pipeline)
                 _wrap_pipeline(pipeline)
             return pipeline
@@ -455,9 +457,9 @@ class DoclingParser(DocumentParser):
     ) -> ParsedDocument:
         """Parse a file on disk via Docling's ``DocumentConverter``.
 
-        CPU/GPU heavy — call sites dispatch to a thread executor (the
-        route uses ``run_in_executor``). ``on_progress`` ticks once per
-        completed page as ``(pages_done, total_pages)``.
+        CPU/GPU heavy — call sites dispatch via the model thread pool
+        (``run_in_model``). ``on_progress`` ticks once per completed
+        page as ``(pages_done, total_pages)``.
         """
         if not path.exists():
             raise FileNotFoundError(f"file not found: {path}")
@@ -496,12 +498,11 @@ class DoclingParser(DocumentParser):
         it back. The temp file is always removed; extracted images go to
         the configured artifacts directory and persist. The progress
         contextvar is set INSIDE the worker thread — contextvars don't
-        cross run_in_executor threads automatically.
+        cross pool threads automatically.
         """
         probe = probe_pdf_bytes(data) if mime == "application/pdf" else None
         resolved = self._resolve_profile(profile, mime, probe)
         stem = _safe_stem(artifact_stem)
-        loop = asyncio.get_running_loop()
 
         def _work() -> ParsedDocument:
             import tempfile
@@ -532,7 +533,7 @@ class DoclingParser(DocumentParser):
                 result, mime=mime, profile=resolved, probe=probe, stem=stem
             )
 
-        return await loop.run_in_executor(None, _work)
+        return await run_in_model(_work)
 
     # ---- result handling ----------------------------------------------
 
