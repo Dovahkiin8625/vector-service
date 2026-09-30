@@ -328,7 +328,8 @@ def test_worker_succeeds_after_transient_failure(tmp_path):
     row = _run(body())
     assert row["status"] == "done"
     assert row["attempts"] == 1
-    assert h.embedder.calls == 2  # failed dense, retried dense
+    # failed dense, retried dense, summary
+    assert h.embedder.calls == 3
 
 
 # ---- no retry: 4xx ----------------------------------------------------
@@ -388,6 +389,55 @@ def test_worker_cancels_at_stage_boundary(tmp_path):
     assert h.corpus.get_document("doc-j1") is None
     assert h.store.deleted != []
     assert not h.spool_dir_for("j1").exists()
+
+
+# ---- hierarchy: leaf-only derived index --------------------------------
+
+
+MULTI_SECTION = (
+    "# H0\n\n"
+    + " ".join(f"word{i}" for i in range(30))
+    + "\n\n## H1\n\n"
+    + " ".join(f"token{i}" for i in range(30))
+    + "\n\n## H2\n\n"
+    + " ".join(f"item{i}" for i in range(30))
+)
+
+
+def test_worker_upserts_only_leaf_rows_parents_stay_content_only(tmp_path):
+    h = _Harness(tmp_path)
+
+    async def body():
+        job_id = h.enqueue(content=MULTI_SECTION)
+        h.worker.start()
+        try:
+            row = await _wait_terminal(h.corpus, job_id)
+        finally:
+            await h.worker.stop()
+        return row
+
+    row = _run(body())
+    assert row["status"] == "done"
+
+    # Upsert carries exactly three ids — the leaf rows at flat
+    # hierarchy positions 4..6 — never the document/section parents.
+    assert h.store.upserts == 1
+    upserted_ids = h.store.upsert_args[0][4]
+    assert upserted_ids == ["doc-j1_4", "doc-j1_5", "doc-j1_6"]
+
+    with h.corpus._txn() as conn:
+        levels = dict(conn.execute(
+            "SELECT level, COUNT(*) AS n FROM chunks GROUP BY level"
+        ).fetchall())
+    assert levels == {"document": 1, "section": 3, "chunk": 3}
+
+    # BM25 fit input is the same leaf population, in source order.
+    leaf_texts = h.corpus.leaf_chunk_texts("default", "ingest")
+    assert len(leaf_texts) == 3
+    assert leaf_texts[0].startswith("# H0")
+    assert "word29" in leaf_texts[0]
+    assert leaf_texts[1].startswith("# H0\n## H1")
+    assert leaf_texts[2].startswith("# H0\n## H2")
 
 
 # ---- corrupted row ----------------------------------------------------

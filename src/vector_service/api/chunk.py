@@ -32,6 +32,7 @@ from vector_service.chunking.llm_chunker import (
     contextualize_chunks,
     get_chat_client,
     is_llm_configured,
+    summarize_chunks,
 )
 from vector_service.core.config import get_settings
 from vector_service.schemas.errors import ErrorEnvelope
@@ -58,6 +59,7 @@ class ChunkRequest(BaseModel):
                 "strategy": "recursive",
                 "options": {},
                 "add_context": False,
+                "add_summary": False,
                 "chunk_size": 500,
                 "chunk_overlap": 75,
                 "metadata": {"title": "Annual Report", "filename": "report.pdf"},
@@ -80,6 +82,10 @@ class ChunkRequest(BaseModel):
     add_context: bool = Field(
         default=False,
         description="Generate an LLM situating context per chunk (needs VS_LLM__*).",
+    )
+    add_summary: bool = Field(
+        default=False,
+        description="Generate an LLM factual summary per chunk (needs VS_LLM__*).",
     )
     chunk_size: int = Field(default=500, ge=1, le=8192)
     chunk_overlap: int = Field(default=75, ge=0, le=4096)
@@ -111,6 +117,7 @@ def _chunks_to_items(chunks: list[Chunk]) -> list[ChunkItem]:
             section_header=c.section_header,
             page_number=c.page_number,
             context=c.context,
+            summary=c.summary,
         )
         for c in chunks
     ]
@@ -172,8 +179,8 @@ def chunk_markdown(request: Request, body: ChunkRequest):
             )
         embed_fn = embedder.embed_documents
 
-    if body.strategy == "llm" or body.add_context:
-        settings = get_settings()
+    settings = get_settings()
+    if body.strategy == "llm" or body.add_context or body.add_summary:
         if not is_llm_configured(settings):
             raise _unavailable(
                 "llm_unavailable",
@@ -193,10 +200,16 @@ def chunk_markdown(request: Request, body: ChunkRequest):
     chunks = chunker.chunk(body.markdown, page_numbers=body.page_numbers)
 
     if body.add_context and chunks:
-        settings = get_settings()
         contextualize_chunks(
             chunks,
             document=body.markdown,
+            chat_fn=chat_fn,
+            max_concurrency=settings.llm.max_concurrency,
+        )
+
+    if body.add_summary and chunks:
+        summarize_chunks(
+            chunks,
             chat_fn=chat_fn,
             max_concurrency=settings.llm.max_concurrency,
         )

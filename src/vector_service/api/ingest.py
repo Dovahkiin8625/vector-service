@@ -33,13 +33,18 @@ On failure at any stage the job is marked ``failed`` and cleanup runs:
 corpus delete (cascades the index registry), Milvus delete by
 ``doc_id`` (best-effort), and artifact-folder discard.
 
-The thin collection schema:
+The thin collection schema (leaf rows only):
 
 - ``id`` (VARCHAR(64), primary key) — ``{doc_id}_{chunk_index}``
 - ``vector`` (FLOAT_VECTOR, dim=embedder.dim)
+- ``summary_vector`` (FLOAT_VECTOR, dim=embedder.dim) — embedded LLM
+  summary (text fallback)
 - ``doc_id`` (VARCHAR(64)) — filter / rollback key
 - ``chunk_index`` (INT64) — sort order within a document
 - ``sparse`` (SPARSE_FLOAT_VECTOR) — client-side BM25 vector
+
+Section/document parents are content-only SQLite rows; they never
+enter the derived index.
 """
 
 from __future__ import annotations
@@ -59,13 +64,17 @@ from fastapi import HTTPException
 
 from vector_service.api.parse import _validate_profile
 from vector_service.chunking import build_chunker, list_strategies
-from vector_service.chunking.base import Chunk
+from vector_service.chunking.base import LEVEL_CHUNK, Chunk
+from vector_service.chunking.hierarchy import build_hierarchy
 from vector_service.chunking.llm_chunker import (
     contextualize_chunks,
     embed_text,
     get_chat_client,
     is_llm_configured,
+    summarize_chunks,
 )
+from vector_service.chunking.structure import prepare_sections
+from vector_service.chunking.tokens import count_tokens
 from vector_service.core.config import get_settings
 from vector_service.core.errors import (
     BackendError,
@@ -109,6 +118,7 @@ _VECTOR_FIELD = "vector"
 _DOC_ID_FIELD = "doc_id"
 _CHUNK_INDEX_FIELD = "chunk_index"
 _SPARSE_FIELD = "sparse"
+_SUMMARY_VECTOR_FIELD = "summary_vector"
 
 # Model tags recorded in the chunk_indexes registry.
 _SPARSE_MODEL = "bm25-jieba"
@@ -142,10 +152,16 @@ def _ingest_scalar_fields() -> list[FieldSpec]:
 
 
 def _ingest_indexes() -> list[IndexSpec]:
-    """Dense HNSW index plus the sparse inverted (IP) index."""
+    """Dense HNSW, summary HNSW, plus the sparse inverted (IP) index."""
     return [
         IndexSpec(
             field_name=_VECTOR_FIELD,
+            metric_type="cosine",
+            index_type="HNSW",
+            params={"M": 16, "efConstruction": 200},
+        ),
+        IndexSpec(
+            field_name=_SUMMARY_VECTOR_FIELD,
             metric_type="cosine",
             index_type="HNSW",
             params={"M": 16, "efConstruction": 200},
@@ -160,8 +176,24 @@ def _ingest_indexes() -> list[IndexSpec]:
 
 # The thin schema *is* the former "v2" schema; aliases kept for the
 # migration routine below until the retrieval rewrite removes both.
+# The migration targets the plain v2 schema — no summary vector.
 _ingest_scalar_fields_v2 = _ingest_scalar_fields
-_ingest_indexes_v2 = _ingest_indexes
+
+
+def _ingest_indexes_v2() -> list[IndexSpec]:
+    return [
+        IndexSpec(
+            field_name=_VECTOR_FIELD,
+            metric_type="cosine",
+            index_type="HNSW",
+            params={"M": 16, "efConstruction": 200},
+        ),
+        IndexSpec(
+            field_name=_SPARSE_FIELD,
+            metric_type="ip",
+            index_type="SPARSE_INVERTED_INDEX",
+        ),
+    ]
 
 
 def schema_version(info: Any) -> int:
@@ -331,6 +363,7 @@ class PreparedIngest:
     strategy: str = "recursive"
     chunk_options: dict[str, Any] = field(default_factory=dict)
     add_context: bool = False
+    add_summary: bool = False
 
 
 async def _prepare_ingest(
@@ -346,6 +379,7 @@ async def _prepare_ingest(
     strategy: str = "recursive",
     chunk_options: str = "{}",
     add_context: bool = False,
+    add_summary: bool = False,
     check_embedder: bool = True,
 ) -> PreparedIngest:
     """Validate arguments and spool the upload into memory.
@@ -395,7 +429,7 @@ async def _prepare_ingest(
         )
 
     # LLM-backed features need the external chat backend.
-    if strategy == "llm" or add_context:
+    if strategy == "llm" or add_context or add_summary:
         if not is_llm_configured(settings):
             raise HTTPException(
                 503,
@@ -537,6 +571,7 @@ async def _prepare_ingest(
         strategy=strategy,
         chunk_options=parsed_options,
         add_context=bool(add_context),
+        add_summary=bool(add_summary),
     )
 
 
@@ -756,8 +791,8 @@ async def _run_ingest_pipeline(
             functools.partial(repo.mark_job, job_id, JOB_CHUNKING)
         )
         await emit({"type": "stage", "stage": "chunk"})
-        chunks = await run_in_model(
-            _produce_chunks,
+        rows = await run_in_model(
+            _produce_hierarchy,
             markdown,
             prepared,
             settings,
@@ -765,8 +800,11 @@ async def _run_ingest_pipeline(
             chunk_size,
             chunk_overlap,
         )
+        # Only leaves enter the derived index; parents are content
+        # rows in the corpus.
+        leaves = [r for r in rows if r.level == LEVEL_CHUNK]
 
-        if not chunks:
+        if not leaves:
             # No content — finish the job empty and drop the images.
             await asyncio.to_thread(_discard_artifacts, doc_id)
             await run_in_sqlite(
@@ -791,11 +829,9 @@ async def _run_ingest_pipeline(
             functools.partial(repo.mark_job, job_id, JOB_EMBEDDING)
         )
         await emit({"type": "stage", "stage": "embed"})
-        # Context prefixes (when enrichment ran) participate in embedding.
-        texts = [embed_text(c) for c in chunks]
         try:
-            vectors = await asyncio.wait_for(
-                run_in_model(embedder.embed_documents, texts),
+            vectors, summary_vectors = await asyncio.wait_for(
+                run_in_model(_embed_leaf_batches, embedder, leaves),
                 timeout=inference_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -824,7 +860,7 @@ async def _run_ingest_pipeline(
                             "code": "embedder_unavailable",
                             "message": str(e) or "embedder unavailable",
                             "model": embed_model,
-                            "chunk_count": len(chunks),
+                            "chunk_count": len(leaves),
                             "exception_type": type(e).__name__,
                         }
                     },
@@ -861,28 +897,37 @@ async def _run_ingest_pipeline(
             page_count=_as_optional_int(extra_metadata.get(_PAGE_COUNT_FIELD)),
             created_ts=now,
         )
-        # Flat leaf rows — §1 has no section/document parents. Ids are
-        # ``{doc_id}_{ordinal}`` and chunk_index is the source order.
+        # One row per hierarchy position. Ids are
+        # ``{doc_id}_{chunk_index}``; document-local link keys resolve
+        # to those ids before the rows are written.
+        key_to_chunk_id = {
+            row.key: f"{doc_id}_{row.chunk_index}"
+            for row in rows
+            if row.key is not None
+        }
         chunk_records = [
             ChunkRecord(
-                chunk_id=f"{doc_id}_{i}",
+                chunk_id=f"{doc_id}_{row.chunk_index}",
                 doc_id=doc_id,
                 database=database,
                 collection=collection,
-                chunk_index=i,
-                text=c.text,
-                section_header=c.section_header,
-                page_number=c.page_number,
-                token_count=c.token_count,
-                context=c.context,
-                summary="",
-                parent_id=None,
-                level="chunk",
-                char_start=None,
-                char_end=None,
+                chunk_index=row.chunk_index,
+                text=row.text,
+                section_header=row.section_header,
+                page_number=row.page_number,
+                token_count=row.token_count,
+                context=row.context,
+                summary=row.summary,
+                parent_id=(
+                    key_to_chunk_id[row.parent_key]
+                    if row.parent_key is not None else None
+                ),
+                level=row.level,
+                char_start=row.char_start,
+                char_end=row.char_end,
                 created_ts=now,
             )
-            for i, c in enumerate(chunks)
+            for row in rows
         ]
         await run_in_sqlite(repo.store_document, document, chunk_records)
         corpus_stored = True
@@ -898,7 +943,7 @@ async def _run_ingest_pipeline(
                 bm25.encode_documents,
                 database,
                 collection,
-                [c.text for c in chunks],
+                [c.text for c in leaves],
             )
         except Exception as e:
             log.exception("ingest_sparse_encode_failed")
@@ -939,14 +984,18 @@ async def _run_ingest_pipeline(
         ) as e:
             await _abort(_store_http_error(e, op="create_collection"))
 
-        # Every row is a leaf in the flat schema.
-        chunk_ids = [c.chunk_id for c in chunk_records]
+        # Leaf rows only — parents have no presence in the derived
+        # index.
+        leaf_records = [
+            c for c in chunk_records if c.level == LEVEL_CHUNK
+        ]
+        chunk_ids = [c.chunk_id for c in leaf_records]
         fields = [
             {
                 _DOC_ID_FIELD: doc_id,
                 _CHUNK_INDEX_FIELD: int(c.chunk_index),
             }
-            for c in chunk_records
+            for c in leaf_records
         ]
 
         try:
@@ -960,6 +1009,7 @@ async def _run_ingest_pipeline(
                     chunk_ids,
                     vectors,
                     fields,
+                    extra_vectors={_SUMMARY_VECTOR_FIELD: summary_vectors},
                     sparse_vectors={_SPARSE_FIELD: sparse_vectors},
                 ),
             )
@@ -1010,6 +1060,18 @@ async def _run_ingest_pipeline(
                     doc_id=doc_id,
                     database=database,
                     collection=collection,
+                    index_kind="summary",
+                    model=embed_model,
+                    index_ref=f"{collection}:{_SUMMARY_VECTOR_FIELD}",
+                    created_ts=registry_now,
+                )
+            )
+            entries.append(
+                IndexEntry(
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    database=database,
+                    collection=collection,
                     index_kind="sparse",
                     model=_SPARSE_MODEL,
                     index_ref=collection,
@@ -1018,12 +1080,12 @@ async def _run_ingest_pipeline(
             )
         await run_in_sqlite(repo.record_indexes, entries)
 
-        tokens_used = sum(c.token_count for c in chunks)
+        tokens_used = sum(c.token_count for c in leaves)
         await run_in_sqlite(
             functools.partial(
                 repo.finish_job,
                 job_id,
-                chunk_count=len(chunks),
+                chunk_count=len(leaves),
                 page_count=page_count,
                 tokens_used=tokens_used,
             ),
@@ -1033,12 +1095,12 @@ async def _run_ingest_pipeline(
             doc_id=doc_id,
             job_id=job_id,
             collection=f"{database}/{collection}",
-            chunk_count=len(chunks),
+            chunk_count=len(leaves),
             tokens_used=tokens_used,
         )
         return IngestResponse(
             doc_id=doc_id,
-            chunk_count=len(chunks),
+            chunk_count=len(leaves),
             page_count=page_count,
             tokens_used=tokens_used,
         )
@@ -1080,6 +1142,28 @@ def _as_optional_int(value: Any) -> int | None:
         return None
 
 
+def _produce_hierarchy(
+    markdown: str,
+    prepared: PreparedIngest,
+    settings: Any,
+    embedder: Any,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[Chunk]:
+    """Build leaves, then wrap them with section/document parents.
+
+    Runs entirely in a worker thread. Returns the flat hierarchy
+    rows (root, sections, leaves).
+    """
+    leaves = _produce_chunks(
+        markdown, prepared, settings, embedder, chunk_size, chunk_overlap
+    )
+    sections = prepare_sections(markdown)
+    return build_hierarchy(
+        markdown, sections, leaves, token_counter=count_tokens
+    )
+
+
 def _produce_chunks(
     markdown: str,
     prepared: PreparedIngest,
@@ -1088,7 +1172,8 @@ def _produce_chunks(
     chunk_size: int,
     chunk_overlap: int,
 ) -> list[Chunk]:
-    """Build the named chunker, run it, optionally contextualize.
+    """Build the named chunker, run it, optionally contextualize /
+    summarize the leaves.
 
     Runs entirely in a worker thread. The LLM client is cached
     process-wide (:func:`get_chat_client`); pre-flight validation
@@ -1097,7 +1182,7 @@ def _produce_chunks(
     strategy = prepared.strategy
     embed_fn = embedder.embed_documents if strategy == "semantic" else None
     chat_fn = None
-    if strategy == "llm" or prepared.add_context:
+    if strategy == "llm" or prepared.add_context or prepared.add_summary:
         chat_fn = get_chat_client(settings).as_chat_fn()
 
     chunker = build_chunker(
@@ -1118,7 +1203,26 @@ def _produce_chunks(
             max_concurrency=settings.llm.max_concurrency,
         )
 
+    if prepared.add_summary and chunks:
+        summarize_chunks(
+            chunks,
+            chat_fn=chat_fn,
+            max_concurrency=settings.llm.max_concurrency,
+        )
+
     return chunks
+
+
+def _embed_leaf_batches(embedder: Any, leaves: list[Chunk]) -> tuple:
+    """Embed dense vectors, then summary vectors, for the leaves.
+
+    Summary input is the LLM summary when present, else the chunk
+    text (a failed summary still gets a vector).
+    """
+    vectors = embedder.embed_documents([embed_text(c) for c in leaves])
+    summary_inputs = [c.summary or c.text for c in leaves]
+    summary_vectors = embedder.embed_documents(summary_inputs)
+    return vectors, summary_vectors
 
 
 # ---- store-side helpers ----------------------------------------------
@@ -1162,6 +1266,13 @@ def create_thin_collection(
             vector_field=FieldSpec(name=_VECTOR_FIELD, dtype="float_vector", dim=dim),
             scalar_fields=_ingest_scalar_fields(),
             indexes=_ingest_indexes(),
+            extra_vector_fields=[
+                FieldSpec(
+                    name=_SUMMARY_VECTOR_FIELD,
+                    dtype="float_vector",
+                    dim=dim,
+                )
+            ],
         )
     except CollectionAlreadyExists:
         # Lost the race; another worker created the same collection.

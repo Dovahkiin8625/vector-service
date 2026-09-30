@@ -16,7 +16,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from vector_service.chunking.base import Chunk
+from vector_service.chunking.base import LEVEL_CHUNK, Chunk
 from vector_service.chunking.tokens import tail_tokens
 
 # Header regex: ``#``-prefixed line at the start of a line. The
@@ -45,19 +45,33 @@ class Section:
     between this section's header line and the next sibling or
     higher-priority header. ``page_number`` is propagated from page
     markers or the section that contained this one.
+
+    ``ord`` is the dense, document-wide section ordinal (including a
+    leading header-less block), used in the ``section:{ord}`` link
+    key. ``char_start`` / ``char_end`` are the raw source offsets of
+    the section (from its own header to the next header / EOF).
     """
 
     header_path: list[str] = field(default_factory=list)
     body: str = ""
     page_number: int | None = None
+    ord: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 @dataclass
 class Unit:
-    """A pre-split piece of text awaiting greedy packing."""
+    """A pre-split piece of text awaiting greedy packing.
+
+    ``char_start`` / ``char_end`` locate the unit in its source
+    string (callers translate to document offsets).
+    """
 
     text: str
     page_number: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 # ---- sections / pages --------------------------------------------------
@@ -69,18 +83,29 @@ def split_into_sections(markdown: str) -> list[Section]:
 
     Headers without a body produce an empty ``Section``; that's fine
     — chunkers simply skip a heading-only section when its body is
-    empty.
+    empty. Every emitted section (including a leading header-less
+    block) gets a dense ``ord`` and raw source offsets.
     """
     matches = list(HEADER_RX.finditer(markdown))
     if not matches:
-        return [Section(header_path=[], body=markdown.strip())]
+        return [
+            Section(
+                header_path=[], body=markdown.strip(), ord=0,
+                char_start=0, char_end=len(markdown),
+            )
+        ]
 
     sections: list[Section] = []
     # Anything before the first header goes into a leading
     # header-less section.
     pre = markdown[: matches[0].start()].strip()
     if pre:
-        sections.append(Section(header_path=[], body=pre))
+        sections.append(
+            Section(
+                header_path=[], body=pre, ord=0,
+                char_start=0, char_end=matches[0].start(),
+            )
+        )
 
     # Stack of (header_level, header_text); ``[-1]`` is the current
     # section's level.
@@ -100,7 +125,13 @@ def split_into_sections(markdown: str) -> list[Section]:
         body = markdown[body_start:body_end].strip()
 
         sections.append(
-            Section(header_path=[t for _lvl, t in stack], body=body)
+            Section(
+                header_path=[t for _lvl, t in stack],
+                body=body,
+                ord=len(sections),
+                char_start=m.start(),
+                char_end=body_end,
+            )
         )
     return sections
 
@@ -190,45 +221,63 @@ def split_words(text: str) -> list[str]:
 # ---- code blocks -------------------------------------------------------
 
 
-def split_around_code_blocks(body: str) -> list[tuple[bool, str]]:
-    """Split ``body`` into runs of (is_code, text) pairs.
+def split_around_code_blocks(
+    body: str
+) -> list[tuple[bool, str, int, int]]:
+    """Split ``body`` into runs of (is_code, text, char_start, char_end).
 
     Code blocks stay atomic; prose on either side stays available
-    for recursive splitting.
+    for recursive splitting. Offsets are relative to ``body`` and
+    point at the stripped piece's exact source position.
     """
-    pieces: list[tuple[bool, str]] = []
-    lines = body.split("\n")
+    pieces: list[tuple[bool, str, int, int]] = []
+    line_spans: list[tuple[int, int]] = []
+    cursor = 0
+    for line in body.split("\n"):
+        line_spans.append((cursor, cursor + len(line)))
+        cursor += len(line) + 1  # account for the split-off "\n"
     in_code = False
-    buf: list[str] = []
-    code_buf: list[str] = []
+    buf: list[int] = []
+    code_buf: list[int] = []
+
+    def _span_for(indices: list[int]) -> tuple[int, int]:
+        start = line_spans[indices[0]][0]
+        end = line_spans[indices[-1]][1]
+        return start, end
 
     def _flush_prose() -> None:
         if buf:
-            pieces.append((False, "\n".join(buf).strip()))
+            start, end = _span_for(buf)
+            text = body[start:end].strip()
+            shift = body[start:end].find(text)
+            pieces.append((False, text, start + shift, start + shift + len(text)))
             buf.clear()
 
     def _flush_code() -> None:
         if code_buf:
-            pieces.append((True, "\n".join(code_buf).strip()))
+            start, end = _span_for(code_buf)
+            text = body[start:end].strip()
+            shift = body[start:end].find(text)
+            pieces.append((True, text, start + shift, start + shift + len(text)))
             code_buf.clear()
 
-    for line in lines:
+    for i, line in enumerate(body.split("\n")):
         if CODE_FENCE_RX.match(line):
             if not in_code:
                 _flush_prose()
                 in_code = True
-                code_buf.append(line)
+                code_buf.append(i)
             else:
-                code_buf.append(line)
+                code_buf.append(i)
                 _flush_code()
                 in_code = False
         elif in_code:
-            code_buf.append(line)
+            code_buf.append(i)
         else:
-            buf.append(line)
+            buf.append(i)
     _flush_prose()
     _flush_code()
-    return [(is_code, t) for is_code, t in pieces if t]
+    return pieces
 
 
 # ---- headers -----------------------------------------------------------
@@ -268,6 +317,7 @@ def pack_units(
     page_number: int | None = None,
     separator: str = "\n\n",
     overlap: int = 0,
+    section_ord: int | None = None,
 ) -> list[Chunk]:
     """Greedily pack text units into token-sized chunks.
 
@@ -277,9 +327,14 @@ def pack_units(
     larger than ``chunk_size`` is emitted on its own rather than
     split — callers pre-split oversized units into sentences/words
     when hard size bounds matter.
+
+    Every emitted chunk carries ``section_ord`` and a best-effort
+    char span: the union of its constituent units' source offsets
+    (the overlap prefix is not counted).
     """
     chunks: list[Chunk] = []
     buf: list[str] = []
+    buf_spans: list[tuple[int, int]] = []
     prefix = ""  # overlap tail carried into the in-progress chunk
 
     def _render() -> str:
@@ -287,9 +342,11 @@ def pack_units(
         return separator.join(parts).strip()
 
     def _flush() -> None:
-        nonlocal buf, prefix
+        nonlocal buf, buf_spans, prefix
         body = _render()
         if body:
+            char_start = min(s for s, _e in buf_spans) if buf_spans else None
+            char_end = max(e for _s, e in buf_spans) if buf_spans else None
             chunks.append(
                 Chunk(
                     text=body,
@@ -297,15 +354,23 @@ def pack_units(
                     token_count=token_counter(body),
                     section_header=section_header,
                     page_number=page_number,
+                    level=LEVEL_CHUNK,
+                    section_ord=section_ord,
+                    char_start=char_start,
+                    char_end=char_end,
                 )
             )
             prefix = tail_tokens(body, overlap) if overlap else ""
         else:
             prefix = ""
         buf = []
+        buf_spans = []
 
     for raw in units:
-        text = raw.text if isinstance(raw, Unit) else raw
+        if isinstance(raw, Unit):
+            text, span = raw.text, (raw.char_start, raw.char_end)
+        else:
+            text, span = raw, None
         text = text.strip()
         if not text:
             continue
@@ -314,6 +379,8 @@ def pack_units(
             _flush()
 
         buf.append(text)
+        if span is not None and span[0] is not None and span[1] is not None:
+            buf_spans.append(span)
 
         # Single unit (plus any overlap prefix) over the cap: drop
         # the overlap first; if it's still too big the unit itself is
@@ -336,6 +403,39 @@ def _render_with(buf: list[str], extra: str, prefix: str, separator: str) -> str
 # ---- unit building / degradation --------------------------------------
 
 
+def _segments_with_spans(
+    pattern: re.Pattern, text: str
+) -> list[tuple[str, int, int]]:
+    """Split ``text`` at pattern matches, yielding stripped (segment,
+    start, end) tuples with exact source offsets."""
+    segments: list[tuple[str, int, int]] = []
+    cursor = 0
+    for m in pattern.finditer(text):
+        seg = text[cursor:m.start()]
+        stripped = seg.strip()
+        if stripped:
+            shift = seg.find(stripped)
+            segments.append(
+                (stripped, cursor + shift, cursor + shift + len(stripped))
+            )
+        cursor = m.end()
+    seg = text[cursor:]
+    stripped = seg.strip()
+    if stripped:
+        shift = seg.find(stripped)
+        segments.append(
+            (stripped, cursor + shift, cursor + shift + len(stripped))
+        )
+    return segments
+
+
+# Blank-line separator between paragraphs (mirrors split_paragraphs).
+_PARAGRAPH_SEP_RX = re.compile(r"\n\s*\n")
+
+# Word token for last-resort packing.
+_WORD_RX = re.compile(r"\S+")
+
+
 def units_for_section(
     body: str,
     *,
@@ -347,19 +447,28 @@ def units_for_section(
     - fenced code blocks stay atomic (even when oversized);
     - paragraphs that fit ``chunk_size`` become one unit each;
     - oversized paragraphs degrade to sentences, then word packs.
+
+    Every unit carries offsets relative to ``body``.
     """
     units: list[Unit] = []
-    for is_code, piece in split_around_code_blocks(body):
+    for is_code, piece, p_start, p_end in split_around_code_blocks(body):
         if is_code:
-            units.append(Unit(text=piece))
+            units.append(Unit(text=piece, char_start=p_start, char_end=p_end))
             continue
-        for para in split_paragraphs(piece):
+        for para, pr_start, pr_end in _segments_with_spans(
+            _PARAGRAPH_SEP_RX, piece
+        ):
+            start = p_start + pr_start
+            end = p_start + pr_end
             if token_counter(para) <= chunk_size:
-                units.append(Unit(text=para))
+                units.append(Unit(text=para, char_start=start, char_end=end))
             else:
                 units.extend(
                     degrade_paragraph(
-                        para, chunk_size=chunk_size, token_counter=token_counter
+                        para,
+                        chunk_size=chunk_size,
+                        token_counter=token_counter,
+                        base=start,
                     )
                 )
     return units
@@ -370,28 +479,47 @@ def degrade_paragraph(
     *,
     chunk_size: int,
     token_counter,
+    base: int = 0,
 ) -> list[Unit]:
     """Split an oversized paragraph into sentence units.
 
     A sentence that is itself too long is word-packed as a last
-    resort. Whitespace-only input yields no units.
+    resort. Whitespace-only input yields no units. ``base`` is the
+    source offset of ``para`` in the caller's string.
     """
     units: list[Unit] = []
-    for sent in split_sentences(para):
+    for sent, s_start, s_end in _segments_with_spans(SENTENCE_BOUNDARY_RX, para):
+        start = base + s_start
+        end = base + s_end
         if token_counter(sent) <= chunk_size:
-            units.append(Unit(text=sent))
+            units.append(Unit(text=sent, char_start=start, char_end=end))
             continue
-        buf: list[str] = []
+        words: list[str] = []
+        word_spans: list[tuple[int, int]] = []
         buf_tokens = 0
-        for w in split_words(sent):
-            if buf and buf_tokens + token_counter(w) > chunk_size:
-                units.append(Unit(text=" ".join(buf)))
-                buf = []
-                buf_tokens = 0
-            buf.append(w)
-            buf_tokens += token_counter(w)
-        if buf:
-            units.append(Unit(text=" ".join(buf)))
+
+        def _emit_words() -> None:
+            nonlocal words, word_spans, buf_tokens
+            if words:
+                units.append(
+                    Unit(
+                        text=" ".join(words),
+                        char_start=start + word_spans[0][0],
+                        char_end=start + word_spans[-1][1],
+                    )
+                )
+            words = []
+            word_spans = []
+            buf_tokens = 0
+
+        for wm in _WORD_RX.finditer(sent):
+            word = wm.group(0)
+            if words and buf_tokens + token_counter(word) > chunk_size:
+                _emit_words()
+            words.append(word)
+            word_spans.append((wm.start(), wm.end()))
+            buf_tokens += token_counter(word)
+        _emit_words()
     return units
 
 
@@ -415,28 +543,46 @@ def merge_small_chunks(
     instead. A tiny *trailing* chunk is absorbed regardless of the
     cap — one slightly-oversized chunk beats an uninformative
     fragment. Metadata (breadcrumb / page) of the dominant side is
-    kept.
+    kept; char spans are unioned.
     """
     if not chunks or min_size <= 1:
         return chunks
 
+    def _merge_into(prev: Chunk, ch: Chunk) -> None:
+        prev.text = prev.text + separator + ch.text
+        prev.token_count = token_counter(prev.text)
+        starts = [s for s in (prev.char_start, ch.char_start) if s is not None]
+        ends = [e for e in (prev.char_end, ch.char_end) if e is not None]
+        if starts:
+            prev.char_start = min(starts)
+        if ends:
+            prev.char_end = max(ends)
+
     out: list[Chunk] = []
     for ch in chunks:
-        if out and out[-1].token_count < min_size:
+        # Never merge across section boundaries: every leaf must keep
+        # belonging to exactly one section.
+        if (
+            out
+            and out[-1].section_ord == ch.section_ord
+            and out[-1].token_count < min_size
+        ):
             candidate = out[-1].text + separator + ch.text
             if token_counter(candidate) <= chunk_size:
-                out[-1].text = candidate
-                out[-1].token_count = token_counter(candidate)
+                _merge_into(out[-1], ch)
                 continue
         out.append(ch)
 
     # A tiny chunk that couldn't merge forward (previous near cap)
     # merges with the following chunk as it arrives; what remains is
-    # a tiny *tail*, absorbed into the previous chunk unconditionally.
-    if len(out) >= 2 and out[-1].token_count < min_size:
-        prev = out[-2]
-        prev.text = prev.text + separator + out[-1].text
-        prev.token_count = token_counter(prev.text)
+    # a tiny *tail*, absorbed into the previous chunk unconditionally
+    # (but still never across the section boundary).
+    if (
+        len(out) >= 2
+        and out[-1].section_ord == out[-2].section_ord
+        and out[-1].token_count < min_size
+    ):
+        _merge_into(out[-2], out[-1])
         out.pop()
 
     for i, c in enumerate(out):

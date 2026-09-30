@@ -101,3 +101,32 @@ def test_chunk_overlap_ge_size_is_400(client):
     )
     assert r.status_code == 400
     assert r.json()["detail"]["error"]["code"] == "invalid_chunk_config"
+
+
+def test_chunk_add_summary_without_config_is_503(client):
+    r = client.post("/v1/chunk", json=_body(add_summary=True))
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"]["code"] == "llm_unavailable"
+
+
+def test_chunk_add_summary_success_fills_summary(client, monkeypatch):
+    class _FakeChat:
+        def as_chat_fn(self):
+            return lambda _messages: "a factual summary"
+
+    class _LLM:
+        max_concurrency = 2
+
+    class _Settings:
+        llm = _LLM()
+
+    monkeypatch.setattr(chunk_mod, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(chunk_mod, "is_llm_configured", lambda _s: True)
+    monkeypatch.setattr(
+        chunk_mod, "get_chat_client", lambda _s: _FakeChat()
+    )
+
+    r = client.post("/v1/chunk", json=_body(add_summary=True))
+    assert r.status_code == 200
+    chunks = r.json()["chunks"]
+    assert chunks and all(c["summary"] == "a factual summary" for c in chunks)

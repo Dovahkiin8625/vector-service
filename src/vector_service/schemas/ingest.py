@@ -200,6 +200,7 @@ class ChunkItem(BaseModel):
                 "section_header": "1. Introduction > 1.1 Background",
                 "page_number": 1,
                 "context": None,
+                "summary": None,
             }
         }
     )
@@ -235,6 +236,14 @@ class ChunkItem(BaseModel):
             "LLM-generated situating prefix (contextual retrieval) "
             "to prepend at embed time. ``None`` when enrichment is "
             "off or failed. Not part of the stored chunk text."
+        ),
+    )
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "LLM-generated factual summary of the chunk; the source "
+            "of ``summary_vector``. ``None`` when summarization is "
+            "off or the call failed."
         ),
     )
 

@@ -69,6 +69,7 @@ async def submit_ingest_job(
     strategy: str = Form("recursive"),
     chunk_options: str = Form("{}"),
     add_context: bool = Form(False),
+    add_summary: bool = Form(False),
 ) -> JobSubmitResponse:
     """Validate, spool the upload, and enqueue."""
     settings = request.app.state.settings
@@ -87,6 +88,7 @@ async def submit_ingest_job(
         strategy=strategy,
         chunk_options=chunk_options,
         add_context=add_context,
+        add_summary=add_summary,
         check_embedder=False,
     )
 
@@ -110,6 +112,7 @@ async def submit_ingest_job(
             "strategy": strategy,
             "chunk_options": prepared.chunk_options,
             "add_context": add_context,
+            "add_summary": add_summary,
             "metadata": prepared.extra_metadata,
             "filename": prepared.filename,
             "mime": prepared.mime,

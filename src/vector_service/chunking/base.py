@@ -15,6 +15,12 @@ from typing import Callable
 
 from vector_service.chunking.tokens import count_tokens
 
+# Hierarchy level tags — the values are persisted in ``chunks.level``
+# and carried on the wire, so treat renames like an API version.
+LEVEL_CHUNK = "chunk"
+LEVEL_SECTION = "section"
+LEVEL_DOCUMENT = "document"
+
 
 @dataclass
 class Chunk:
@@ -28,6 +34,15 @@ class Chunk:
     LLM-generated situating prefix (Anthropic contextual retrieval);
     it is prepended at embed time but is NOT part of the stored
     chunk text.
+
+    Hierarchy fields: ``level`` is this row's level; ``key`` /
+    ``parent_key`` are document-local link keys (``"document"`` /
+    ``"section:{ord}"`` / ``"chunk:{i}"``) resolved to real
+    ``chunk_id`` values at persist time. ``section_ord`` tags a leaf
+    with its source section; ``char_start`` / ``char_end`` are the
+    source offsets of the row's *own* (non-reconstructed) text.
+    ``summary`` holds the optional LLM chunk summary, embedded as
+    ``summary_vector``.
     """
 
     text: str
@@ -36,6 +51,13 @@ class Chunk:
     section_header: str
     page_number: int | None = None
     context: str | None = None
+    summary: str | None = None
+    key: str | None = None
+    parent_key: str | None = None
+    level: str = LEVEL_CHUNK
+    section_ord: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 class Chunker(ABC):

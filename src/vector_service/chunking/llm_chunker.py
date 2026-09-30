@@ -115,6 +115,8 @@ class LLMChunker(BaseChunker):
                         header_prefix(section.header_path)
                         if section.header_path else ""
                     ),
+                    section_ord=section.ord,
+                    header_char_start=section.char_start,
                 )
             )
         return merge_small_chunks(
@@ -132,6 +134,8 @@ class LLMChunker(BaseChunker):
         section_header: str,
         page_number: int | None,
         prepend_header: str,
+        section_ord: int | None,
+        header_char_start: int | None,
     ) -> list[Chunk]:
         sentences = split_sentences(body)
         if not sentences:
@@ -153,8 +157,18 @@ class LLMChunker(BaseChunker):
                         page_number=page_number,
                         separator=" ",
                         overlap=self.chunk_overlap,
+                        section_ord=section_ord,
                     )
                 )
+        # The section's own header is physically at this position;
+        # include it in the first leaf's span.
+        if prepend_header and out and header_char_start is not None:
+            first = out[0]
+            starts = [
+                s for s in (first.char_start, header_char_start)
+                if s is not None
+            ]
+            first.char_start = min(starts)
         return out
 
     def _ask_boundaries(self, sentences: list[str]) -> set[int]:
@@ -280,6 +294,79 @@ def contextualize_chunks(
         answer = (answer or "").strip()
         if answer:
             chunk.context = answer
+
+    workers = max(1, min(int(max_concurrency), len(chunks)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(_one, chunks))
+    return chunks
+
+
+# ---- per-chunk summary ------------------------------------------------
+
+
+_SUMMARY_SYSTEM = (
+    "You are an expert at writing concise factual summaries of document "
+    "chunks for a hybrid search index. Always write the summary in the "
+    "same language as the chunk text. Respond with only the summary."
+)
+
+_SUMMARY_INSTRUCTION = (
+    "Write a 1-3 sentence factual summary of the following chunk, in the "
+    "SAME language as the text. Preserve key names, numbers and dates; "
+    "omit filler.\n\n{section}{chunk}"
+)
+
+# Closed reasoning block emitted by reasoning-style chat endpoints.
+_THINK_BLOCK_RX = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _clean_summary(answer: str | None) -> str | None:
+    """Strip ``<think>`` blocks, then whitespace; ``None`` when nothing
+    usable remains (empty answer, or an unclosed reasoning tail)."""
+    cleaned = _THINK_BLOCK_RX.sub("", answer or "")
+    # Generation cut off mid-reasoning: the remaining text is one
+    # unclosed think block, not a summary.
+    if "<think>" in cleaned:
+        return None
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def summarize_chunks(
+    chunks: list[Chunk],
+    *,
+    chat_fn,
+    max_concurrency: int = 4,
+) -> list[Chunk]:
+    """Fill ``summary`` on each chunk in place.
+
+    Runs the per-chunk calls in a bounded thread pool. A failed or
+    empty call leaves ``summary`` as ``None``; the later embed step
+    falls back to the chunk text for its ``summary_vector``.
+    """
+    if not chunks:
+        return chunks
+
+    def _one(chunk: Chunk) -> None:
+        section = (
+            f"Section: {chunk.section_header}\n\n"
+            if chunk.section_header else ""
+        )
+        messages = [
+            {"role": "system", "content": _SUMMARY_SYSTEM},
+            {
+                "role": "user",
+                "content": _SUMMARY_INSTRUCTION.format(
+                    section=section, chunk=chunk.text
+                ),
+            },
+        ]
+        try:
+            answer = chat_fn(messages)
+        except Exception as e:  # noqa: BLE001 — enrichment is optional
+            log.warning("summarize_call_failed", error=str(e))
+            return
+        chunk.summary = _clean_summary(answer)
 
     workers = max(1, min(int(max_concurrency), len(chunks)))
     with ThreadPoolExecutor(max_workers=workers) as pool:

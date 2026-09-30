@@ -43,7 +43,6 @@ from vector_service.chunking.structure import (
 from vector_service.chunking.tokens import (
     _get_encoding,
     count_tokens,
-    tail_tokens as _tail_tokens,
 )
 
 
@@ -68,11 +67,17 @@ class RecursiveChunker(BaseChunker):
         *,
         page_numbers: Iterable[int] | None = None,
     ) -> list[Chunk]:
-        """Split ``markdown`` into chunks. Empty input → ``[]``."""
+        """Split ``markdown" into leaf chunks. Empty input → ``[]``.
+
+        Chunks never cross section boundaries: every leaf belongs to
+        exactly one section (tagged with its ``section_ord``) so the
+        hierarchy can parent it deterministically.
+        """
         if not markdown or not markdown.strip():
             return []
         sections = prepare_sections(markdown, page_numbers)
         chunks = _chunk_sections(
+            markdown,
             sections,
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
@@ -90,130 +95,70 @@ class RecursiveChunker(BaseChunker):
 
 
 def _chunk_sections(
+    markdown: str,
     sections: list[_Section],
     *,
     chunk_size: int,
     chunk_overlap: int,
     token_counter: Callable[[str], int],
 ) -> list[Chunk]:
-    """Walk the section list and emit chunks.
+    """Build leaf chunks independently per section.
 
-    State carried across section boundaries:
-
-    - ``current_text`` / ``current_tokens`` — running chunk buffer;
-    - ``overlap_text`` — trailing tokens from the latest emission.
-
-    Sections whose body alone exceeds ``chunk_size`` are recursively
-    split into paragraphs, sentences, words.
+    For each non-empty section: build code-atomic / paragraph units
+    (each unit does NOT become its own chunk — that used to turn
+    line-per-paragraph Docling output into hundreds of one-line
+    fragments), translate their offsets to document positions,
+    reconstruct the breadcrumb header path onto the first unit, then
+    greedily pack.
     """
     chunks: list[Chunk] = []
-    overlap_text: str = ""
-    current_text: str = ""
-    current_tokens: int = 0
-    current_section: list[str] = []
-    current_page: int | None = None
-
-    def _flush() -> None:
-        """Emit the current buffer as a chunk."""
-        nonlocal current_text, current_tokens, overlap_text
-        body = current_text.strip()
-        if body:
-            chunks.append(
-                Chunk(
-                    text=body,
-                    chunk_index=len(chunks),
-                    token_count=current_tokens,
-                    section_header=join_header(current_section),
-                    page_number=current_page,
-                )
-            )
-            overlap_text = _tail_tokens(body, chunk_overlap)
-        else:
-            overlap_text = ""
-        current_text = ""
-        current_tokens = 0
+    find_cursor = 0
 
     for section in sections:
-        header_path = section.header_path
-        page = section.page_number
         body = section.body
         if not body:
             continue
 
-        # Section header is prepended only when starting a new chunk
-        # so it isn't double-counted across overlapping chunks.
-        header_prefix = ""
-        if header_path:
-            header_prefix = "\n".join(
-                f"{'#' * (i + 1)} {h}" for i, h in enumerate(header_path)
-            )
-            header_prefix += "\n\n"
+        # Locate the stripped body in the document (sections are
+        # visited in source order) so unit spans become document offsets.
+        base = markdown.find(body, find_cursor)
+        find_cursor = base + 1
 
-        # A section bigger than chunk_size cannot share a chunk.
-        # Build code-atomic / paragraph units and greedily pack them
-        # (each unit does NOT become its own chunk — that used to
-        # turn line-per-paragraph Docling output into hundreds of
-        # one-line fragments).
-        if token_counter(body) > chunk_size:
-            _flush()
-            units = units_for_section(
-                body, chunk_size=chunk_size, token_counter=token_counter,
-            )
-            if units and header_path:
-                units[0].text = header_prefix(header_path) + units[0].text
-            chunks.extend(
-                pack_units(
-                    units,
-                    chunk_size=chunk_size,
-                    token_counter=token_counter,
-                    section_header=join_header(header_path),
-                    page_number=page,
-                    separator="\n\n",
-                    overlap=chunk_overlap,
-                )
-            )
-            if chunks:
-                overlap_text = _tail_tokens(chunks[-1].text, chunk_overlap)
-            current_section = list(header_path)
-            current_page = page
-            continue
-
-        # Section fits one chunk — provided it fits with whatever is
-        # already buffered.
-        candidate_text = (
-            (current_text + "\n\n" + header_prefix + body) if current_text
-            else (header_prefix + body)
+        units = units_for_section(
+            body, chunk_size=chunk_size, token_counter=token_counter,
         )
-        candidate_tokens = token_counter(candidate_text)
+        for unit in units:
+            if unit.char_start is not None:
+                unit.char_start = base + unit.char_start
+                unit.char_end = base + unit.char_end
 
-        if candidate_tokens > chunk_size and current_text:
-            _flush()
-            current_text = overlap_text
-            current_tokens = token_counter(current_text) if overlap_text else 0
-            current_section = list(header_path)
-            current_page = page
-            candidate_text = (
-                (current_text + "\n\n" + header_prefix + body) if current_text
-                else (header_prefix + body)
-            )
-            candidate_tokens = token_counter(candidate_text)
-            # overlap + section still too big → drop the overlap so
-            # the section still gets a chunk of its own.
-            if candidate_tokens > chunk_size and current_text:
-                current_text = ""
-                current_tokens = 0
-                candidate_text = header_prefix + body
-                candidate_tokens = token_counter(candidate_text)
+        # Reconstruct the full breadcrumb header path on the first
+        # unit so a leaf reads in isolation; those ancestor headers
+        # are not at this source position and stay out of the span.
+        if section.header_path:
+            units[0].text = header_prefix(section.header_path) + units[0].text
 
-        current_text = candidate_text
-        current_tokens = candidate_tokens
-        current_section = list(header_path)
-        # The latest page seen wins for the in-progress chunk.
-        if page is not None:
-            current_page = page
+        section_chunks = pack_units(
+            units,
+            chunk_size=chunk_size,
+            token_counter=token_counter,
+            section_header=join_header(section.header_path),
+            page_number=section.page_number,
+            separator="\n\n",
+            overlap=chunk_overlap,
+            section_ord=section.ord,
+        )
 
-    if current_text.strip():
-        _flush()
+        # The section's OWN header is physically here and belongs in
+        # the first leaf's span (ancestor headers do not).
+        if section.header_path and section_chunks:
+            first = section_chunks[0]
+            starts = [
+                s for s in (first.char_start, section.char_start)
+                if s is not None
+            ]
+            first.char_start = min(starts)
+        chunks.extend(section_chunks)
 
     return chunks
 

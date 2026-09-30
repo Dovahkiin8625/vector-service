@@ -30,10 +30,10 @@ def test_scalar_fields_shapes():
     assert by_name["sparse"].dtype == "sparse_float_vector"
 
 
-def test_indexes_cover_vector_and_sparse():
+def test_indexes_cover_vector_summary_and_sparse():
     indexes = ing._ingest_indexes()
     by_target = {i.field_name: i for i in indexes}
-    assert set(by_target) == {"vector", "sparse"}
+    assert set(by_target) == {"vector", "summary_vector", "sparse"}
     # Sparse inverted index ranks with inner product (client-side BM25).
     sparse_idx = by_target["sparse"]
     assert sparse_idx.metric_type == "ip"
@@ -42,6 +42,11 @@ def test_indexes_cover_vector_and_sparse():
     assert dense_idx.metric_type == "cosine"
     assert dense_idx.index_type == "HNSW"
     assert dense_idx.params == {"M": 16, "efConstruction": 200}
+    # Summary embeddings get their own HNSW with the same shape.
+    summary_idx = by_target["summary_vector"]
+    assert summary_idx.metric_type == "cosine"
+    assert summary_idx.index_type == "HNSW"
+    assert summary_idx.params == {"M": 16, "efConstruction": 200}
 
 
 # ---- _ensure_collection ------------------------------------------------
@@ -84,8 +89,11 @@ def test_ensure_collection_creates_full_schema():
     assert {f.name for f in kwargs["scalar_fields"]} == {
         "id", "doc_id", "chunk_index", "sparse",
     }
+    assert kwargs["extra_vector_fields"] == [
+        FieldSpec(name="summary_vector", dtype="float_vector", dim=1024)
+    ]
     assert {i.field_name for i in kwargs["indexes"]} == {
-        "vector", "sparse",
+        "vector", "summary_vector", "sparse",
     }
 
 

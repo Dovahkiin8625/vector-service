@@ -235,7 +235,7 @@ def test_split_around_code_blocks_prose_only():
     """A document with no code fences should return a single prose
     piece."""
     pieces = _split_around_code_blocks("Para 1.\n\nPara 2.")
-    assert pieces == [(False, "Para 1.\n\nPara 2.")]
+    assert pieces == [(False, "Para 1.\n\nPara 2.", 0, 16)]
 
 
 def test_split_around_code_blocks_mixed():
@@ -245,9 +245,9 @@ def test_split_around_code_blocks_mixed():
     pieces = _split_around_code_blocks(body)
     # Expect: (False, "Prose before."), (True, "```\ncode here\n```"),
     # (False, "Prose after.")
-    assert any(is_code is False and "Prose before" in t for is_code, t in pieces)
-    assert any(is_code is True and "code here" in t for is_code, t in pieces)
-    assert any(is_code is False and "Prose after" in t for is_code, t in pieces)
+    assert any(is_code is False and "Prose before" in t for is_code, t, _s, _e in pieces)
+    assert any(is_code is True and "code here" in t for is_code, t, _s, _e in pieces)
+    assert any(is_code is False and "Prose after" in t for is_code, t, _s, _e in pieces)
 
 
 def test_chunk_dataclass_fields():

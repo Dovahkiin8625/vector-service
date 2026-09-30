@@ -55,7 +55,7 @@ class FixedChunker(BaseChunker):
             )
 
         chunks: list[Chunk] = []
-        for is_code, piece in split_around_code_blocks(markdown):
+        for is_code, piece, _char_start, _char_end in split_around_code_blocks(markdown):
             if is_code:
                 ids = encode_ids(piece)
                 chunks.append(

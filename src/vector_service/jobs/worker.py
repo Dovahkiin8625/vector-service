@@ -156,6 +156,7 @@ class IngestWorker:
                 strategy=params.get("strategy", "recursive"),
                 chunk_options=params.get("chunk_options", {}),
                 add_context=params.get("add_context", False),
+                add_summary=params.get("add_summary", False),
             )
         except Exception as e:  # noqa: BLE001 — self-written row; treat any unreadable state as corrupted
             # Row and spool were written by the service itself: anything
