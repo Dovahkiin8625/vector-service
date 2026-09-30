@@ -32,6 +32,11 @@ from vector_service.embeddings.multimodal_base import MultimodalEmbedder
 from vector_service.embeddings.multimodal_registry import (
     get_multimodal_embedder_class,
 )
+from vector_service.jobs import (
+    IngestWorker,
+    JobEventBus,
+    recover_interrupted,
+)
 from vector_service.embeddings.registry import get_embedder_class
 from vector_service.parsers.docling_parser import (
     ParserUnavailable,
@@ -278,9 +283,38 @@ async def lifespan(app: "FastAPI"):
             app.state.parser = parser
             log.info("parser_loaded", backend="docling")
 
+    # ---- background job worker ----------------------------------
+    # Event bus first — SSE nudges for worker state changes fan out
+    # through it. Then reset rows the previous process left mid-stage
+    # BEFORE the worker can claim anything (a failure here must not
+    # block startup; rows simply stay for a manual/next restart), and
+    # finally start the in-process worker.
+    job_bus = JobEventBus()
+    app.state.job_bus = job_bus
+    try:
+        recovered = await recover_interrupted(app)
+        if recovered:
+            log.info("startup_jobs_recovered", count=recovered)
+    except Exception as exc:  # noqa: BLE001 — recovery is best-effort, worker still starts
+        log.warning(
+            "job_recovery_failed",
+            error=str(exc),
+            exception_type=type(exc).__name__,
+        )
+    job_worker = IngestWorker(app)
+    app.state.job_worker = job_worker
+    job_worker.start()
+
     try:
         yield
     finally:
+        # Stop claiming and cancel an in-flight job before tearing
+        # down the layers it may be using. A job interrupted here is
+        # handled by recovery on the next process.
+        try:
+            await job_worker.stop()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("job_worker_stop_failed", error=str(exc))
         # Always release any model instances we managed to construct
         # before shutdown — covers both a clean shutdown (yield returns)
         # and a startup failure where one of the four families raised

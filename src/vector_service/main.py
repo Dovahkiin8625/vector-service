@@ -23,6 +23,7 @@ from vector_service.api.chunk import router as chunk_router
 from vector_service.api.embeddings import router as embeddings_router
 from vector_service.api.health import router as health_router
 from vector_service.api.image_embeddings import router as image_embeddings_router
+from vector_service.api.jobs import router as jobs_router
 from vector_service.api.multimodal_embeddings import (
     router as multimodal_embeddings_router,
 )
@@ -185,6 +186,16 @@ OPENAPI_TAGS = [
             "delete / fetch vectors, and run similarity search. Backed "
             "directly by Milvus. All errors share the same envelope: "
             "see `ErrorEnvelope`."
+        ),
+    },
+    {
+        "name": "jobs",
+        "description": (
+            "Asynchronous ingest under `/v1/jobs`. `POST /v1/jobs/ingest` "
+            "spools the upload and returns `202` with the job id; the "
+            "in-process worker runs the ingest pipeline, with 5xx retries "
+            "and stage-boundary cancellation. Track progress via `GET "
+            "/v1/jobs/{id}` or the SSE stream at `GET /v1/jobs/{id}/events`."
         ),
     },
     {
@@ -457,6 +468,7 @@ def create_app() -> FastAPI:
     app.include_router(parse_router)
     app.include_router(chunk_router)
     app.include_router(retrieval_router)
+    app.include_router(jobs_router)
 
     return app
 

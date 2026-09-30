@@ -195,6 +195,17 @@ def test_lifespan_does_not_construct_or_load_any_family(client, app):
         assert app.state._slot_reranker.get() is None
 
 
+def test_lifespan_starts_background_job_worker(client, app):
+    """The in-process ingest worker is part of startup, independent of
+    the model ``auto_load`` flags: even with every family unloaded the
+    worker loop runs so submitted jobs queue and fail deterministically
+    (503) rather than piling up unseen."""
+    worker = app.state.job_worker
+    assert worker is not None
+    assert worker._task is not None
+    assert not worker._task.done()
+
+
 def test_readyz_does_not_503_when_models_unloaded(client):
     """/readyz gates only on store reachability + process liveness.
 

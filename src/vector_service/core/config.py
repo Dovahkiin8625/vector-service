@@ -270,6 +270,54 @@ class MultimodalEmbeddingSettings(BaseSettings):
         return v
 
 
+class JobSettings(BaseSettings):
+    """Background job subsystem configuration.
+
+    Covers the in-process worker loop, upload spooling, retries and the
+    SSE event channel. Env prefix: ``VS_JOBS__`` (double underscore —
+    pydantic-settings nested-field separator).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_JOBS__", extra="ignore")
+
+    #: Per-job upload spool root. Each submission lands at
+    #: ``<spool_dir>/<job_id>/upload`` before its row is inserted.
+    spool_dir: Path = Path("./data/corpus/spool")
+
+    #: Maximum pipeline attempts per job, counting the first run. A
+    #: 5xx failure requeues until this is spent; 4xx fails immediately.
+    max_attempts: int = Field(3, ge=1, le=32)
+
+    #: Wake the worker immediately on submission instead of waiting for
+    #: its next poll.
+    wake_on_submit: bool = True
+
+    #: Idle worker poll interval when no wake arrives.
+    poll_interval_seconds: float = Field(1.0, ge=0.01, le=60.0)
+
+    #: SSE heartbeat interval (comment frame keeps proxies alive).
+    heartbeat_seconds: float = Field(15.0, ge=1.0, le=300.0)
+
+    #: SSE fallback full-resync interval, covering frames dropped to a
+    #: slow consumer.
+    sse_resync_seconds: float = Field(2.0, ge=1.0, le=60.0)
+
+    #: Base of the exponential 5xx retry backoff
+    #: (``base * 2 ** (attempts - 1)``).
+    retry_backoff_base_seconds: float = Field(1.0, ge=0.0, le=600.0)
+
+    #: Cap on the computed retry backoff.
+    retry_backoff_max_seconds: float = Field(300.0, ge=0.0, le=3600.0)
+
+    @model_validator(mode="after")
+    def _backoff_max_covers_base(self):
+        if self.retry_backoff_max_seconds < self.retry_backoff_base_seconds:
+            raise ValueError(
+                "retry_backoff_max_seconds must be >= retry_backoff_base_seconds"
+            )
+        return self
+
+
 class PoolSettings(BaseModel):
     """One isolated thread pool: worker count + admission cap.
 
@@ -432,6 +480,9 @@ class Settings(BaseSettings):
 
     # External LLM chat backend (nested; env prefix VS_LLM__)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+
+    # Background jobs (nested; env prefix VS_JOBS__)
+    jobs: JobSettings = Field(default_factory=JobSettings)
 
     # Blocking-call thread pools (nested; env prefix VS_RUNTIME__)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
