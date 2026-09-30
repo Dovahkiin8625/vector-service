@@ -34,6 +34,7 @@ from vector_service.api.ingest import (
     PreparedIngest,
     _run_ingest_pipeline,
 )
+from vector_service.api.rebuild import run_rebuild_pipeline
 from vector_service.core.logging import get_logger
 from vector_service.core.threadpools import run_in_sqlite
 
@@ -130,10 +131,14 @@ class IngestWorker:
     # ---- per-job execution --------------------------------------------
 
     async def _execute(self, row: dict) -> None:
-        # §1: ingest jobs only — the validated upload rebuilt from the
-        # spool. Later sections add rebuild / graph / eval / gate-check
-        # dispatch on ``row["job_type"]``.
-        await self._execute_ingest(row)
+        # Dispatch on the row's job_type: ``ingest`` rebuilds the
+        # validated upload from the spool, ``rebuild`` derives
+        # everything from the existing corpus. Later sections add
+        # graph / eval / gate-check dispatch here.
+        if row.get("job_type") == "rebuild":
+            await self._execute_rebuild(row)
+        else:
+            await self._execute_ingest(row)
 
     async def _execute_ingest(self, row: dict) -> None:
         state = self._app.state
@@ -274,6 +279,88 @@ class IngestWorker:
             )
         else:
             await self._discard_spool(row)
+        self._publish(job_id, "done")
+
+    async def _execute_rebuild(self, row: dict) -> None:
+        """Run a ``rebuild`` job: rederive one physical index from corpus."""
+        state = self._app.state
+        corpus = state.corpus
+        job_id = row["job_id"]
+
+        try:
+            params = json.loads(row["params_json"])
+        except Exception as e:  # noqa: BLE001 — self-written row; treat unreadable state as corrupted
+            log.warning("job_corrupted", job_id=job_id, error=str(e))
+            await run_in_sqlite(
+                corpus.fail_job,
+                job_id,
+                error_code="job_corrupted",
+                error_message=str(e),
+            )
+            self._publish(job_id, "failed")
+            return
+
+        embedder = getattr(state, "embedder", None)
+        if embedder is None:
+            await self._handle_failure(
+                row,
+                HTTPException(
+                    503,
+                    detail={
+                        "error": {
+                            "code": "embedder_unavailable",
+                            "message": (
+                                "text embedder is not loaded; vectors cannot "
+                                "be recomputed"
+                            ),
+                        }
+                    },
+                ),
+            )
+            return
+
+        async def emit(event: dict) -> None:
+            event_type = event.get("type")
+            if event_type == "progress":
+                await run_in_sqlite(
+                    corpus.set_job_progress,
+                    job_id,
+                    event["page"],
+                    event["total"],
+                )
+                self._publish(job_id, "progress")
+            elif event_type == "stage":
+                self._publish(job_id, "stage")
+
+        async def should_cancel() -> bool:
+            fresh = await run_in_sqlite(corpus.get_job, job_id)
+            return fresh is not None and bool(fresh["cancel_requested"])
+
+        try:
+            await run_rebuild_pipeline(
+                settings=state.settings,
+                store=state.store,
+                repo=corpus,
+                bm25=state.bm25,
+                embedder=embedder,
+                database=row["database"],
+                logical_collection=row["collection"],
+                target_ref=params["target_ref"],
+                batch_size=params["batch_size"],
+                canary_percent=params["canary_percent"],
+                embed_model=params.get("target_embed_model") or embedder.model_name,
+                inference_timeout_seconds=state.settings.inference_timeout_seconds,
+                emit=emit,
+                job_id=job_id,
+                should_cancel=should_cancel,
+            )
+        except JobCancelled:
+            # Cleanup + cancelled state were written at the cancel gate.
+            self._publish(job_id, "cancelled")
+            return
+        except HTTPException as exc:
+            await self._handle_failure(row, exc)
+            return
         self._publish(job_id, "done")
 
     async def _handle_failure(self, row: dict, exc: HTTPException) -> None:

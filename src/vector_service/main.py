@@ -31,6 +31,7 @@ from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
 from vector_service.api.parse import router as parse_router
+from vector_service.api.rebuild import router as rebuild_router
 from vector_service.api.rerank import router as rerank_router
 from vector_service.api.retrieval import router as retrieval_router
 from vector_service.api.similarity import router as similarity_router
@@ -196,6 +197,17 @@ OPENAPI_TAGS = [
             "in-process worker runs the ingest pipeline, with 5xx retries "
             "and stage-boundary cancellation. Track progress via `GET "
             "/v1/jobs/{id}` or the SSE stream at `GET /v1/jobs/{id}/events`."
+        ),
+    },
+    {
+        "name": "index-admin",
+        "description": (
+            "Index rebuild and consistency administration. "
+            "`POST /v1/databases/{db}/collections/{coll}/reindex` submits "
+            "a rebuild job into a fresh physical collection parked as "
+            "canary; `.../reindex/promote` switches the binding and "
+            "retires the old index; `.../consistency` compares corpus "
+            "leaves with physical rows and can repair."
         ),
     },
     {
@@ -469,6 +481,7 @@ def create_app() -> FastAPI:
     app.include_router(chunk_router)
     app.include_router(retrieval_router)
     app.include_router(jobs_router)
+    app.include_router(rebuild_router)
 
     return app
 

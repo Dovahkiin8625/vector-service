@@ -792,6 +792,23 @@ class CorpusRepository:
                 """,
                 (new_ref, now, database, collection),
             )
+            # Summary rows follow the physical move like dense rows —
+            # the ":summary_vector" ref suffix mirrors the convention
+            # in api.ingest (repository can't import the api layer).
+            conn.execute(
+                """
+                UPDATE chunk_indexes
+                SET index_ref = ?, model = ?, created_ts = ?
+                WHERE database = ? AND collection = ? AND index_kind = 'summary'
+                """,
+                (
+                    f"{new_ref}:summary_vector",
+                    model,
+                    now,
+                    database,
+                    collection,
+                ),
+            )
         return {"old_ref": old_ref, "new_ref": new_ref, "model": model}
 
     def delete_binding(self, database: str, collection: str) -> None:
