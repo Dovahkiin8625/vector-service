@@ -160,7 +160,13 @@ export default defineComponent({
                 <template v-if="details[name]">{{ details[name].total }} {{ $t('databases.coll_count') }} / {{ Object.keys(details[name].metadata || {}).length }} {{ $t('databases.meta_count') }}</template>
               </span>
               <span class="expand-caret" aria-hidden="true">{{ expanded.has(name) ? '▾' : '▸' }}</span>
-              <busy-button class="sm" variant="danger" :busy="busyKey === 'drop:' + name"
+              <!-- S6 danger containment: the destructive row action is
+                   gated on the expanded detail — a fresh glance at the
+                   list shows no red buttons, and dropping the database
+                   requires opening its panel first (the "expand before
+                   the params area" option of the shared rule). -->
+              <busy-button v-if="expanded.has(name)" class="sm" variant="danger"
+                           :busy="busyKey === 'drop:' + name"
                            :label="$t('common.delete')" :busy-label="$t('common.deleting')"
                            @click.stop="dropDb(name)" />
             </div>

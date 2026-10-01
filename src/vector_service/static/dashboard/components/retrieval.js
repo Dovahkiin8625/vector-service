@@ -2,8 +2,10 @@
 // Streams NDJSON stage events from /v1/retrieval/stream and renders the
 // full retrieval trace (plan, per-channel raw tops, stage timings).
 import {
-  defineComponent, reactive, onMounted,
+  defineComponent, reactive, computed, onMounted,
 } from '../vue.esm-browser.prod.js';
+import { t } from './app.js';
+import { intError } from './util.js';
 
 async function getJson(url) {
   const resp = await fetch(url);
@@ -207,7 +209,20 @@ export default defineComponent({
       await loadCaps();
     });
 
-    return { s, setMode, run, regenCustom: () => { s.customJson = JSON.stringify(buildBody(), null, 2); } };
+    // S6 numeric rules: cleared/half-typed number boxes used to ride
+    // into the body via Number() unchecked. '' is legitimate ONLY for
+    // maxTokens (sends null = no limit); the integer fields must each be
+    // a whole number in range before the run button goes live.
+    const numErrs = computed(() => ({
+      topK: intError(s.topK, 1, 100),
+      rrfK: intError(s.rrfK, 1, 200),
+      nVariants: intError(s.nVariants, 1, 5),
+      candidatePool: intError(s.candidatePool, 1, 64),
+      maxTokens: s.maxTokens === '' ? '' : intError(s.maxTokens, 1, null),
+    }));
+    const canRun = computed(() => s.mode === 'custom' || !Object.values(numErrs.value).some(Boolean));
+
+    return { s, setMode, run, numErrs, canRun, regenCustom: () => { s.customJson = JSON.stringify(buildBody(), null, 2); } };
   },
   template: `
   <div class="retrieval-panel">
@@ -254,6 +269,7 @@ export default defineComponent({
       <div class="row">
         <label>top_k</label>
         <input type="number" min="1" max="100" v-model.number="s.topK">
+        <span class="hint" v-if="numErrs.topK">{{ numErrs.topK }}</span>
       </div>
 
       <div class="cap-group-title">{{ $t('retrieval.group.channels') }}</div>
@@ -270,6 +286,7 @@ export default defineComponent({
         <template v-if="s.fusionMethod === 'rrf'">
           <label>rrf_k</label>
           <input type="number" min="1" max="200" v-model.number="s.rrfK">
+          <span class="hint" v-if="numErrs.rrfK">{{ numErrs.rrfK }}</span>
         </template>
         <template v-else>
           <label>w dense</label>
@@ -307,6 +324,7 @@ export default defineComponent({
           <input type="number" min="0" max="1" step="0.05" v-model.number="s.hydeAlpha">
           <label>{{ $t('retrieval.n_variants') }}</label>
           <input type="number" min="1" max="5" v-model.number="s.nVariants">
+          <span class="hint" v-if="numErrs.nVariants">{{ numErrs.nVariants }}</span>
         </div>
       </fieldset>
 
@@ -320,6 +338,7 @@ export default defineComponent({
         <label><input type="checkbox" v-model="s.rerank"> {{ $t('retrieval.cross_encoder') }}</label>
         <label>{{ $t('retrieval.candidate_pool') }}</label>
         <input type="number" min="1" max="64" v-model.number="s.candidatePool">
+        <span class="hint" v-if="numErrs.candidatePool">{{ numErrs.candidatePool }}</span>
       </div>
 
       <div class="cap-group-title">{{ $t('retrieval.group.context') }}</div>
@@ -327,6 +346,7 @@ export default defineComponent({
         <label>{{ $t('retrieval.max_tokens') }}</label>
         <input type="number" min="1" v-model.number="s.maxTokens"
           :placeholder="$t('retrieval.max_tokens_ph')">
+        <span class="hint" v-if="numErrs.maxTokens">{{ numErrs.maxTokens }}</span>
       </div>
       <div class="row">
         <label>doc_id</label>
@@ -338,8 +358,9 @@ export default defineComponent({
 
       <div class="actions">
         <!-- In custom mode the query lives in the JSON body, so the
-             empty-query guard only applies to the control-driven modes. -->
-        <button class="btn primary" :disabled="s.busy || (s.mode !== 'custom' && !s.query.trim())" @click="run">
+             empty-query guard only applies to the control-driven modes.
+             Same for the numeric-field rules (S6). -->
+        <button class="btn primary" :disabled="s.busy || !canRun || (s.mode !== 'custom' && !s.query.trim())" @click="run">
           <span v-if="s.busy" class="btn-spinner"></span>
           {{ s.busy ? $t('retrieval.running') : $t('retrieval.run') }}
         </button>

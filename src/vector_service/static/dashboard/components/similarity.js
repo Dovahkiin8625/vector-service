@@ -2,7 +2,8 @@
 // The internal mode switch picks the endpoint; request bodies match
 // schemas/similarity.py (each family: `query` + `documents`).
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
-import { t, api, extractApiError } from './app.js';
+import { t, api, extractApiError, modelsByType, refreshModels as loadModels } from './app.js';
+import { fileToB64, DEFAULT_MIME, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 // `key` is a mode identifier (also the i18n key suffix), `endpoint` and
@@ -12,14 +13,18 @@ const MODES = [
   { key: 'image', endpoint: '/v1/image_similarity', modelType: 'image_embedder' },
   { key: 'multimodal', endpoint: '/v1/multimodal_similarity', modelType: 'multimodal_embedder' },
 ];
-const DEFAULT_MIME = 'image/png';
 
 export default defineComponent({
   name: 'SimilarityPanel',
   setup() {
     const modes = MODES;
     const mode = ref('text');
-    const models = ref([]);
+    // S6: shared store cache; switching mode re-filters this computed
+    // instead of firing another GET /v1/models.
+    const models = computed(() => {
+      const wantType = MODES.find(m => m.key === mode.value).modelType;
+      return modelsByType(wantType);
+    });
     const model = ref('');
     const metric = ref('cosine');
 
@@ -55,44 +60,46 @@ export default defineComponent({
         : t('embeddings.no_models', { kind: t('similarity.mode.' + mode.value) })
     ));
 
+    function autoSelect() {
+      if (model.value) return;
+      const list = models.value;
+      if (!list.length) return;
+      const loaded = list.find(m => m.loaded);
+      model.value = (loaded || list[0]).id;
+    }
+
     async function refreshModels() {
       modelsStatus.value = 'loading';
       modelsErr.value = '';
       try {
-        const { payload } = await api('GET', '/v1/models');
-        const wantType = MODES.find(m => m.key === mode.value).modelType;
-        models.value = (payload && payload.data || []).filter(m => m.type === wantType);
-        if (!model.value && models.value.length) {
-          const loaded = models.value.find(m => m.loaded);
-          model.value = (loaded || models.value[0]).id;
-        }
+        await loadModels();
+        autoSelect();
         modelsStatus.value = models.value.length ? 'ok' : 'empty';
       } catch (e) {
-        models.value = [];
         modelsStatus.value = 'error';
         modelsErr.value = extractApiError(e, t('common.unknown'));
       }
     }
-    onMounted(refreshModels);
-
     // Switching mode re-filters the model list and drops the previous
     // run's result (the response belongs to a different endpoint/family).
+    // autoSelect runs at the end of this watcher so the cleared selection
+    // is refilled for the new family regardless of watcher order.
     watch(mode, () => {
       model.value = '';
       result.value = null;
       status.value = 'idle';
       errMsg.value = '';
-      refreshModels();
+      autoSelect();
+      if (modelsStatus.value === 'error') refreshModels();
     });
+    watch(models, (list) => {
+      if (!model.value && list.length) {
+        const loaded = list.find(m => m.loaded);
+        model.value = (loaded || list[0]).id;
+      }
+    }, { immediate: true });
+    onMounted(refreshModels);
 
-    async function fileToB64(f) {
-      return new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(',')[1] || '');
-        r.onerror = rej;
-        r.readAsDataURL(f);
-      });
-    }
     function mimeOf(f) { return mime.value || f.type || DEFAULT_MIME; }
 
     // Reported through the panel's own banner instead of alert(): the
@@ -105,6 +112,7 @@ export default defineComponent({
     }
 
     async function run() {
+      if (!model.value) return;
       try {
         status.value = 'loading';
         errMsg.value = '';
@@ -154,7 +162,7 @@ export default defineComponent({
       modes, mode, models, model, metric, query, docs,
       queryFiles, docFiles, queryModality, queryText, docText,
       mime, result, status, errMsg, busy, canRetry, refreshModels, run,
-      modelsStatus, modelsText,
+      modelsStatus, modelsText, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT,
     };
   },
   components: { StatusBanner, BusyButton, EmptyState },
@@ -186,12 +194,12 @@ export default defineComponent({
         </div>
 
         <div v-else-if="mode === 'image'">
-          <div class="row"><label>{{ $t('similarity.query_image') }}</label><input type="file" accept="image/*" @change="queryFiles = $event.target.files" /></div>
-          <div class="row"><label>{{ $t('similarity.candidate_images') }} <span class="hint">{{ $t('similarity.hint.pick_several') }}</span></label><input type="file" multiple accept="image/png,image/jpeg,image/webp" @change="docFiles = $event.target.files" /></div>
+          <div class="row"><label>{{ $t('similarity.query_image') }}</label><input type="file" :accept="IMAGE_ACCEPT" @change="queryFiles = $event.target.files" /></div>
+          <div class="row"><label>{{ $t('similarity.candidate_images') }} <span class="hint">{{ $t('similarity.hint.pick_several') }}</span></label><input type="file" multiple :accept="IMAGE_ACCEPT" @change="docFiles = $event.target.files" /></div>
           <div class="row"><label>{{ $t('common.mime') }}</label>
             <select v-model="mime">
-              <option value="">{{ $t('common.auto') }}</option><option value="image/png">image/png</option>
-              <option value="image/jpeg">image/jpeg</option><option value="image/webp">image/webp</option>
+              <option value="">{{ $t('common.auto') }}</option>
+              <option v-for="m in IMAGE_MIME_OPTIONS" :key="m" :value="m">{{ m }}</option>
             </select>
           </div>
         </div>
@@ -204,20 +212,22 @@ export default defineComponent({
             </select>
           </div>
           <div class="row" v-if="queryModality === 'text'"><label>{{ $t('similarity.query_text') }}</label><textarea rows="2" v-model="queryText"></textarea></div>
-          <div class="row" v-else><label>{{ $t('similarity.query_image') }}</label><input type="file" accept="image/*" @change="queryFiles = $event.target.files" /></div>
+          <div class="row" v-else><label>{{ $t('similarity.query_image') }}</label><input type="file" :accept="IMAGE_ACCEPT" @change="queryFiles = $event.target.files" /></div>
           <div class="row"><label>{{ $t('similarity.candidate_texts') }} <span class="hint">{{ $t('similarity.hint.one_per_line') }}</span></label><textarea rows="4" v-model="docText"></textarea></div>
-          <div class="row"><label>{{ $t('similarity.candidate_images') }}</label><input type="file" multiple accept="image/png,image/jpeg,image/webp" @change="docFiles = $event.target.files" /></div>
+          <div class="row"><label>{{ $t('similarity.candidate_images') }}</label><input type="file" multiple :accept="IMAGE_ACCEPT" @change="docFiles = $event.target.files" /></div>
           <div class="row"><label>{{ $t('common.mime') }}</label>
             <select v-model="mime">
-              <option value="">{{ $t('common.auto') }}</option><option value="image/png">image/png</option>
-              <option value="image/jpeg">image/jpeg</option><option value="image/webp">image/webp</option>
+              <option value="">{{ $t('common.auto') }}</option>
+              <option v-for="m in IMAGE_MIME_OPTIONS" :key="m" :value="m">{{ m }}</option>
             </select>
           </div>
         </div>
 
         <div class="actions">
-          <busy-button :busy="busy" :label="$t('common.run')" :busy-label="$t('similarity.running')"
-                       @click="run" />
+          <!-- An empty model list left model: '' submittable; the button
+               now carries that state (S6). -->
+          <busy-button :busy="busy" :disabled="!model" :label="$t('common.run')"
+                       :busy-label="$t('similarity.running')" @click="run" />
         </div>
         <!-- Outside v-if="result": validation complaints and a failed
              first request both have no result to render inside. -->

@@ -1,12 +1,14 @@
 // Rerank panel: cross-encoder rerank.
-import { defineComponent, ref, computed, onMounted } from '../vue.esm-browser.prod.js';
-import { t, api, extractApiError } from './app.js';
+import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
+import { t, api, extractApiError, modelsByType, refreshModels as loadModels } from './app.js';
+import { intError, modelTypeOf } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 export default defineComponent({
   name: 'RerankPanel',
   setup() {
-    const models = ref([]);
+    // S6: shared store cache filtered to rerankers — no private GET copy.
+    const models = computed(() => modelsByType(modelTypeOf('rerank')));
     const model = ref('');
     const mode = ref('lines');
     const docs = ref('doc one\ndoc two\ndoc three');
@@ -35,20 +37,28 @@ export default defineComponent({
       modelsStatus.value = 'loading';
       modelsErr.value = '';
       try {
-        const { payload } = await api('GET', '/v1/models');
-        models.value = (payload && payload.data || []).filter(m => m.type === 'reranker');
-        if (!model.value && models.value.length) {
-          const loaded = models.value.find(m => m.loaded);
-          model.value = (loaded || models.value[0]).id;
-        }
+        await loadModels();
         modelsStatus.value = models.value.length ? 'ok' : 'empty';
       } catch (e) {
-        models.value = [];
         modelsStatus.value = 'error';
         modelsErr.value = extractApiError(e, t('common.unknown'));
       }
     }
+    watch(models, (list) => {
+      if (!model.value && list.length) {
+        const loaded = list.find(m => m.loaded);
+        model.value = (loaded || list[0]).id;
+      }
+    }, { immediate: true });
     onMounted(refreshModels);
+
+    // S6 form rules: top_n is an integer in 1..100, and the required
+    // fields must be present before the submit button goes live —
+    // cleared number boxes used to submit NaN/'' unchecked.
+    const topNErr = computed(() => intError(topN.value, 1, 100));
+    const canRun = computed(() => (
+      !!model.value && !!query.value.trim() && !!docs.value.trim() && !topNErr.value
+    ));
 
     function fail(key) {
       status.value = 'error';
@@ -67,6 +77,7 @@ export default defineComponent({
     }
 
     async function doRerank() {
+      if (!canRun.value) return;
       const list = buildDocs(); if (!list) return;
       const body = { model: model.value, query: query.value, documents: list, top_n: topN.value };
       try {
@@ -86,6 +97,7 @@ export default defineComponent({
     return {
       models, model, mode, docs, query, topN, result, status, errMsg,
       busy, canRetry, refreshModels, doRerank, modelsStatus, modelsText,
+      topNErr, canRun,
     };
   },
   components: { StatusBanner, BusyButton, EmptyState },
@@ -99,11 +111,8 @@ export default defineComponent({
           <busy-button id="btn-rerank-refresh-models" :busy="modelsStatus === 'loading'"
                        :label="$t('common.refresh')" @click="refreshModels" />
         </div>
-        <div class="list" id="rerank-models-list">
-          <div v-for="m in models" :key="m.id" class="list-item" style="cursor:default;">
-            <span class="name">{{ m.id }}</span><span class="meta">{{ m.loaded ? $t('common.loaded') : $t('common.unloaded') }} - {{ $t('rerank.suffix') }}</span>
-          </div>
-        </div>
+        <!-- The non-operable model list that used to sit here duplicated
+             the select below without offering any action (S6). -->
         <empty-state v-if="modelsStatus !== 'ok'" :state="modelsStatus" :text="modelsText"
                      :retry="modelsStatus === 'error' ? refreshModels : null" />
       </div>
@@ -116,10 +125,11 @@ export default defineComponent({
               <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
             </select>
           </div>
-          <div class="row"><label>top_n</label><input type="number" v-model.number="topN" min="1" max="100" /></div>
+          <div class="row"><label>top_n</label><input type="number" v-model.number="topN" min="1" max="100" />
+            <span class="hint" v-if="topNErr">{{ topNErr }}</span></div>
         </div>
         <div class="row split">
-          <div class="row"><label>{{ $t('common.query') }}</label><input type="text" v-model="query" /></div>
+          <div class="row"><label>{{ $t('common.query') }}</label><textarea rows="2" v-model="query"></textarea></div>
           <div class="row"><label>{{ $t('rerank.input_mode') }}</label>
             <select id="rerank-mode" v-model="mode">
               <option value="lines">{{ $t('rerank.mode.lines') }}</option>
@@ -129,7 +139,7 @@ export default defineComponent({
         </div>
         <div class="row"><label>{{ $t('rerank.documents') }}</label><textarea id="rerank-docs" rows="4" v-model="docs"></textarea></div>
         <div class="actions">
-          <busy-button id="btn-rerank" :busy="busy" :label="$t('rerank.run')"
+          <busy-button id="btn-rerank" :busy="busy" :disabled="!canRun" :label="$t('rerank.run')"
                        :busy-label="$t('rerank.running')" @click="doRerank" />
         </div>
         <!-- Was previously rendered only inside v-if="result" (and only

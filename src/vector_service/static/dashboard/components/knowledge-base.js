@@ -6,10 +6,12 @@
 // consumed incrementally as newline-delimited JSON events —
 // stage / progress then a terminal result/error event.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
-import { api, enc, extractApiError, t } from './app.js';
+import { api, enc, extractApiError, t, modelsByType, refreshModels as loadModels } from './app.js';
+import { intError } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 import { renderMarkdown } from './markdown.js';
 import ParserProfileCards from './parser-cards.js';
+import UiPager from './pager.js';
 
 // The ingest routes default to the fixed "ingest" collection that
 // auto-creates on first use; the dashboard only picks the database.
@@ -107,7 +109,7 @@ function legacyCopy(text) {
 
 export default defineComponent({
   name: 'KnowledgeBasePanel',
-  components: { StatusBanner, BusyButton, EmptyState, ParserProfileCards },
+  components: { StatusBanner, BusyButton, EmptyState, ParserProfileCards, UiPager },
   props: { view: { type: String, default: 'parse' } },
   setup(props) {
     // Run state of the last parse / chunk action. `status` is an internal
@@ -180,7 +182,8 @@ export default defineComponent({
     const chunkResults = ref([]);
     const dbs = ref([]);
     const db = ref('');
-    const models = ref([]);
+    // S6: shared store cache filtered to embedders — no private GET copy.
+    const models = computed(() => modelsByType('embedder'));
     const model = ref('');
     const ingestFile = ref(null);
     const chunkParams = ref({
@@ -355,17 +358,48 @@ export default defineComponent({
     async function refreshModels() {
       modelsErr.value = '';
       try {
-        const { payload } = await api('GET', '/v1/models');
-        models.value = ((payload && payload.data) || []).filter(m => m.type === 'embedder');
-        if (!model.value && models.value.length) {
-          const loaded = models.value.find(m => m.loaded);
-          model.value = (loaded || models.value[0]).id;
-        }
+        await loadModels();
       } catch (e) {
-        models.value = [];
         modelsErr.value = t('kb.models_failed') + extractApiError(e, t('common.unknown'));
       }
     }
+    watch(models, (list) => {
+      if (!model.value && list.length) {
+        const loaded = list.find(m => m.loaded);
+        model.value = (loaded || list[0]).id;
+      }
+    }, { immediate: true });
+
+    // S6 numeric rules: min/max/whole-number checks with an inline hint,
+    // surfaced in BOTH the chunk form and the ingest form. The overlap
+    // rule ("must stay under the size") is the same one the ingest
+    // endpoint enforces; it now shows before the request, not after.
+    function overlapErr(size, overlap) {
+      const e = intError(overlap, 0, 8192);
+      if (e) return e;
+      if (Number(overlap) >= Number(size)) return t('ingest.err.bad_overlap');
+      return '';
+    }
+    const chunkSizeErr = computed(() => intError(chunkSize.value, 1, 8192));
+    const chunkOverlapErr = computed(() => (
+      chunkSizeErr.value ? intError(chunkOverlap.value, 0, 8192)
+        : overlapErr(chunkSize.value, chunkOverlap.value)
+    ));
+    const chunkPercentileErr = computed(() => intError(chunkPercentile.value, 50, 100));
+    const canChunk = computed(() => (
+      !chunkSizeErr.value && !chunkOverlapErr.value && !chunkPercentileErr.value
+    ));
+    const ingestSizeErr = computed(() => intError(chunkParams.value.size, 1, 8192));
+    const ingestOverlapErr = computed(() => (
+      ingestSizeErr.value ? intError(chunkParams.value.overlap, 0, 8192)
+        : overlapErr(chunkParams.value.size, chunkParams.value.overlap)
+    ));
+    const ingestPercentileErr = computed(() => intError(chunkParams.value.percentile, 50, 100));
+    const canIngest = computed(() => (
+      !!db.value && !!ingestFile.value
+      && !ingestSizeErr.value && !ingestOverlapErr.value && !ingestPercentileErr.value
+    ));
+
     onMounted(() => { refreshDbs(); refreshModels(); refreshParserStatus(); });
     // The panel stays mounted under v-show, so onMounted only fires
     // once. Re-pull dbs/models whenever the user opens the tab — this
@@ -473,6 +507,7 @@ export default defineComponent({
 
     async function doChunk() {
       if (chunkBusy.value) return;
+      if (!canChunk.value) return;
       chunkBusy.value = true;
       status.value = '';
       statusMsg.value = '';
@@ -727,6 +762,7 @@ export default defineComponent({
 
     async function doIngest() {
       if (ingestBusy.value) return;
+      if (!canIngest.value) return;
       formErr.value = '';
       if (!db.value) { formErr.value = t('ingest.err.no_db'); return; }
       if (!ingestFile.value) { formErr.value = t('ingest.err.no_file'); return; }
@@ -850,6 +886,8 @@ export default defineComponent({
              formErr, dbsErr, modelsErr, parserErr, chunkBusy,
              parseFile, parseResult, parseCopied, chunkSize, chunkOverlap, chunkMd, chunkResults,
              chunkStrategy, chunkPercentile, chunkAddContext,
+             chunkSizeErr, chunkOverlapErr, chunkPercentileErr, canChunk,
+             ingestSizeErr, ingestOverlapErr, ingestPercentileErr, canIngest,
              dbs, db, models, model, ingestFile, chunkParams, metadata, ingestResult,
              ingestBusy, ingestStage, ingestFailedStage, ingestParsePages, uploadPct, ingestElapsed,
              ingestError, ingestMeta, docIdCopied,
@@ -1006,11 +1044,14 @@ export default defineComponent({
             <label>{{ $t('kb.breakpoint') }}</label>
             <input type="number" id="chunk-percentile" min="50" max="100"
                    v-model.number="chunkPercentile" />
+            <span class="hint" v-if="chunkPercentileErr">{{ chunkPercentileErr }}</span>
           </div>
         </div>
         <div class="row split">
-          <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="chunk-size" v-model.number="chunkSize" /></div>
-          <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="chunk-overlap" v-model.number="chunkOverlap" /></div>
+          <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="chunk-size" min="1" max="8192" v-model.number="chunkSize" />
+            <span class="hint" v-if="chunkSizeErr">{{ chunkSizeErr }}</span></div>
+          <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="chunk-overlap" min="0" max="8192" v-model.number="chunkOverlap" />
+            <span class="hint" v-if="chunkOverlapErr">{{ chunkOverlapErr }}</span></div>
         </div>
         <div class="row checkbox-row">
           <label class="checkbox-label">
@@ -1020,7 +1061,7 @@ export default defineComponent({
         </div>
         <div class="row"><label>{{ $t('kb.markdown') }}</label><textarea id="chunk-md" rows="6" v-model="chunkMd"></textarea></div>
         <div class="actions">
-          <busy-button id="btn-chunk" :busy="chunkBusy" :label="$t('kb.chunk_btn')"
+          <busy-button id="btn-chunk" :busy="chunkBusy" :disabled="!canChunk" :label="$t('kb.chunk_btn')"
                        :busy-label="$t('kb.chunking')" @click="doChunk" />
         </div>
         <div v-if="chunkResults.length" class="response" id="chunk-results">
@@ -1102,11 +1143,14 @@ export default defineComponent({
               <label>{{ $t('kb.breakpoint') }}</label>
               <input type="number" id="ingest-percentile" min="50" max="100"
                      v-model.number="chunkParams.percentile" :disabled="ingestBusy" />
+              <span class="hint" v-if="ingestPercentileErr">{{ ingestPercentileErr }}</span>
             </div>
           </div>
           <div class="row split">
-            <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="ingest-size" v-model.number="chunkParams.size" :disabled="ingestBusy" /></div>
-            <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="ingest-overlap" v-model.number="chunkParams.overlap" :disabled="ingestBusy" /></div>
+            <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="ingest-size" min="1" max="8192" v-model.number="chunkParams.size" :disabled="ingestBusy" />
+              <span class="hint" v-if="ingestSizeErr">{{ ingestSizeErr }}</span></div>
+            <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="ingest-overlap" min="0" max="8192" v-model.number="chunkParams.overlap" :disabled="ingestBusy" />
+              <span class="hint" v-if="ingestOverlapErr">{{ ingestOverlapErr }}</span></div>
           </div>
           <div class="row checkbox-row">
             <label class="checkbox-label">
@@ -1140,7 +1184,7 @@ export default defineComponent({
           </div>
         </div>
         <div class="actions">
-          <button class="btn primary" id="btn-ingest-upload" :disabled="ingestBusy" @click="doIngest">
+          <button class="btn primary" id="btn-ingest-upload" :disabled="ingestBusy || !canIngest" @click="doIngest">
             <span v-if="ingestBusy" class="btn-spinner"></span>
             {{ ingestBusy
                ? (ingestStage === 'uploading' ? $t('ingest.uploading') : $t('ingest.processing'))
@@ -1350,13 +1394,13 @@ export default defineComponent({
               </div>
             </div>
 
-            <div class="pager" id="chunks-pager">
-              <button class="btn sm" id="btn-chunks-first" :disabled="viewPage <= 1 || viewBusy" @click="chunksFirst">« {{ $t('common.first') }}</button>
-              <button class="btn sm" id="btn-chunks-prev" :disabled="viewPage <= 1 || viewBusy" @click="chunksPrev">‹ {{ $t('common.prev') }}</button>
-              <span class="info">{{ $t('kb.pager_info', { from: viewOffset + 1, to: viewOffset + viewChunks.length, total: viewTotal, page: viewPage, pages: viewPages }) }}</span>
-              <button class="btn sm" id="btn-chunks-next" :disabled="viewPage >= viewPages || viewBusy" @click="chunksNext">{{ $t('common.next') }} ›</button>
-              <button class="btn sm" id="btn-chunks-last" :disabled="viewPage >= viewPages || viewBusy" @click="chunksLast">{{ $t('common.last') }} »</button>
-            </div>
+            <ui-pager root-id="chunks-pager"
+                      first-id="btn-chunks-first" prev-id="btn-chunks-prev"
+                      next-id="btn-chunks-next" last-id="btn-chunks-last"
+                      :page="viewPage" :pages="viewPages" :busy="viewBusy"
+                      :info-text="$t('kb.pager_info', { from: viewOffset + 1, to: viewOffset + viewChunks.length, total: viewTotal, page: viewPage, pages: viewPages })"
+                      @first="chunksFirst" @prev="chunksPrev"
+                      @next="chunksNext" @last="chunksLast" />
           </template>
         </div>
       </div>

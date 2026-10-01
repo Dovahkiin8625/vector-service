@@ -1,6 +1,7 @@
 // Models registry panel: lists every registered model with load/unload.
 import { defineComponent, onMounted, ref } from '../vue.esm-browser.prod.js';
-import { store, api, extractApiError, applyModelsData, t } from './app.js';
+import { store, api, extractApiError, refreshModels as loadModels, t } from './app.js';
+import { formatParams, formatBytes, dtypeText as fmtDtype } from './util.js';
 import { notify, StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 const FAMILY_LABELS = {
@@ -8,39 +9,13 @@ const FAMILY_LABELS = {
   multimodal_embedder: 'multimodal_embedder', reranker: 'reranker',
 };
 
-// ---- formatters for the loaded-instance meta block -----------------------
-// ``model_info`` arrives from GET /v1/models once an instance is held:
-// {device, dtype, param_count, memory_bytes, load_duration_seconds}.
-// Every value is best-effort (null -> em dash) so the card degrades
-// gracefully for backends with no discoverable torch module.
-function formatParams(n) {
-  if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
-function formatBytes(b) {
-  if (b == null) return '—';
-  const GB = 1024 ** 3, MB = 1024 ** 2, KB = 1024;
-  if (b >= GB) return (b / GB).toFixed(2) + ' GB';
-  if (b >= MB) return (b / MB).toFixed(1) + ' MB';
-  if (b >= KB) return (b / KB).toFixed(1) + ' KB';
-  return b + ' B';
-}
-
+// ``load_duration_seconds`` formatting (seconds-based model_info units).
 function formatDuration(s) {
   if (s == null) return '—';
   if (s >= 60) return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's';
   if (s >= 1) return s.toFixed(1) + ' s';
   return Math.round(s * 1000) + ' ms';
 }
-
-const DTYPE_LABELS = {
-  float16: 'FP16', bfloat16: 'BF16', float32: 'FP32',
-  int8: 'INT8', int4: 'INT4',
-};
 
 export default defineComponent({
   name: 'ModelsPanel',
@@ -54,10 +29,10 @@ export default defineComponent({
       refreshing.value = true;
       loadErr.value = '';
       try {
-        const { payload } = await api('GET', '/v1/models');
-        // Reconcile (busy flags, failure alerts, dim) in ONE place shared
-        // with the background poller in app.js.
-        applyModelsData((payload && payload.data) || []);
+        // Shared single-flight GET /v1/models (S6): reconcile (busy
+        // flags, failure alerts, dim) in ONE place shared with the
+        // background poller in app.js.
+        await loadModels();
       } catch (e) {
         loadErr.value = t('models.load_failed') + ': ' + extractApiError(e, t('common.unknown'));
       }
@@ -193,8 +168,7 @@ export default defineComponent({
       return this.isGpu(m) ? 'GPU' : 'CPU';
     },
     dtypeText(m) {
-      const d = m.model_info && m.model_info.dtype;
-      return d ? (DTYPE_LABELS[d] || String(d).toUpperCase()) : '';
+      return fmtDtype(m.model_info && m.model_info.dtype);
     },
     deviceTitle(m) {
       const info = m.model_info;

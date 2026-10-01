@@ -2,6 +2,7 @@
 // (server-side embed) or by a pre-computed query vector.
 import { defineComponent, ref, computed, watch, onMounted } from '../vue.esm-browser.prod.js';
 import { t, api, enc, extractApiError } from './app.js';
+import { intError } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 export default defineComponent({
@@ -15,6 +16,9 @@ export default defineComponent({
     const vecfield = ref('vector');
     const mode = ref('text');
     const topk = ref(5);
+    // S6 numeric rule: whole number in 1..1000, with an inline hint and
+    // a disabled run button while the box is invalid/empty.
+    const topkErr = computed(() => intError(topk.value, 1, 1000));
     const text = ref('computer peripherals');
     const emb = ref('[0.1, 0.2, 0.3, 0.4]');
     const filter = ref('');
@@ -97,6 +101,9 @@ export default defineComponent({
     async function doSearch() {
       formErr.value = '';
       if (!db.value || !coll.value) { formErr.value = t('search.err.no_selection'); return; }
+      // A cleared top_k box (v-model.number -> ''/NaN) used to ride into
+      // the body unchecked; the shared integer rule now gates the run.
+      if (topkErr.value) return;
       const body = buildBody(); if (!body) return;
       status.value = 'loading';
       errMsg.value = '';
@@ -148,7 +155,7 @@ export default defineComponent({
       outputFields.value = new Set(outputFields.value);
     }
 
-    return { dbs, colls, db, coll, primary, vecfield, mode, topk, text, emb, filter,
+    return { dbs, colls, db, coll, primary, vecfield, mode, topk, topkErr, text, emb, filter,
              schemaFields, outputFields, result, doSearch, toggleOutput,
              status, formErr, loadErr, refreshDbs, resultState, resultText, showResultList,
              metric, metricNote, formatScore };
@@ -179,7 +186,8 @@ export default defineComponent({
               <option value="emb">{{ $t('search.mode.vector') }}</option>
             </select>
           </div>
-          <div class="row"><label>top_k</label><input type="number" id="srch-topk" v-model.number="topk" min="1" max="1000" /></div>
+          <div class="row"><label>top_k</label><input type="number" id="srch-topk" v-model.number="topk" min="1" max="1000" />
+            <span class="hint" v-if="topkErr">{{ topkErr }}</span></div>
         </div>
         <div class="row" v-show="mode === 'text'"><label>{{ $t('search.query_text') }}</label><input type="text" id="srch-text" v-model="text" /></div>
         <div class="row" v-show="mode === 'emb'"><label>{{ $t('search.query_vector') }}</label><textarea id="srch-emb" class="code-input" rows="2" v-model="emb"></textarea></div>
@@ -203,7 +211,7 @@ export default defineComponent({
           </div>
         </details>
         <div class="actions">
-          <busy-button id="btn-search" :busy="status === 'loading'" :label="$t('search.run')"
+          <busy-button id="btn-search" :busy="status === 'loading'" :disabled="!!topkErr" :label="$t('search.run')"
                        :busy-label="$t('search.running')" @click="doSearch" />
         </div>
         <status-banner kind="error" :text="formErr" />

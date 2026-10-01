@@ -1,6 +1,7 @@
 // Overview panel: service health + unified loaded-capability view.
 import { defineComponent, onMounted, onUnmounted, ref } from '../vue.esm-browser.prod.js';
 import { t, store, api, extractApiError } from './app.js';
+import { formatParams, formatBytes, dtypeText } from './util.js';
 import { StatusBanner } from './feedback.js';
 import ParserProfileCards from './parser-cards.js';
 
@@ -13,23 +14,6 @@ function formatUptime(seconds) {
   if (d) return d + 'd ' + h + 'h';
   if (h) return h + 'h ' + m + 'm';
   return m + 'm';
-}
-
-function formatParams(n) {
-  if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
-function formatBytes(b) {
-  if (b == null) return '—';
-  const GB = 1024 ** 3, MB = 1024 ** 2, KB = 1024;
-  if (b >= GB) return (b / GB).toFixed(2) + ' GB';
-  if (b >= MB) return (b / MB).toFixed(1) + ' MB';
-  if (b >= KB) return (b / KB).toFixed(1) + ' KB';
-  return b + ' B';
 }
 
 export default defineComponent({
@@ -54,7 +38,7 @@ export default defineComponent({
     }
     onMounted(() => { refresh(); timer.value = setInterval(refresh, 5000); });
     onUnmounted(() => { if (timer.value) clearInterval(timer.value); });
-    return { store, summary, loadErr, formatUptime, formatParams, formatBytes, refresh };
+    return { store, summary, loadErr, formatUptime, formatParams, formatBytes, dtypeText, refresh };
   },
   template: `
     <div>
@@ -109,7 +93,7 @@ export default defineComponent({
           <div v-if="!loadedModels.length" class="empty cap-empty-inline">{{ $t('overview.cap_inference_empty') }}</div>
         </div>
 
-        <h4 class="cap-group-title">{{ $t('overview.cap_parser') }} · {{ warmParserCount }} / 3</h4>
+        <h4 class="cap-group-title">{{ $t('overview.cap_parser') }} · {{ warmParserCount }} / {{ parserCount }}</h4>
         <parser-profile-cards :parser="summary && summary.parser" :readonly="true" />
         <p v-if="hasInvisibleOcr" class="cap-note">{{ $t('cap.onnx_note') }}</p>
       </div>
@@ -137,6 +121,12 @@ export default defineComponent({
       if (!profiles) return 0;
       return Object.values(profiles).filter(p => p.warm).length;
     },
+    // Denominator comes from the profiles the server actually reports —
+    // the header used to hardcode "/ 3".
+    parserCount() {
+      const profiles = this.summary && this.summary.parser && this.summary.parser.profiles;
+      return profiles ? Object.keys(profiles).length : 0;
+    },
     // RapidOCR ONNX sessions are invisible to the torch walk — surface
     // one global note whenever a warm standard/vlm profile carries one.
     hasInvisibleOcr() {
@@ -152,12 +142,6 @@ export default defineComponent({
   methods: {
     isGpu(device) {
       return typeof device === 'string' && device.toLowerCase().startsWith('cuda');
-    },
-    dtypeText(dtype) {
-      const labels = {
-        float16: 'FP16', bfloat16: 'BF16', float32: 'FP32', int8: 'INT8', int4: 'INT4',
-      };
-      return labels[dtype] || String(dtype).toUpperCase();
     },
   },
 });

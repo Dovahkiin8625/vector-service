@@ -3,6 +3,7 @@
 import { defineComponent, ref, watch, onMounted, computed } from '../vue.esm-browser.prod.js';
 import { t, api, enc, extractApiError } from './app.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
+import UiPager from './pager.js';
 
 export default defineComponent({
   name: 'BrowsePanel',
@@ -34,11 +35,10 @@ export default defineComponent({
     const delBusy = ref(false);
     const delStatus = ref('');
     const delStatusKind = ref('');
-    // The jump-to-page box needs a writable model of its own. It used to
-    // be bound to `currentPage`, which is a read-only computed — typing a
-    // page number assigned to a computed with no setter, so the jump
-    // silently did nothing (B3).
-    const jumpPage = ref(1);
+    // The jump-to-page box lives inside UiPager (S6) with a writable
+    // model of its own — it used to be bound to `currentPage`, a
+    // read-only computed, so a typed jump silently did nothing (B3).
+    // UiPager clamps and echoes the landing page back to the box.
     // The filter the rows on screen were fetched with. Tick-marks are
     // primary keys of rows the operator could see; once the filter
     // changes those rows may not match any more, so the selection is
@@ -292,24 +292,17 @@ export default defineComponent({
       if (!Number.isFinite(n) || n < 1) return;
       const target = Math.min(Math.floor(n), totalPages.value);
       offset.value = (target - 1) * pageSize.value;
-      // Echo back where the jump actually landed, so an out-of-range
-      // entry (page 999) visibly corrects itself to the last page.
-      jumpPage.value = target;
       runQuery();
     }
-    // Keep the box in step with page turns made by the other buttons; a
-    // half-typed number never changes currentPage, so the two do not
-    // fight over the field.
-    watch(currentPage, (v) => { jumpPage.value = v; });
 
     return { dbs, colls, db, coll, primary, pageSize, filter, offset, total, items, schema,
-             columns, totalPages, currentPage, jumpPage, status, queryErr, loadErr, formErr,
+             columns, totalPages, currentPage, status, queryErr, loadErr, formErr,
              tableState, tableText, pageErrText, retryQuery, refreshDbs, runQuery, jump, jumpTo,
              selected, allPageSelected, somePageSelected, selectedCount, deleteSelectedLabel,
              delBusy, delStatus, delStatusKind,
              toggleOne, togglePage, clearSelection, deleteSelected, deleteByFilter };
   },
-  components: { StatusBanner, BusyButton, EmptyState },
+  components: { StatusBanner, BusyButton, EmptyState, UiPager },
   template: `
     <div>
       <div class="section">
@@ -427,18 +420,18 @@ export default defineComponent({
         </div>
         <!-- Pager buttons are disabled while a query is in flight rather
              than showing five spinners; the table block carries the
-             loading state. -->
-        <div v-if="total" class="pager" id="brw-pager">
-          <button class="btn sm" id="btn-brw-first" :disabled="currentPage <= 1 || status === 'loading'" @click="jumpTo(1)">« {{ $t('common.first') }}</button>
-          <button class="btn sm" id="btn-brw-prev"  :disabled="currentPage <= 1 || status === 'loading'" @click="jump(-pageSize)">‹ {{ $t('common.prev') }}</button>
-          <span class="info" id="brw-pager-info">{{ $t('browse.pager_info', { from: offset + 1, to: offset + items.length, total: total, page: currentPage, pages: totalPages }) }}</span>
-          <button class="btn sm" id="btn-brw-next" :disabled="currentPage >= totalPages || status === 'loading'" @click="jump(pageSize)">{{ $t('common.next') }} ›</button>
-          <button class="btn sm" id="btn-brw-last" :disabled="currentPage >= totalPages || status === 'loading'" @click="jumpTo(totalPages)">{{ $t('common.last') }} »</button>
-          <span class="info">{{ $t('browse.jump_to') }}</span>
-          <input type="number" id="brw-jump" :min="1" :max="totalPages" v-model.number="jumpPage"
-                 :aria-label="$t('browse.stat_page')" style="width:72px;" />
-          <button class="btn sm" id="btn-brw-jump" :disabled="status === 'loading'" @click="jumpTo(jumpPage)">{{ $t('browse.go') }}</button>
-        </div>
+             loading state. Ids are passed in so the automation anchors
+             (btn-brw-first …) stay literal on disk (S6 shared pager). -->
+        <ui-pager v-if="total" root-id="brw-pager" info-id="brw-pager-info"
+                  first-id="btn-brw-first" prev-id="btn-brw-prev"
+                  next-id="btn-brw-next" last-id="btn-brw-last"
+                  jump-id="brw-jump" jump-btn-id="btn-brw-jump"
+                  :page="currentPage" :pages="totalPages"
+                  :busy="status === 'loading'" :show-jump="true"
+                  :info-text="$t('browse.pager_info', { from: offset + 1, to: offset + items.length, total: total, page: currentPage, pages: totalPages })"
+                  @first="jumpTo(1)" @prev="jump(-pageSize)"
+                  @next="jump(pageSize)" @last="jumpTo(totalPages)"
+                  @go="jumpTo" />
       </div>
       <div class="empty hint">{{ $t('browse.footer_hint') }}</div>
     </div>

@@ -1,17 +1,19 @@
 // Embeddings panel: text / image / multimodal - kind prop picks mode.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
-import { t, api, extractApiError } from './app.js';
+import { t, api, extractApiError, modelsByType, refreshModels as loadModels } from './app.js';
+import { fileToB64, DEFAULT_MIME, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT, modelTypeOf } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 // Endpoint pills are protocol literals and stay untranslated.
 const PILLS = { text: 'POST /v1/embeddings', image: 'POST /v1/image_embeddings', multimodal: 'POST /v1/multimodal_embeddings' };
-const DEFAULT_MIME = 'image/png';
 
 export default defineComponent({
   name: 'EmbeddingsPanel',
   props: { kind: { type: String, default: 'text' } },
   setup(props) {
-    const models = ref([]);
+    // S6: the list is a filter over the shared store cache, not a private
+    // GET /v1/models copy (each kind mounted one — three at startup).
+    const models = computed(() => modelsByType(modelTypeOf(props.kind)));
     const model = ref('');
     const textInput = ref('hello world');
     const listInput = ref('["a", "b", "c"]');
@@ -44,33 +46,24 @@ export default defineComponent({
       modelsStatus.value = 'loading';
       modelsErr.value = '';
       try {
-        const { payload } = await api('GET', '/v1/models');
-        const wantType = props.kind === 'text' ? 'embedder' : (props.kind === 'image' ? 'image_embedder' : 'multimodal_embedder');
-        models.value = (payload && payload.data || []).filter(m => m.type === wantType);
-        if (!model.value && models.value.length) {
-          const loaded = models.value.find(m => m.loaded);
-          model.value = (loaded || models.value[0]).id;
-        }
+        await loadModels();
         modelsStatus.value = models.value.length ? 'ok' : 'empty';
       } catch (e) {
-        models.value = [];
         modelsStatus.value = 'error';
         modelsErr.value = extractApiError(e, t('common.unknown'));
       }
     }
+    // Prefer an already-loaded instance when picking a default.
+    watch(models, (list) => {
+      if (!model.value && list.length) {
+        const loaded = list.find(m => m.loaded);
+        model.value = (loaded || list[0]).id;
+      }
+    }, { immediate: true });
     onMounted(refreshModels);
     watch(() => props.kind, refreshModels);
 
     function safeParse(s) { try { return JSON.parse(s); } catch (_e) { return null; } }
-
-    async function fileToB64(f) {
-      return new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(',')[1] || '');
-        r.onerror = rej;
-        r.readAsDataURL(f);
-      });
-    }
 
     function fail(key) {
       status.value = 'error';
@@ -79,6 +72,7 @@ export default defineComponent({
     }
 
     async function run() {
+      if (!model.value) return;
       try {
         status.value = 'loading';
         errMsg.value = '';
@@ -135,7 +129,7 @@ export default defineComponent({
     return {
       models, model, textInput, listInput, fileList, listJson, mime, modeText,
       status, errMsg, result, busy, canRetry, refreshModels, run,
-      modelsStatus, modelsText,
+      modelsStatus, modelsText, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT,
     };
   },
   components: { StatusBanner, BusyButton, EmptyState },
@@ -149,11 +143,9 @@ export default defineComponent({
           <busy-button :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
                        @click="refreshModels" />
         </div>
-        <div class="list" v-if="kind === 'image' || kind === 'multimodal'">
-          <div v-for="m in models" :key="m.id" class="list-item" style="cursor:default;">
-            <span class="name">{{ m.id }}</span><span class="meta">{{ m.loaded ? $t('common.loaded') : $t('common.unloaded') }}</span>
-          </div>
-        </div>
+        <!-- The non-operable model list that used to sit here duplicated
+             the select below without offering any action (S6); the select
+             is the single place to pick a model. -->
         <!-- Loading / failed / genuinely-empty are three different
              situations and used to share one line of copy. -->
         <empty-state v-if="modelsStatus !== 'ok'" :state="modelsStatus" :text="modelsText"
@@ -191,7 +183,7 @@ export default defineComponent({
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.select_images') }} <span class="hint">{{ $t('embeddings.hint.local_files') }}</span></label>
-          <input type="file" multiple accept="image/png,image/jpeg,image/webp" @change="fileList = $event.target.files" />
+          <input type="file" multiple :accept="IMAGE_ACCEPT" @change="fileList = $event.target.files" />
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.json_list') }} <span class="hint">{{ $t('embeddings.hint.each_item') }}</span></label>
@@ -201,15 +193,15 @@ export default defineComponent({
           <label>{{ $t('common.mime') }}</label>
           <select v-model="mime">
             <option value="">{{ $t('common.auto') }}</option>
-            <option value="image/png">image/png</option>
-            <option value="image/jpeg">image/jpeg</option>
-            <option value="image/webp">image/webp</option>
+            <option v-for="m in IMAGE_MIME_OPTIONS" :key="m" :value="m">{{ m }}</option>
           </select>
         </div>
 
         <div class="actions">
-          <busy-button :busy="busy" :label="$t('common.run')" :busy-label="$t('embeddings.running')"
-                       @click="run" />
+          <!-- An empty model list left model: '' submittable; the button
+               now carries that state (S6). -->
+          <busy-button :busy="busy" :disabled="!model" :label="$t('common.run')"
+                       :busy-label="$t('embeddings.running')" @click="run" />
         </div>
         <!-- Outside v-if="result": the first request's error has no
              result to hang off, which is exactly when it matters. -->

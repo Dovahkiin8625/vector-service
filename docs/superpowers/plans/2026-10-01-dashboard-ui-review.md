@@ -11,7 +11,8 @@
 > | S3 功能 Bug 清单（B1–B14） | **已实施**（2026-10-01，见 §1 S3 实施记录） |
 > | S4 版本号单一来源 | **已实施**（2026-10-01，见 §1 S4 实施记录） |
 > | S5 排版与字体 | **已实施**（2026-10-01，见 §1 S5 实施记录） |
-> | S6 表单/数据加载规范、S7 a11y、阶段三、阶段四 | 未开始 |
+> | S6 表单/数据加载规范 | **已实施**（2026-10-01，见 §1 S6 实施记录） |
+> | S7 a11y、阶段三、阶段四 | 未开始 |
 | 阶段一第 4 项（records 危险默认值） | **已实施**（2026-10-01，见 §3 阶段一实施记录） |
 
 ---
@@ -217,6 +218,18 @@
 2. 通用表单规约：必填空值禁用提交；数字输入统一 min/max/整数校验与错误提示；危险操作按钮收纳到行尾菜单或要求先展开参数区。
 3. 提取共享工具：`fileToB64`、MIME 选项、dtype 映射（overview.js 与 models.js 重复定义）等收到单一 util 模块。
 
+**实施记录（2026-10-01）**：三条措施全部落地。
+
+1. 模型清单收敛：`app.js` 新增单飞 `refreshModels()` + `modelsByType(type)`——并发调用合并为一次 `GET /v1/models`（finally 复位 in-flight promise），背景轮询同路径；embeddings（3 实例）/rerank/similarity/kb/models 全部改为 `computed(() => modelsByType(...))` 从 store 取数（按 type 过滤，kind 映射收进 `util.js#modelTypeOf`）；删除不可操作的重复列表区（embeddings `.list`、rerank `#rerank-models-list`）；各面板保留原有加载失败错误条，自动选择 watch 仅在空选时补默认。
+2. 通用表单规约：`util.js#intError(value, min, max)` 统一整数/范围校验（缺界走单边措辞 `common.err_int_min/max`，修掉兜底渲染成「取值需在 1-null 之间」的措辞缺陷）；search top_k、rerank top_n、kb chunk-size/overlap/percentile 与 ingest 同字段、retrieval topK/rrfK/nVariants/candidatePool/maxTokens、ops-reindex canary/batch 全部接校验 + 行内 hint + 提交/运行禁用；embeddings/rerank/similarity 必填（model/query/docs）为空禁用「运行」；危险按钮收纳：databases/collections 的 drop 按钮仅在行展开后渲染（records 删除门槛已于阶段一第 4 项落地）。
+3. 共享工具提取：新 `components/util.js` 收口 `fileToB64`（2 份 FileReader 实现）、MIME 选项/accept（3 份下拉）、`dtypeText`/`DTYPE_LABELS`（overview/models 2 份）、`formatParams`/`formatBytes`（3 份）、`intError`；新 `components/pager.js`（UiPager）统一 browse 与 kb 入库浏览的分页（首/上/下/末/跳转，B3 跳页回显钳制收进组件 watch）；分页 DOM id 经 `*-id` prop 原样传入（`first-id="btn-brw-first"` 含既有测试 pin 的字面子串），既有断言零改动。顺手统一：rerank query 输入改 textarea 与 similarity 一致。
+
+附带 fixits：`extractApiError` 兜底 `'请求失败'` 改 i18n key `common.request_failed`；overview 预热计数分母 `parserCount` 从 `/v1/system/status` 的 profiles 实际数量派生（替换硬编码 `/ 3`）；retrieval.js 补上缺失的 `t` 导入（自定义 JSON 解析失败路径此前会 ReferenceError）。
+
+测试：dashboard 测试组 40/40 通过（route/i18n/feedback/version-single-source）。冒烟（Playwright + 8080 dev server）：整页加载 4.5s 内 `GET /v1/models` 仅 1 次（原 5 次）；21 视图中/英双语走查——EN 无 UI 中文残留（browse/ingested 命中均为语料正文数据，非界面文案），ZH 无 UI 英文残留（命中为模型 id、请求示例等技术字）；`#rerank-models-list` 与重复列表区消失；`#brw-pager` 全套 id（含 `#brw-jump`/`#btn-brw-jump`）与 `#chunks-pager` 渲染；数据库折叠行无删除按钮、展开后出现；空值/非法数字（search top_k、rerank top_n、kb size/overlap、retrieval topK、reindex canary/batch）均出 hint 且提交禁用；清空模型选择后「运行」按钮翻转禁用；overview「文档解析引擎 · 1 / 3」分母与接口 profiles 数一致。
+
+**未纳入本次**：app.js health 轮询与 overview 面板各自拉 `/v1/system/status`（每 5s 两次）的合并仍开放（见 S4 实施记录备注）；ops-queue 的 `total · offset` 分页样式统一留给阶段三。
+
 ### S7. 【P2】可访问性（a11y）系统性欠债
 
 - 几乎所有 `<label>` 未通过 `for` 关联控件（30+ 处），点击 label 不聚焦；
@@ -355,6 +368,7 @@
 2. 字体分流（S5）：mono 收窄到技术元素；建立字号/字重层级表；修复全部截断（卡片标题、徽标、运维 label 列）。
    → **已于 2026-10-01 完成**（见 §1 S5 实施记录）。
 3. 模型数据收敛（S6）：单一缓存来源，消灭 5 次重复请求与不可操作列表区；数字输入校验；共享工具提取（fileToB64、MIME、dtype、pager）。
+   → **已于 2026-10-01 完成**（见 §1 S6 实施记录）。
 4. 元信息占位与展开箭头解耦；分片卡取消内嵌滚动。
    → **已于 2026-10-01 完成**（见 §1 S5 实施记录，措施 3/4）。
 

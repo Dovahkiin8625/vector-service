@@ -8,26 +8,10 @@
 // the converter rebuilds on the next request.
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { api, extractApiError, t } from './app.js';
+import { formatParams, formatBytes } from './util.js';
 import { StatusBanner } from './feedback.js';
 
 const PROFILES = ['standard', 'native', 'vlm'];
-
-function formatParams(n) {
-  if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e8 ? 0 : 1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
-function formatBytes(b) {
-  if (b == null) return '—';
-  const GB = 1024 ** 3, MB = 1024 ** 2, KB = 1024;
-  if (b >= GB) return (b / GB).toFixed(2) + ' GB';
-  if (b >= MB) return (b / MB).toFixed(1) + ' MB';
-  if (b >= KB) return (b / KB).toFixed(1) + ' KB';
-  return b + ' B';
-}
 
 export default defineComponent({
   name: 'ParserProfileCards',

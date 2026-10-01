@@ -297,7 +297,11 @@ export default defineComponent({
                 </template>
               </span>
               <span class="expand-caret" aria-hidden="true">{{ expanded.has(db + '::' + name) ? '▾' : '▸' }}</span>
-              <busy-button class="sm" variant="danger" :busy="busyKey === 'drop:' + name"
+              <!-- S6 danger containment: same expand-first rule as the
+                   database rows — the destructive action appears only
+                   once the row's detail panel is open. -->
+              <busy-button v-if="expanded.has(db + '::' + name)" class="sm" variant="danger"
+                           :busy="busyKey === 'drop:' + name"
                            :label="$t('common.delete')" :busy-label="$t('common.deleting')"
                            @click.stop="dropColl(name)" />
             </div>

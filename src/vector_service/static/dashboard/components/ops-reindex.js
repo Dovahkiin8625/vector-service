@@ -9,6 +9,7 @@
 // =====================================================================
 import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
+import { intError } from './util.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 import {
   enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
@@ -59,6 +60,12 @@ export default defineComponent({
     // would not consult.
     const scopeGate = computed(() => gates.value[0] || null);
     const latestCheck = computed(() => checks.value[0] || null);
+    // S6 numeric rules: cleared number boxes used to fall through the
+    // `Number(x) || default` coercion silently. Both fields show an
+    // inline hint and hold the submit button until they are whole
+    // numbers in range (canary 0..100 — 0 is a legitimate "no canary").
+    const canaryErr = computed(() => intError(canaryPercent.value, 0, 100));
+    const batchErr = computed(() => intError(batchSize.value, 1, null));
     // The endpoint's own gate rule: with a gate registered, promotion is
     // allowed only when the latest check passed. With no gate the canary
     // can be promoted directly (a 409 still comes back if none is parked).
@@ -98,6 +105,7 @@ export default defineComponent({
 
     async function submit() {
       if (submitting.value) return;
+      if (canaryErr.value || batchErr.value) return;
       const body = {
         embed_model: embedModel.value || null,
         canary_percent: Number(canaryPercent.value) || 0,
@@ -200,6 +208,7 @@ export default defineComponent({
 
     return {
       db, coll, embedModel, canaryPercent, batchSize,
+      canaryErr, batchErr,
       submitting, formErr, job, indexRef, promoted,
       promoting, refreshing,
       gates, checks, gateErr, promoteErr, scopeGate, latestCheck,
@@ -239,17 +248,19 @@ export default defineComponent({
             <label class="form-label" for="reindex-canary">{{ $t('ops.reindex.canary_percent') }}</label>
             <input id="reindex-canary" v-model.number="canaryPercent" type="number" min="0" max="100" step="1" />
             <span class="form-hint">{{ $t('ops.reindex.canary_hint') }}</span>
+            <span class="form-hint" v-if="canaryErr">{{ canaryErr }}</span>
           </div>
           <div class="form-group">
             <label class="form-label" for="reindex-batch">{{ $t('ops.reindex.batch_size') }}</label>
             <input id="reindex-batch" v-model.number="batchSize" type="number" min="1" step="1" />
+            <span class="form-hint" v-if="batchErr">{{ batchErr }}</span>
           </div>
         </div>
 
         <status-banner kind="error" :text="formErr" />
 
         <div class="actions">
-          <busy-button :busy="submitting" :label="$t('ops.reindex.submit')"
+          <busy-button :busy="submitting" :disabled="!!canaryErr || !!batchErr" :label="$t('ops.reindex.submit')"
                        :busy-label="$t('ops.reindex.submitting')" @click="submit" />
         </div>
       </div>

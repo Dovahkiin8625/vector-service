@@ -397,6 +397,11 @@ const I18N = {
     'common.offset': '偏移',
     'common.scope': '范围',
     'common.error': '错误',
+    'common.request_failed': '请求失败',
+    'common.err_int': '请输入整数',
+    'common.err_int_range': '取值需在 {min}-{max} 之间',
+    'common.err_int_min': '取值需不小于 {min}',
+    'common.err_int_max': '取值需不大于 {max}',
     'common.params': '参数',
     'common.tag': '标签',
     'common.question_count': '问题数',
@@ -1157,6 +1162,11 @@ const I18N = {
     'common.offset': 'offset',
     'common.scope': 'scope',
     'common.error': 'error',
+    'common.request_failed': 'request failed',
+    'common.err_int': 'enter a whole number',
+    'common.err_int_range': 'must be between {min} and {max}',
+    'common.err_int_min': 'must be {min} or more',
+    'common.err_int_max': 'must be {max} or less',
     'common.params': 'params',
     'common.tag': 'tag',
     'common.question_count': 'questions',
@@ -1589,7 +1599,7 @@ export async function api(method, path, body) {
 
 export function enc(s) { return encodeURIComponent(s); }
 export function extractApiError(e, fallback) {
-  if (!e) return fallback || '请求失败';
+  if (!e) return fallback || t('common.request_failed');
   if (typeof e === 'string') return e;
   if (e && e.message) return e.message;
   return String(e);
@@ -1661,6 +1671,34 @@ export function applyModelsData(rows) {
   return anyLoading;
 }
 
+// The ONE GET /v1/models fetch (S6). Every model-bearing panel used to
+// fire its own request on mount — three embeddings instances plus
+// rerank, similarity and kb meant five identical GETs at startup. All
+// callers now share a single in-flight request (including the background
+// poller below) and read the reconciled rows out of the store.
+let modelsFetch = null;
+export function refreshModels() {
+  if (modelsFetch) return modelsFetch;
+  modelsFetch = (async () => {
+    try {
+      const { payload } = await api('GET', '/v1/models');
+      return applyModelsData((payload && payload.data) || []);
+    } finally {
+      modelsFetch = null;
+    }
+  })();
+  return modelsFetch;
+}
+
+// Store-derived model list for one type ('embedder' | 'image_embedder'
+// | 'multimodal_embedder' | 'reranker'). Panels use this instead of
+// fetching and filtering their own copy, so a load/unload done anywhere
+// (models panel, another tab's select) shows up everywhere on the next
+// store update with no extra request.
+export function modelsByType(type) {
+  return (store.models.data || []).filter(m => m.type === type);
+}
+
 export const store = reactive({
   view: 'overview',
   locale: 'zh',                                 // current UI language: 'zh' | 'en'
@@ -1729,8 +1767,9 @@ function startModelsAutoRefresh() {
       let anyLoading = false;
       if (store.models.autoRefresh) {
         try {
-          const { payload } = await api('GET', '/v1/models');
-          anyLoading = applyModelsData((payload && payload.data) || []);
+          // Same shared single-flight fetch the panels use: a panel
+          // mounting mid-poll joins this request instead of starting one.
+          anyLoading = await refreshModels();
           if (modelsPollFailing) {
             modelsPollFailing = false;
             // Only retract our own notice: the operator may have raised
