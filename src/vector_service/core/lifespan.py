@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING
 
 from vector_service.core.config import Settings, get_settings
+from vector_service.core.instance_lock import InstanceLock
 from vector_service.core.errors import (
     ImageEmbedderError,
     ModelNotLoaded,
@@ -37,6 +38,7 @@ from vector_service.jobs import (
     JobEventBus,
     recover_interrupted,
 )
+from vector_service.jobs.maintenance import MaintenanceWorker
 from vector_service.embeddings.registry import get_embedder_class
 from vector_service.parsers.docling_parser import (
     ParserUnavailable,
@@ -103,6 +105,13 @@ async def lifespan(app: "FastAPI"):
     thread_pools = ThreadPools(settings.runtime)
     app.state.thread_pools = thread_pools
     bind_pools(thread_pools)
+
+    # Single-instance constraint: two processes against one corpus
+    # directory would duplicate job workers and split derived state.
+    # Take the OS byte-range lock before touching anything shared; a
+    # second instance fails fast here. The OS releases it on crash.
+    instance_lock = InstanceLock(settings.instance_lock_path)
+    instance_lock.acquire()
 
     app.state.store = build_store(settings)
     store = app.state.store
@@ -305,12 +314,22 @@ async def lifespan(app: "FastAPI"):
     app.state.job_worker = job_worker
     job_worker.start()
 
+    # Periodic VACUUM / backup / blob-sweep loop. Stop it before the
+    # layers it cycles over (corpus, blob store, vector store).
+    maintenance_worker = MaintenanceWorker(app)
+    app.state.maintenance_worker = maintenance_worker
+    maintenance_worker.start()
+
     try:
         yield
     finally:
         # Stop claiming and cancel an in-flight job before tearing
         # down the layers it may be using. A job interrupted here is
         # handled by recovery on the next process.
+        try:
+            await maintenance_worker.stop()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("maintenance_worker_stop_failed", error=str(exc))
         try:
             await job_worker.stop()
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
@@ -346,4 +365,5 @@ async def lifespan(app: "FastAPI"):
             log.warning("store_close_failed", error=str(exc))
         unbind_pools()
         thread_pools.shutdown()
+        instance_lock.release()
         log.info("shutdown")

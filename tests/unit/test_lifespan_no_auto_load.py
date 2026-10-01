@@ -183,16 +183,15 @@ def client(app_and_client):
 
 
 def test_lifespan_does_not_construct_or_load_any_family(client, app):
-    with TestClient(app) as c:
-        assert app.state.embedder is None
-        assert app.state.image_embedder is None
-        assert app.state.multimodal_embedder is None
-        assert app.state.reranker is None
-        # And every slot is empty.
-        assert app.state._slot_embedder.get() is None
-        assert app.state._slot_image.get() is None
-        assert app.state._slot_multimodal.get() is None
-        assert app.state._slot_reranker.get() is None
+    assert app.state.embedder is None
+    assert app.state.image_embedder is None
+    assert app.state.multimodal_embedder is None
+    assert app.state.reranker is None
+    # And every slot is empty.
+    assert app.state._slot_embedder.get() is None
+    assert app.state._slot_image.get() is None
+    assert app.state._slot_multimodal.get() is None
+    assert app.state._slot_reranker.get() is None
 
 
 def test_lifespan_starts_background_job_worker(client, app):
@@ -338,41 +337,40 @@ def test_post_load_unblocks_inference(client, app, monkeypatch):
 
     monkeypatch.setitem(emb_registry.EMBEDDER_REGISTRY, "bge-m3", _StubEmbedder)
 
-    with TestClient(app) as c:
-        # Step 1: request the load — accepted immediately (202) and
-        # completed in the background.
-        r = c.post("/v1/models/bge-m3/load")
-        assert r.status_code == 202
-        assert r.json()["status"] == "loading"
+    # Step 1: request the load — accepted immediately (202) and
+    # completed in the background.
+    r = client.post("/v1/models/bge-m3/load")
+    assert r.status_code == 202
+    assert r.json()["status"] == "loading"
 
-        # Poll until the background load settles.
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            rows = c.get("/v1/models").json()["data"]
-            row = next(m for m in rows if m["id"] == "bge-m3")
-            if row["load_status"] in ("loaded", "failed"):
-                break
-            time.sleep(0.01)
-        assert row["load_status"] == "loaded", row
-        assert row["dimensions"] == 4
+    # Poll until the background load settles.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        rows = client.get("/v1/models").json()["data"]
+        row = next(m for m in rows if m["id"] == "bge-m3")
+        if row["load_status"] in ("loaded", "failed"):
+            break
+        time.sleep(0.01)
+    assert row["load_status"] == "loaded", row
+    assert row["dimensions"] == 4
 
-        # Step 2: now /v1/embeddings works (we don't have a real store
-        # to validate against here, but the 503 path is gone).
-        r = c.post("/v1/embeddings", json={"model": "bge-m3", "input": "hello"})
-        # If the embedder route uses get_embedder_class + looks up
-        # the registry, it'll find _StubEmbedder. The request should
-        # succeed (200) since the embedder is now on app.state.
-        assert r.status_code == 200
-        body = r.json()
-        assert body["model"] == "bge-m3"
-        assert body["data"][0]["embedding"] == [0.0, 0.0, 0.0, 0.0]
+    # Step 2: now /v1/embeddings works (we don't have a real store
+    # to validate against here, but the 503 path is gone).
+    r = client.post("/v1/embeddings", json={"model": "bge-m3", "input": "hello"})
+    # If the embedder route uses get_embedder_class + looks up
+    # the registry, it'll find _StubEmbedder. The request should
+    # succeed (200) since the embedder is now on app.state.
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "bge-m3"
+    assert body["data"][0]["embedding"] == [0.0, 0.0, 0.0, 0.0]
 
-        # Step 3: unload again.
-        r = c.post("/v1/models/bge-m3/unload")
-        assert r.status_code == 200
-        assert r.json()["status"] == "unloaded"
+    # Step 3: unload again.
+    r = client.post("/v1/models/bge-m3/unload")
+    assert r.status_code == 200
+    assert r.json()["status"] == "unloaded"
 
-        # Step 4: 503 again.
-        r = c.post("/v1/embeddings", json={"model": "bge-m3", "input": "hello"})
-        assert r.status_code == 503
-        assert r.json()["error"]["code"] == "embedder_unavailable"
+    # Step 4: 503 again.
+    r = client.post("/v1/embeddings", json={"model": "bge-m3", "input": "hello"})
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "embedder_unavailable"

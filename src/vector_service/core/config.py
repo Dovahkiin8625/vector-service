@@ -318,6 +318,46 @@ class JobSettings(BaseSettings):
         return self
 
 
+class BackupSettings(BaseSettings):
+    """Corpus snapshot backup configuration.
+
+    Env prefix: ``VS_BACKUP__``. Only SQLite is backed up — the vector
+    index and BM25 stats are derived and rebuild from the corpus.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="VS_BACKUP__", extra="ignore")
+
+    enabled: bool = True
+
+    #: Directory for ``corpus-<UTC stamp>.db`` snapshots.
+    dir: Path = Path("./data/backups")
+
+    #: Snapshots to keep after each cycle (age-count retention).
+    retain: int = Field(7, ge=1, le=400)
+
+
+class MaintenanceSettings(BaseSettings):
+    """Periodic VACUUM / backup / blob-sweep configuration.
+
+    Env prefix: ``VS_MAINTENANCE__``.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VS_MAINTENANCE__", extra="ignore"
+    )
+
+    enabled: bool = True
+
+    #: Time between maintenance cycles.
+    interval_seconds: float = Field(3600.0, ge=10.0, le=604800.0)
+
+    #: Run VACUUM once free pages reach this share of total pages.
+    vacuum_min_free_ratio: float = Field(0.2, ge=0.0, le=1.0)
+
+    #: Remove blob-store originals no document references.
+    blob_sweep_enabled: bool = True
+
+
 class PoolSettings(BaseModel):
     """One isolated thread pool: worker count + admission cap.
 
@@ -486,6 +526,14 @@ class Settings(BaseSettings):
 
     # Blocking-call thread pools (nested; env prefix VS_RUNTIME__)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+
+    # Corpus snapshot backups (nested; env prefix VS_BACKUP__)
+    backup: BackupSettings = Field(default_factory=BackupSettings)
+
+    # Periodic storage maintenance (nested; env prefix VS_MAINTENANCE__)
+    maintenance: MaintenanceSettings = Field(
+        default_factory=MaintenanceSettings
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
