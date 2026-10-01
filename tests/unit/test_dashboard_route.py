@@ -431,3 +431,19 @@ def test_dashboard_exposes_operations_panels():
         "ops.eval.tab_sets", "common.prev", "common.next",
     ]:
         assert app_js.count(f"'{key}'") == 2
+
+    # Status words and shared field labels exist in both locales, and
+    # panels consume them through statusLabel/$t instead of raw words.
+    for key in [
+        "ops.status.done", "ops.status.failed", "common.job_id",
+        "common.doc_id", "common.scope", "ops.consistency.milvus_rows",
+        "ops.eval.mean_recall", "common.question_id",
+    ]:
+        assert app_js.count(f"'{key}'") == 2
+    assert "statusLabel" in _COMP_JS
+    # No raw English template strings survive in the ops modules.
+    # (The words may legitimately appear inside en dictionary values,
+    # so pin the old template wrappers rather than bare words.)
+    assert "physical index(es)" not in _COMP_JS
+    assert ">source of truth</span>" not in _COMP_JS
+    assert "total · offset" not in _COMP_JS

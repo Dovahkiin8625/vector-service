@@ -3,7 +3,7 @@
 // (ops-reindex / ops-queue / ops-consistency / ops-eval).
 // =====================================================================
 
-import { enc } from './app.js';
+import { enc, store, t } from './app.js';
 
 export { enc };
 
@@ -12,7 +12,16 @@ export const TERMINAL = new Set(['done', 'failed', 'cancelled', 'passed']);
 
 export function formatTs(ts) {
   if (ts === null || ts === undefined) return '—';
-  return new Date(ts * 1000).toLocaleString();
+  const loc = store.locale === 'en' ? 'en-US' : 'zh-CN';
+  return new Date(ts * 1000).toLocaleString(loc);
+}
+
+// Localized label for an API status/stage word. Unknown values fall
+// back to the raw string rather than the missing-key name.
+export function statusLabel(s) {
+  const key = 'ops.status.' + s;
+  const v = t(key);
+  return v === key ? s : v;
 }
 
 export function pct(v, digits = 1) {

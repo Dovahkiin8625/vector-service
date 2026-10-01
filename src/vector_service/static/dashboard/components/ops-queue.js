@@ -7,7 +7,9 @@
 // =====================================================================
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
-import { enc, formatTs, pillClass, progressText, TERMINAL } from './ops-common.js';
+import {
+  enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
+} from './ops-common.js';
 
 const PAGE = 20;
 const STATUS_FILTERS = [
@@ -124,7 +126,7 @@ export default defineComponent({
       STATUS_FILTERS, PAGE, items, total, offset, statusFilter, loading, listErr,
       detail, detailErr,
       load, setFilter, prevPage, nextPage, openDetail, closeDetail, cancelJob,
-      formatTs, pillClass, progressText, TERMINAL,
+      formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
   template: `
@@ -144,7 +146,7 @@ export default defineComponent({
           <button v-for="s in STATUS_FILTERS" :key="s || '__all'"
                   :class="['btn', 'sm', statusFilter === s ? 'primary' : 'ghost']"
                   @click="setFilter(s)">
-            {{ s === '' ? $t('ops.queue.all') : s }}
+            {{ s === '' ? $t('ops.queue.all') : statusLabel(s) }}
           </button>
         </div>
 
@@ -171,8 +173,8 @@ export default defineComponent({
                   @click="openDetail(j.job_id)">
                 <td class="ops-ts">{{ formatTs(j.created_ts) }}</td>
                 <td class="ops-mono">{{ j.job_id }}</td>
-                <td><span :class="['pill', pillClass(j.status)]">{{ j.status }}</span></td>
-                <td>{{ j.stage || '—' }}</td>
+                <td><span :class="['pill', pillClass(j.status)]">{{ statusLabel(j.status) }}</span></td>
+                <td>{{ j.stage ? statusLabel(j.stage) : '—' }}</td>
                 <td>{{ progressText(j.progress) }}</td>
                 <td>{{ j.attempts }}/{{ j.max_attempts }}</td>
                 <td>{{ j.filename || '—' }}</td>
@@ -182,7 +184,7 @@ export default defineComponent({
         </div>
 
         <div class="pager">
-          <span class="pager-info">{{ total }} total · offset {{ offset }}</span>
+          <span class="pager-info">{{ $t('common.total') }} {{ total }} · {{ $t('common.offset') }} {{ offset }}</span>
           <button class="btn sm ghost" :disabled="offset === 0" @click="prevPage">← {{ $t('common.prev') }}</button>
           <button class="btn sm ghost" :disabled="offset + items.length >= total" @click="nextPage">{{ $t('common.next') }} →</button>
         </div>
@@ -206,11 +208,11 @@ export default defineComponent({
 
         <div class="ops-detail-grid">
           <table class="info-table">
-            <tr><th>job_id</th><td class="ops-mono">{{ detail.job_id }}</td></tr>
-            <tr><th>doc_id</th><td class="ops-mono">{{ detail.doc_id || '—' }}</td></tr>
-            <tr><th>{{ $t('ops.queue.status') }}</th><td><span :class="['pill', pillClass(detail.status)]">{{ detail.status }}</span></td></tr>
-            <tr><th>{{ $t('ops.queue.stage') }}</th><td>{{ detail.stage || '—' }}</td></tr>
-            <tr><th>scope</th><td class="ops-mono">{{ detail.database }}/{{ detail.collection }}</td></tr>
+            <tr><th>{{ $t('common.job_id') }}</th><td class="ops-mono">{{ detail.job_id }}</td></tr>
+            <tr><th>{{ $t('common.doc_id') }}</th><td class="ops-mono">{{ detail.doc_id || '—' }}</td></tr>
+            <tr><th>{{ $t('ops.queue.status') }}</th><td><span :class="['pill', pillClass(detail.status)]">{{ statusLabel(detail.status) }}</span></td></tr>
+            <tr><th>{{ $t('ops.queue.stage') }}</th><td>{{ detail.stage ? statusLabel(detail.stage) : '—' }}</td></tr>
+            <tr><th>{{ $t('common.scope') }}</th><td class="ops-mono">{{ detail.database }}/{{ detail.collection }}</td></tr>
             <tr><th>{{ $t('ops.queue.filename') }}</th><td>{{ detail.filename || '—' }} <span class="muted">{{ detail.mime || '' }}</span></td></tr>
             <tr><th>{{ $t('ops.queue.progress') }}</th><td>{{ progressText(detail.progress) }}</td></tr>
             <tr><th>{{ $t('ops.queue.attempts') }}</th><td>{{ detail.attempts }}/{{ detail.max_attempts }}</td></tr>

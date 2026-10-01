@@ -10,7 +10,8 @@
 import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
 import {
-  enc, formatTs, pillClass, progressText, TERMINAL, DEFAULT_SCOPE,
+  enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
+  DEFAULT_SCOPE,
 } from './ops-common.js';
 
 export default defineComponent({
@@ -127,7 +128,7 @@ export default defineComponent({
       submitting, formErr, job, indexRef, promoted,
       gates, checks, gateErr, latestCheck,
       submit, loadGates, promote,
-      formatTs, pillClass, progressText, TERMINAL,
+      formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
   template: `
@@ -141,28 +142,28 @@ export default defineComponent({
         </div>
 
         <div class="ops-scope">
-          <label>database
+          <label>{{ $t('common.database') }}
             <input v-model="db" type="text" spellcheck="false" />
           </label>
-          <label>collection
+          <label>{{ $t('common.collection') }}
             <input v-model="coll" type="text" spellcheck="false" />
           </label>
         </div>
 
         <div class="ops-form-grid">
           <div class="form-group">
-            <label class="form-label">embed_model</label>
+            <label class="form-label">{{ $t('ops.reindex.embed_model') }}</label>
             <input v-model="embedModel" type="text" spellcheck="false"
                    :placeholder="$t('ops.reindex.embed_keep')" />
             <span class="form-hint">{{ $t('ops.reindex.embed_hint') }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label">canary_percent</label>
+            <label class="form-label">{{ $t('ops.reindex.canary_percent') }}</label>
             <input v-model.number="canaryPercent" type="number" min="0" max="100" step="1" />
             <span class="form-hint">{{ $t('ops.reindex.canary_hint') }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label">batch_size</label>
+            <label class="form-label">{{ $t('ops.reindex.batch_size') }}</label>
             <input v-model.number="batchSize" type="number" min="1" step="1" />
           </div>
         </div>
@@ -183,12 +184,12 @@ export default defineComponent({
           <span class="section-sub ops-mono">{{ indexRef }}</span>
         </div>
         <table class="info-table">
-          <tr><th>job_id</th><td class="ops-mono">{{ job.job_id }}</td></tr>
-          <tr><th>{{ $t('ops.queue.status') }}</th><td><span :class="['pill', pillClass(job.status)]">{{ job.status }}</span></td></tr>
-          <tr><th>{{ $t('ops.queue.stage') }}</th><td>{{ job.stage || '—' }}</td></tr>
+          <tr><th>{{ $t('common.job_id') }}</th><td class="ops-mono">{{ job.job_id }}</td></tr>
+          <tr><th>{{ $t('ops.queue.status') }}</th><td><span :class="['pill', pillClass(job.status)]">{{ statusLabel(job.status) }}</span></td></tr>
+          <tr><th>{{ $t('ops.queue.stage') }}</th><td>{{ job.stage ? statusLabel(job.stage) : '—' }}</td></tr>
           <tr><th>{{ $t('ops.queue.progress') }}</th><td>{{ progressText(job.progress) }}</td></tr>
           <tr><th>{{ $t('ops.queue.attempts') }}</th><td>{{ job.attempts }}/{{ job.max_attempts }}</td></tr>
-          <tr v-if="job.error"><th>error</th><td><span class="ops-mono">{{ job.error.code }}</span> — {{ job.error.message }}</td></tr>
+          <tr v-if="job.error"><th>{{ $t('common.error') }}</th><td><span class="ops-mono">{{ job.error.code }}</span> — {{ job.error.message }}</td></tr>
           <tr><th>{{ $t('ops.queue.finished') }}</th><td>{{ formatTs(job.finished_ts) }}</td></tr>
         </table>
       </div>
@@ -210,21 +211,21 @@ export default defineComponent({
 
         <template v-else>
           <table class="info-table ops-gate-meta">
-            <tr><th>gate_id</th><td class="ops-mono">{{ gates[0].gate_id }}</td></tr>
-            <tr><th>set_id</th><td class="ops-mono">{{ gates[0].set_id }}</td></tr>
-            <tr><th>baseline_run_id</th><td class="ops-mono">{{ gates[0].baseline_run_id || '—' }}</td></tr>
+            <tr><th>{{ $t('common.gate_id') }}</th><td class="ops-mono">{{ gates[0].gate_id }}</td></tr>
+            <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ gates[0].set_id }}</td></tr>
+            <tr><th>{{ $t('common.baseline_run_id') }}</th><td class="ops-mono">{{ gates[0].baseline_run_id || '—' }}</td></tr>
           </table>
 
           <div v-if="!latestCheck" class="empty">{{ $t('ops.reindex.no_check') }}</div>
           <div v-else class="ops-check-card">
             <div class="ops-card-title">
               <span class="ops-mono">{{ latestCheck.check_id }}</span>
-              <span :class="['pill', pillClass(latestCheck.status)]">{{ latestCheck.status }}</span>
+              <span :class="['pill', pillClass(latestCheck.status)]">{{ statusLabel(latestCheck.status) }}</span>
               <span class="muted">{{ formatTs(latestCheck.created_ts) }}</span>
             </div>
             <table class="info-table">
-              <tr><th>candidate_ref</th><td class="ops-mono">{{ latestCheck.candidate_ref }}</td></tr>
-              <tr><th>run_id</th><td class="ops-mono">{{ latestCheck.run_id || '—' }}</td></tr>
+              <tr><th>{{ $t('common.candidate_ref') }}</th><td class="ops-mono">{{ latestCheck.candidate_ref }}</td></tr>
+              <tr><th>{{ $t('common.run_id') }}</th><td class="ops-mono">{{ latestCheck.run_id || '—' }}</td></tr>
             </table>
           </div>
 
@@ -235,9 +236,9 @@ export default defineComponent({
         </template>
 
         <div v-if="promoted" class="ops-promoted">
-          <span class="pill success">promoted</span>
+          <span class="pill success">{{ $t('common.promoted') }}</span>
           <span class="ops-mono">{{ promoted.active_ref }}</span>
-          <span class="muted">← retired</span>
+          <span class="muted">← {{ $t('common.retired') }}</span>
           <span class="ops-mono">{{ promoted.retired_ref }}</span>
         </div>
       </div>

@@ -7,7 +7,9 @@
 // =====================================================================
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { store, api } from './app.js';
-import { enc, formatTs, fixed, pct, pillClass, DEFAULT_SCOPE } from './ops-common.js';
+import {
+  enc, formatTs, fixed, pct, pillClass, statusLabel, DEFAULT_SCOPE,
+} from './ops-common.js';
 
 const PAGE = 20;
 
@@ -144,7 +146,7 @@ export default defineComponent({
       runDetail, runBack, openRun, closeRun,
       gates, gateDetail, gateChecks, loadGates, openGate, backToGates,
       switchTab, parseParams,
-      formatTs, fixed, pct, pillClass,
+      formatTs, fixed, pct, pillClass, statusLabel,
     };
   },
   template: `
@@ -158,10 +160,10 @@ export default defineComponent({
         </div>
 
         <div class="ops-scope">
-          <label>database
+          <label>{{ $t('common.database') }}
             <input v-model="db" type="text" spellcheck="false" />
           </label>
-          <label>collection
+          <label>{{ $t('common.collection') }}
             <input v-model="coll" type="text" spellcheck="false" />
           </label>
           <button class="btn sm ghost" @click="tab === 'sets' ? loadSets() : loadGates()">
@@ -200,33 +202,33 @@ export default defineComponent({
         </div>
 
         <table class="info-table ops-run-meta">
-          <tr><th>run_id</th><td class="ops-mono">{{ runDetail.run_id }}</td></tr>
-          <tr><th>set_id</th><td class="ops-mono">{{ runDetail.set_id }}</td></tr>
-          <tr><th>version_id</th><td class="ops-mono">{{ runDetail.version_id || '—' }}</td></tr>
-          <tr><th>template</th><td>{{ runDetail.template }}</td></tr>
-          <tr><th>include_answer</th><td>{{ runDetail.include_answer ? '✓' : '—' }}</td></tr>
+          <tr><th>{{ $t('common.run_id') }}</th><td class="ops-mono">{{ runDetail.run_id }}</td></tr>
+          <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ runDetail.set_id }}</td></tr>
+          <tr><th>{{ $t('common.version_id') }}</th><td class="ops-mono">{{ runDetail.version_id || '—' }}</td></tr>
+          <tr><th>{{ $t('common.template') }}</th><td>{{ runDetail.template }}</td></tr>
+          <tr><th>{{ $t('common.include_answer') }}</th><td>{{ runDetail.include_answer ? '✓' : '—' }}</td></tr>
           <tr><th>{{ $t('ops.queue.created') }}</th><td>{{ formatTs(runDetail.created_ts) }}</td></tr>
         </table>
 
         <div class="ops-grid ops-kpi-grid">
           <div class="kpi kpi--accent">
-            <span class="label">questions</span>
+            <span class="label">{{ $t('ops.eval.questions_kpi') }}</span>
             <span class="value">{{ runDetail.summary.questions }}</span>
           </div>
           <div class="kpi">
-            <span class="label">mean recall</span>
+            <span class="label">{{ $t('ops.eval.mean_recall') }}</span>
             <span class="value">{{ fixed(runDetail.summary.mean_recall) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">mean MRR</span>
+            <span class="label">{{ $t('ops.eval.mean_mrr') }}</span>
             <span class="value">{{ fixed(runDetail.summary.mean_mrr) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">mean nDCG</span>
+            <span class="label">{{ $t('ops.eval.mean_ndcg') }}</span>
             <span class="value">{{ fixed(runDetail.summary.mean_ndcg) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">doc hit rate</span>
+            <span class="label">{{ $t('ops.eval.doc_hit_rate') }}</span>
             <span class="value">{{ pct(runDetail.summary.doc_hit_rate) }}</span>
           </div>
         </div>
@@ -236,7 +238,7 @@ export default defineComponent({
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th></th><th>pre</th><th>post</th></tr>
+                <tr><th></th><th>{{ $t('ops.eval.pre') }}</th><th>{{ $t('ops.eval.post') }}</th></tr>
               </thead>
               <tbody>
                 <tr><th>recall</th><td>{{ fixed(runDetail.summary.rerank.mean_recall_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_recall_post) }}</td></tr>
@@ -252,7 +254,7 @@ export default defineComponent({
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>channel</th><th>hit share</th><th>raw recall</th></tr>
+                <tr><th>{{ $t('ops.eval.channel') }}</th><th>{{ $t('ops.eval.hit_share') }}</th><th>{{ $t('ops.eval.raw_recall') }}</th></tr>
               </thead>
               <tbody>
                 <tr v-for="(c, name) in runDetail.summary.channel_attribution.channels" :key="name">
@@ -275,7 +277,7 @@ export default defineComponent({
                 <th>recall</th>
                 <th>MRR</th>
                 <th>nDCG</th>
-                <th>doc</th>
+                <th>{{ $t('ops.eval.doc_label') }}</th>
                 <th>{{ $t('ops.eval.chunks') }}</th>
                 <th v-if="runDetail.include_answer">{{ $t('ops.eval.answer') }}</th>
               </tr>
@@ -331,7 +333,7 @@ export default defineComponent({
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>question_id</th><th>{{ $t('ops.eval.question') }}</th><th>{{ $t('ops.eval.expected') }}</th></tr>
+                <tr><th>{{ $t('common.question_id') }}</th><th>{{ $t('ops.eval.question') }}</th><th>{{ $t('ops.eval.expected') }}</th></tr>
               </thead>
               <tbody>
                 <tr v-for="q in questions" :key="q.question_id">
@@ -339,10 +341,10 @@ export default defineComponent({
                   <td class="ops-q-cell">{{ q.question }}</td>
                   <td>
                     <span v-if="q.expected_chunk_ids && q.expected_chunk_ids.length">
-                      {{ q.expected_chunk_ids.length }} chunks
+                      {{ q.expected_chunk_ids.length }} {{ $t('common.chunks_unit') }}
                     </span>
                     <span v-if="q.expected_doc_ids && q.expected_doc_ids.length">
-                      · {{ q.expected_doc_ids.length }} docs
+                      · {{ q.expected_doc_ids.length }} {{ $t('common.docs_unit') }}
                     </span>
                     <span v-if="q.expected_answer"> · {{ $t('ops.eval.has_answer') }}</span>
                   </td>
@@ -354,7 +356,7 @@ export default defineComponent({
           <h4 class="ops-sub-title">{{ $t('ops.eval.versions') }} · {{ versions.length }}</h4>
           <div class="data-table-wrap">
             <table class="data-table">
-              <thead><tr><th>version_id</th><th>tag</th><th>question_count</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
+              <thead><tr><th>{{ $t('common.version_id') }}</th><th>{{ $t('common.tag') }}</th><th>{{ $t('common.question_count') }}</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
               <tbody>
                 <tr v-for="v in versions" :key="v.version_id">
                   <td class="ops-mono">{{ v.version_id }}</td>
@@ -369,7 +371,7 @@ export default defineComponent({
           <h4 class="ops-sub-title">{{ $t('ops.eval.runs') }} · {{ runs.length }}</h4>
           <div class="data-table-wrap">
             <table class="data-table">
-              <thead><tr><th>run_id</th><th>params</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
+              <thead><tr><th>{{ $t('common.run_id') }}</th><th>{{ $t('common.params') }}</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
               <tbody>
                 <tr v-for="r in runs" :key="r.run_id" class="ops-job-row" @click="openRun(r.run_id, 'set')">
                   <td class="ops-mono">{{ r.run_id }}</td>
@@ -388,9 +390,9 @@ export default defineComponent({
               <thead>
                 <tr>
                   <th>{{ $t('ops.eval.set_name') }}</th>
-                  <th>set_id</th>
-                  <th>scope</th>
-                  <th>questions</th>
+                  <th>{{ $t('common.set_id') }}</th>
+                  <th>{{ $t('common.scope') }}</th>
+                  <th>{{ $t('common.question_count') }}</th>
                   <th>{{ $t('ops.queue.created') }}</th>
                 </tr>
               </thead>
@@ -406,7 +408,7 @@ export default defineComponent({
             </table>
           </div>
           <div class="pager">
-            <span class="pager-info">{{ setsTotal }} total · offset {{ setsOffset }}</span>
+            <span class="pager-info">{{ $t('common.total') }} {{ setsTotal }} · {{ $t('common.offset') }} {{ setsOffset }}</span>
             <button class="btn sm ghost" :disabled="setsOffset === 0" @click="setsPrev">← {{ $t('common.prev') }}</button>
             <button class="btn sm ghost" :disabled="setsOffset + sets.length >= setsTotal" @click="setsNext">{{ $t('common.next') }} →</button>
           </div>
@@ -428,18 +430,18 @@ export default defineComponent({
           </div>
 
           <table class="info-table">
-            <tr><th>scope</th><td class="ops-mono">{{ gateDetail.database }}/{{ gateDetail.collection }}</td></tr>
-            <tr><th>set_id</th><td class="ops-mono">{{ gateDetail.set_id }}</td></tr>
-            <tr><th>version_id</th><td class="ops-mono">{{ gateDetail.version_id || '—' }}</td></tr>
-            <tr><th>template</th><td>{{ gateDetail.template }}</td></tr>
-            <tr><th>baseline_run_id</th><td class="ops-mono">{{ gateDetail.baseline_run_id || '—' }}</td></tr>
+            <tr><th>{{ $t('common.scope') }}</th><td class="ops-mono">{{ gateDetail.database }}/{{ gateDetail.collection }}</td></tr>
+            <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ gateDetail.set_id }}</td></tr>
+            <tr><th>{{ $t('common.version_id') }}</th><td class="ops-mono">{{ gateDetail.version_id || '—' }}</td></tr>
+            <tr><th>{{ $t('common.template') }}</th><td>{{ gateDetail.template }}</td></tr>
+            <tr><th>{{ $t('common.baseline_run_id') }}</th><td class="ops-mono">{{ gateDetail.baseline_run_id || '—' }}</td></tr>
           </table>
 
           <h4 class="ops-sub-title">{{ $t('ops.eval.thresholds') }}</h4>
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>metric</th><th>{{ $t('ops.eval.min') }}</th><th>{{ $t('ops.eval.max_drop') }}</th></tr>
+                <tr><th>{{ $t('common.metric') }}</th><th>{{ $t('ops.eval.min') }}</th><th>{{ $t('ops.eval.max_drop') }}</th></tr>
               </thead>
               <tbody>
                 <tr><th>recall</th><td>{{ fixed(gateDetail.min_recall) }}</td><td>{{ pct(gateDetail.max_recall_drop) }}</td></tr>
@@ -453,13 +455,13 @@ export default defineComponent({
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>check_id</th><th>status</th><th>candidate_ref</th><th>run_id</th><th>{{ $t('ops.queue.created') }}</th></tr>
+                <tr><th>{{ $t('common.check_id') }}</th><th>{{ $t('ops.queue.status') }}</th><th>{{ $t('common.candidate_ref') }}</th><th>{{ $t('common.run_id') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
                 <tr v-for="c in gateChecks" :key="c.check_id" class="ops-job-row"
                     @click="c.run_id ? openRun(c.run_id, 'gate') : null">
                   <td class="ops-mono">{{ c.check_id }}</td>
-                  <td><span :class="['pill', pillClass(c.status)]">{{ c.status }}</span></td>
+                  <td><span :class="['pill', pillClass(c.status)]">{{ statusLabel(c.status) }}</span></td>
                   <td class="ops-mono">{{ c.candidate_ref }}</td>
                   <td class="ops-mono">{{ c.run_id || '—' }}</td>
                   <td>{{ formatTs(c.created_ts) }}</td>
@@ -474,7 +476,7 @@ export default defineComponent({
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>gate_id</th><th>scope</th><th>set_id</th><th>baseline</th><th>{{ $t('ops.queue.created') }}</th></tr>
+                <tr><th>{{ $t('common.gate_id') }}</th><th>{{ $t('common.scope') }}</th><th>{{ $t('common.set_id') }}</th><th>{{ $t('common.baseline') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
                 <tr v-for="g in gates" :key="g.gate_id" class="ops-job-row" @click="openGate(g)">

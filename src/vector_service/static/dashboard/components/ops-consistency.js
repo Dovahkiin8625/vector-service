@@ -52,10 +52,10 @@ export default defineComponent({
         </div>
 
         <div class="ops-scope">
-          <label>database
+          <label>{{ $t('common.database') }}
             <input v-model="db" type="text" spellcheck="false" />
           </label>
-          <label>collection
+          <label>{{ $t('common.collection') }}
             <input v-model="coll" type="text" spellcheck="false" />
           </label>
         </div>
@@ -79,38 +79,38 @@ export default defineComponent({
           <h3 class="section-title">
             {{ $t('ops.consistency.report') }}
             <span :class="['pill', report.ok ? 'success' : 'danger']">
-              {{ report.ok ? 'OK' : 'DRIFT' }}
+              {{ report.ok ? 'OK' : $t('ops.consistency.drift') }}
             </span>
-            <span v-if="report.repaired" class="pill warn">repaired</span>
+            <span v-if="report.repaired" class="pill warn">{{ $t('ops.consistency.repaired') }}</span>
           </h3>
           <span class="section-sub ops-mono">{{ report.database }}/{{ report.collection }}</span>
         </div>
 
         <div class="ops-grid">
           <div class="kpi" :class="report.ok ? 'kpi--ok' : 'kpi--err'">
-            <span class="label">overall</span>
-            <span class="value">{{ report.ok ? 'OK' : 'DRIFT' }}</span>
-            <span class="sub">{{ report.indexes.length }} physical index(es)</span>
+            <span class="label">{{ $t('ops.consistency.overall') }}</span>
+            <span class="value">{{ report.ok ? 'OK' : $t('ops.consistency.drift') }}</span>
+            <span class="sub">{{ $t('ops.consistency.physical_indexes') }}: {{ report.indexes.length }}</span>
           </div>
           <div class="kpi kpi--accent">
-            <span class="label">SQLite leaves</span>
+            <span class="label">{{ $t('ops.consistency.sqlite_leaves') }}</span>
             <span class="value">{{ report.corpus_leaves }}</span>
-            <span class="sub">source of truth</span>
+            <span class="sub">{{ $t('ops.consistency.source_truth') }}</span>
           </div>
         </div>
 
         <div v-for="ix in report.indexes" :key="ix.ref" class="ops-index-card">
           <div class="ops-card-title">
             <span class="ops-mono ops-ref">{{ ix.ref }}</span>
-            <span v-if="ix.canary" class="pill warn">canary</span>
-            <span v-else class="pill accent">active</span>
+            <span v-if="ix.canary" class="pill warn">{{ $t('common.canary') }}</span>
+            <span v-else class="pill accent">{{ $t('common.active') }}</span>
             <span :class="['pill', ix.ok ? 'success' : 'danger']">
-              {{ ix.ok ? 'OK' : 'DRIFT' }}
+              {{ ix.ok ? 'OK' : $t('ops.consistency.drift') }}
             </span>
           </div>
           <table class="info-table">
             <tr>
-              <th>Milvus rows</th>
+              <th>{{ $t('ops.consistency.milvus_rows') }}</th>
               <td>{{ ix.milvus_rows }}</td>
             </tr>
             <tr>
