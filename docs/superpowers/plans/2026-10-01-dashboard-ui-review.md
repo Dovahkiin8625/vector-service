@@ -10,7 +10,8 @@
 > | S2 操作反馈 | **已实施**（2026-10-01，见 §1 S2 实施记录） |
 > | S3 功能 Bug 清单（B1–B14） | **已实施**（2026-10-01，见 §1 S3 实施记录） |
 > | S4 版本号单一来源 | **已实施**（2026-10-01，见 §1 S4 实施记录） |
-> | S5–S7、阶段一剩余项、阶段三 | 未开始 |
+> | S5–S7、阶段三、阶段四 | 未开始 |
+| 阶段一第 4 项（records 危险默认值） | **已实施**（2026-10-01，见 §3 阶段一实施记录） |
 
 ---
 
@@ -149,7 +150,7 @@
 
 - 新增 i18n key（两侧同步、placeholder 一致）：`search.score`、`search.metric_higher`、`search.metric_lower`、`retrieval.custom_json`、`retrieval.custom_hint`、`retrieval.custom_regen`、`retrieval.err.bad_json`、`embeddings.err.bad_list`、`ops.reindex.block_no_check`、`ops.reindex.block_check_failed`（`{status}`）、`ops.reindex.gate_scope_note`、`kb.cancelled`、`kb.err.timeout`（`{seconds}`）。「取消」按钮复用既有 `common.cancel`。
 - 测试：`tests/` 全量 **958 passed / 2 skipped / 0 failed**（2 例按既有条件跳过）。`test_dashboard_route.py` / `test_dashboard_i18n.py` / `test_dashboard_feedback.py` 无改动即通过；`browse.js` 内一处注释因含 `test_no_hardcoded_panel_prose_survives` 的字面量黑名单词而改写。
-- 未纳入本次：阶段一第 3 项（版本号单一来源，S4）、第 4 项（records 预填示例 ID）仍未开始；§2 各视图的「改进」类条目按计划留待阶段三/四。（第 3 项已于同日随 S4 落地，见本节 S4 实施记录；第 4 项仍待办。）
+- 未纳入本次：阶段一第 3 项（版本号单一来源，S4）、第 4 项（records 预填示例 ID）仍未开始；§2 各视图的「改进」类条目按计划留待阶段三/四。（第 3 项已于同日随 S4 落地，见本节 S4 实施记录；第 4 项同日落地，见 §3 阶段一实施记录。）
 
 ### S4. 【P1】版本号三处不一致
 
@@ -320,13 +321,20 @@
 ### 阶段一（P0 止血）：让界面"不出错、有反馈"
 
 1. **修全部功能 bug**：B1 NewDbModal（一行级修复）→ B2 records fetch 落库展示 → B3 browse 跳页 → B4 选择清理 → B5/B6 崩溃与分数保护 → B7 重复 meta → B8 promote 按钮 → B9/B10/B11 → B14 监听清理。
+   → **已于 2026-10-01 完成**（见 §1 S3 实施记录）。
 2. **反馈链路补齐**：status/error 渲染归位（rerank、embeddings、similarity、browse、collections 详情）；提交按钮统一 busy/disabled；空 catch 全部落 error 态。
-   → **已于 2026-10-01 完成**（提前落地，见 §1 S2 实施记录）；本阶段剩余条目为第 1、3、4 项。
+   → **已于 2026-10-01 完成**（见 §1 S2 实施记录）。
 3. **版本号单一来源**（S4）：定版、页脚与 VS_INFO 统一。
-   → **已于 2026-10-01 完成**（见 §1 S4 实施记录）；本阶段剩余条目为第 4 项。
+   → **已于 2026-10-01 完成**（见 §1 S4 实施记录）。
 4. 删除 records 预填示例 ID 的危险默认值；删除按钮加使能条件。
 
-验收：21 视图中/英双语点击走查无 console error；每个提交动作都有 loading/成功/失败三态可见。
+**实施记录（2026-10-01，第 4 项）**：与 S3 同批落地（代码在 `622a831` 进入，文档记录滞后至此）。
+
+- `records.js` 的 `ids/texts/embs/fields`/`delIds` 不再预填 `["sku-1","sku-2"]` 等示例值，格式提示改为 placeholder（永不随请求发出）——否则「打开面板、点红色按钮」就是一次对真实数据的删除。
+- 删除按钮新增使能条件：`deleteBlockReason`（ids 模式缺 ID / filter 模式缺表达式）+ 库/集合选择，`canDelete` 为假时 `busy-button` disabled，禁用原因渲染在参数区与按钮 `title` 里。
+- 测试：恢复后的 `tests/` 全量通过（含 `test_dashboard_route.py` 对 records 面板的既有断言）。
+
+**阶段一至此全部完成**（验收：21 视图中/英双语点击走查无 console error；每个提交动作都有 loading/成功/失败三态可见——见 §1 S2 冒烟记录）。
 
 ### 阶段二（P1 基础）：i18n 全覆盖 + 设计令牌收口
 
