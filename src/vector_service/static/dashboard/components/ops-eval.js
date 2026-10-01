@@ -1,0 +1,494 @@
+// =====================================================================
+// ops-eval.js -- Operations > Evaluation results.
+//   GET  /v1/evaluation/sets?...                      set list
+//   GET  /v1/evaluation/sets/{id}/questions|versions|runs
+//   GET  /v1/evaluation/runs/{id}                     run detail
+//   GET  /v1/evaluation/gates?... | /gates/{id} | /gates/{id}/checks
+// =====================================================================
+import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
+import { store, api } from './app.js';
+import { enc, formatTs, fixed, pct, pillClass, DEFAULT_SCOPE } from './ops-common.js';
+
+const PAGE = 20;
+
+export default defineComponent({
+  name: 'OpsEval',
+  setup() {
+    const tab = ref('sets');               // 'sets' | 'gates'
+    const db = ref(DEFAULT_SCOPE.db);
+    const coll = ref(DEFAULT_SCOPE.coll);
+    const errMsg = ref('');
+
+    // ---- sets list / set detail ----
+    const sets = ref([]);
+    const setsTotal = ref(0);
+    const setsOffset = ref(0);
+    const setDetail = ref(null);
+    const questions = ref([]);
+    const versions = ref([]);
+    const runs = ref([]);
+
+    // ---- run detail ----
+    const runDetail = ref(null);
+    const runBack = ref(null);              // where to return: 'set' | 'gate'
+
+    // ---- gates ----
+    const gates = ref([]);
+    const gateDetail = ref(null);
+    const gateChecks = ref([]);
+
+    function resetErr() { errMsg.value = ''; }
+    async function loadSets() {
+      resetErr();
+      try {
+        const q = `/v1/evaluation/sets?database=${enc(db.value)}`
+          + `&collection=${enc(coll.value)}&limit=${PAGE}&offset=${setsOffset.value}`;
+        const { payload } = await api('GET', q);
+        sets.value = (payload && payload.items) || [];
+        setsTotal.value = (payload && payload.total) || 0;
+      } catch (e) { errMsg.value = e.message; }
+    }
+    function setsPrev() {
+      if (setsOffset.value === 0) return;
+      setsOffset.value = Math.max(0, setsOffset.value - PAGE);
+      loadSets();
+    }
+    function setsNext() {
+      if (setsOffset.value + sets.length >= setsTotal.value) return;
+      setsOffset.value += PAGE;
+      loadSets();
+    }
+
+    async function openSet(s) {
+      resetErr();
+      setDetail.value = s;
+      runDetail.value = null;
+      try {
+        const id = enc(s.set_id);
+        const [q, v, r] = await Promise.all([
+          api('GET', `/v1/evaluation/sets/${id}/questions`),
+          api('GET', `/v1/evaluation/sets/${id}/versions`),
+          api('GET', `/v1/evaluation/sets/${id}/runs`),
+        ]);
+        questions.value = (q.payload && q.payload.items) || q.payload || [];
+        versions.value = (v.payload && v.payload.items) || v.payload || [];
+        runs.value = (r.payload && r.payload.items) || r.payload || [];
+      } catch (e) { errMsg.value = e.message; }
+    }
+    function backToList() {
+      setDetail.value = null;
+      runDetail.value = null;
+    }
+
+    async function openRun(runId, backTo) {
+      resetErr();
+      runBack.value = backTo || 'set';
+      try {
+        const { payload } = await api('GET', `/v1/evaluation/runs/${enc(runId)}`);
+        runDetail.value = payload;
+      } catch (e) { errMsg.value = e.message; }
+    }
+    function closeRun() { runDetail.value = null; }
+
+    async function loadGates() {
+      resetErr();
+      try {
+        const q = `/v1/evaluation/gates?database=${enc(db.value)}&collection=${enc(coll.value)}`;
+        const { payload } = await api('GET', q);
+        gates.value = (payload && payload.items) || [];
+      } catch (e) { errMsg.value = e.message; }
+    }
+
+    async function openGate(g) {
+      resetErr();
+      gateDetail.value = g;
+      runDetail.value = null;
+      try {
+        const { payload } = await api(
+          'GET',
+          `/v1/evaluation/gates/${enc(g.gate_id)}/checks`,
+        );
+        gateChecks.value = (payload && payload.items) || [];
+      } catch (e) { errMsg.value = e.message; }
+    }
+    function backToGates() {
+      gateDetail.value = null;
+      runDetail.value = null;
+    }
+
+    function switchTab(name) {
+      tab.value = name;
+      resetErr();
+      if (name === 'sets') loadSets();
+      else loadGates();
+    }
+
+    watch(() => store.view, (v) => {
+      if (v === 'eval') {
+        if (tab.value === 'sets') loadSets();
+        else loadGates();
+      }
+    });
+    if (store.view === 'eval') loadSets();
+
+    function parseParams(s) {
+      if (!s) return null;
+      try { return JSON.parse(s); } catch (_e) { return null; }
+    }
+
+    return {
+      tab, db, coll, errMsg,
+      sets, setsTotal, setsOffset, setsPrev, setsNext,
+      setDetail, questions, versions, runs,
+      loadSets, openSet, backToList,
+      runDetail, runBack, openRun, closeRun,
+      gates, gateDetail, gateChecks, loadGates, openGate, backToGates,
+      switchTab, parseParams,
+      formatTs, fixed, pct, pillClass,
+    };
+  },
+  template: `
+    <div class="ops-panel">
+      <div class="section">
+        <div class="section-head">
+          <h3 class="section-title">
+            {{ $t('nav.eval') }}
+            <span class="pill accent">/v1/evaluation</span>
+          </h3>
+        </div>
+
+        <div class="ops-scope">
+          <label>database
+            <input v-model="db" type="text" spellcheck="false" />
+          </label>
+          <label>collection
+            <input v-model="coll" type="text" spellcheck="false" />
+          </label>
+          <button class="btn sm ghost" @click="tab === 'sets' ? loadSets() : loadGates()">
+            {{ $t('common.apply') }}
+          </button>
+        </div>
+
+        <div class="seg-toggle ops-tabs">
+          <button type="button" class="btn sm"
+                  :class="{ primary: tab === 'sets' }"
+                  @click="switchTab('sets')">
+            {{ $t('ops.eval.tab_sets') }}
+          </button>
+          <button type="button" class="btn sm"
+                  :class="{ primary: tab === 'gates' }"
+                  @click="switchTab('gates')">
+            {{ $t('ops.eval.tab_gates') }}
+          </button>
+        </div>
+
+        <div v-if="errMsg" class="empty error">{{ errMsg }}</div>
+      </div>
+
+      <!-- ============ run detail (shared) ============ -->
+      <div v-if="runDetail" class="section">
+        <div class="section-head">
+          <h3 class="section-title">
+            {{ $t('ops.eval.run') }}
+            <span class="pill accent">GET /v1/evaluation/runs/{id}</span>
+          </h3>
+          <span class="section-sub">
+            <button class="btn sm ghost" @click="closeRun">
+              ← {{ $t('common.back') }}
+            </button>
+          </span>
+        </div>
+
+        <table class="info-table ops-run-meta">
+          <tr><th>run_id</th><td class="ops-mono">{{ runDetail.run_id }}</td></tr>
+          <tr><th>set_id</th><td class="ops-mono">{{ runDetail.set_id }}</td></tr>
+          <tr><th>version_id</th><td class="ops-mono">{{ runDetail.version_id || '—' }}</td></tr>
+          <tr><th>template</th><td>{{ runDetail.template }}</td></tr>
+          <tr><th>include_answer</th><td>{{ runDetail.include_answer ? '✓' : '—' }}</td></tr>
+          <tr><th>{{ $t('ops.queue.created') }}</th><td>{{ formatTs(runDetail.created_ts) }}</td></tr>
+        </table>
+
+        <div class="ops-grid ops-kpi-grid">
+          <div class="kpi kpi--accent">
+            <span class="label">questions</span>
+            <span class="value">{{ runDetail.summary.questions }}</span>
+          </div>
+          <div class="kpi">
+            <span class="label">mean recall</span>
+            <span class="value">{{ fixed(runDetail.summary.mean_recall) }}</span>
+          </div>
+          <div class="kpi">
+            <span class="label">mean MRR</span>
+            <span class="value">{{ fixed(runDetail.summary.mean_mrr) }}</span>
+          </div>
+          <div class="kpi">
+            <span class="label">mean nDCG</span>
+            <span class="value">{{ fixed(runDetail.summary.mean_ndcg) }}</span>
+          </div>
+          <div class="kpi">
+            <span class="label">doc hit rate</span>
+            <span class="value">{{ pct(runDetail.summary.doc_hit_rate) }}</span>
+          </div>
+        </div>
+
+        <div v-if="runDetail.summary.rerank && runDetail.summary.rerank.questions" class="ops-rerank-card">
+          <h4 class="ops-sub-title">{{ $t('ops.eval.rerank_compare') }} · {{ runDetail.summary.rerank.questions }} q</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th></th><th>pre</th><th>post</th></tr>
+              </thead>
+              <tbody>
+                <tr><th>recall</th><td>{{ fixed(runDetail.summary.rerank.mean_recall_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_recall_post) }}</td></tr>
+                <tr><th>MRR</th><td>{{ fixed(runDetail.summary.rerank.mean_mrr_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_mrr_post) }}</td></tr>
+                <tr><th>nDCG</th><td>{{ fixed(runDetail.summary.rerank.mean_ndcg_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_ndcg_post) }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div v-if="runDetail.summary.channel_attribution && runDetail.summary.channel_attribution.questions" class="section">
+          <h4 class="ops-sub-title">{{ $t('ops.eval.channel_attribution') }} · {{ runDetail.summary.channel_attribution.questions }} q</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>channel</th><th>hit share</th><th>raw recall</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(c, name) in runDetail.summary.channel_attribution.channels" :key="name">
+                  <td class="ops-mono">{{ name }}</td>
+                  <td>{{ pct(c.hit_share) }}</td>
+                  <td>{{ fixed(c.raw_recall) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <h4 class="ops-sub-title">{{ $t('ops.eval.per_question') }}</h4>
+        <div class="data-table-wrap">
+          <table class="data-table ops-results-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>{{ $t('ops.eval.question') }}</th>
+                <th>recall</th>
+                <th>MRR</th>
+                <th>nDCG</th>
+                <th>doc</th>
+                <th>{{ $t('ops.eval.chunks') }}</th>
+                <th v-if="runDetail.include_answer">{{ $t('ops.eval.answer') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(r, i) in runDetail.results" :key="r.question_id">
+                <td>{{ i + 1 }}</td>
+                <td class="ops-q-cell">{{ r.question }}</td>
+                <td>{{ fixed(r.metrics && r.metrics.recall) }}</td>
+                <td>{{ fixed(r.metrics && r.metrics.mrr) }}</td>
+                <td>{{ fixed(r.metrics && r.metrics.ndcg) }}</td>
+                <td>{{ fixed(r.metrics && r.metrics.doc_hit, 2) }}</td>
+                <td>
+                  <span v-if="r.chunk_ids && r.chunk_ids.length">{{ r.chunk_ids.length }}</span>
+                  <details v-if="r.chunk_ids && r.chunk_ids.length" class="ops-id-details">
+                    <summary>{{ $t('ops.consistency.show_ids') }}</summary>
+                    <div class="ops-id-list ops-mono">
+                      <div v-for="c in r.chunk_ids" :key="c">{{ c }}</div>
+                    </div>
+                  </details>
+                  <span v-else>0</span>
+                </td>
+                <td v-if="runDetail.include_answer">
+                  <details v-if="r.answer" class="ops-answer-details">
+                    <summary>{{ $t('ops.eval.show_answer') }}</summary>
+                    <div class="ops-answer">{{ r.answer }}</div>
+                  </details>
+                  <span v-else-if="r.answer_error" class="ops-err-code ops-mono">{{ r.answer_error }}</span>
+                  <span v-else>—</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ============ SETS ============ -->
+      <template v-else-if="tab === 'sets'">
+        <!-- set detail -->
+        <div v-if="setDetail" class="section">
+          <div class="section-head">
+            <h3 class="section-title">
+              {{ setDetail.name }}
+              <span class="pill accent ops-mono">{{ setDetail.set_id }}</span>
+            </h3>
+            <span class="section-sub">
+              <button class="btn sm ghost" @click="backToList">← {{ $t('ops.eval.all_sets') }}</button>
+            </span>
+          </div>
+          <p class="ops-set-desc">{{ setDetail.description || '—' }}</p>
+
+          <h4 class="ops-sub-title">{{ $t('ops.eval.questions') }} · {{ questions.length }}</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>question_id</th><th>{{ $t('ops.eval.question') }}</th><th>{{ $t('ops.eval.expected') }}</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="q in questions" :key="q.question_id">
+                  <td class="ops-mono">{{ q.question_id }}</td>
+                  <td class="ops-q-cell">{{ q.question }}</td>
+                  <td>
+                    <span v-if="q.expected_chunk_ids && q.expected_chunk_ids.length">
+                      {{ q.expected_chunk_ids.length }} chunks
+                    </span>
+                    <span v-if="q.expected_doc_ids && q.expected_doc_ids.length">
+                      · {{ q.expected_doc_ids.length }} docs
+                    </span>
+                    <span v-if="q.expected_answer"> · {{ $t('ops.eval.has_answer') }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4 class="ops-sub-title">{{ $t('ops.eval.versions') }} · {{ versions.length }}</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead><tr><th>version_id</th><th>tag</th><th>question_count</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
+              <tbody>
+                <tr v-for="v in versions" :key="v.version_id">
+                  <td class="ops-mono">{{ v.version_id }}</td>
+                  <td>{{ v.tag || '—' }}</td>
+                  <td>{{ v.question_count }}</td>
+                  <td>{{ formatTs(v.created_ts) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4 class="ops-sub-title">{{ $t('ops.eval.runs') }} · {{ runs.length }}</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead><tr><th>run_id</th><th>params</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
+              <tbody>
+                <tr v-for="r in runs" :key="r.run_id" class="ops-job-row" @click="openRun(r.run_id, 'set')">
+                  <td class="ops-mono">{{ r.run_id }}</td>
+                  <td class="ops-mono ops-params-cell">{{ r.params_json }}</td>
+                  <td>{{ formatTs(r.created_ts) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- set list -->
+        <div v-else class="section">
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>{{ $t('ops.eval.set_name') }}</th>
+                  <th>set_id</th>
+                  <th>scope</th>
+                  <th>questions</th>
+                  <th>{{ $t('ops.queue.created') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in sets" :key="s.set_id" class="ops-job-row" @click="openSet(s)">
+                  <td>{{ s.name }}</td>
+                  <td class="ops-mono">{{ s.set_id }}</td>
+                  <td class="ops-mono">{{ s.database }}/{{ s.collection }}</td>
+                  <td>{{ s.question_count }}</td>
+                  <td>{{ formatTs(s.created_ts) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span class="pager-info">{{ setsTotal }} total · offset {{ setsOffset }}</span>
+            <button class="btn sm ghost" :disabled="setsOffset === 0" @click="setsPrev">← {{ $t('common.prev') }}</button>
+            <button class="btn sm ghost" :disabled="setsOffset + sets.length >= setsTotal" @click="setsNext">{{ $t('common.next') }} →</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ============ GATES ============ -->
+      <template v-else>
+        <!-- gate detail -->
+        <div v-if="gateDetail" class="section">
+          <div class="section-head">
+            <h3 class="section-title">
+              <span class="ops-mono">{{ gateDetail.gate_id }}</span>
+              <span class="pill accent">{{ $t('ops.eval.gate') }}</span>
+            </h3>
+            <span class="section-sub">
+              <button class="btn sm ghost" @click="backToGates">← {{ $t('ops.eval.all_gates') }}</button>
+            </span>
+          </div>
+
+          <table class="info-table">
+            <tr><th>scope</th><td class="ops-mono">{{ gateDetail.database }}/{{ gateDetail.collection }}</td></tr>
+            <tr><th>set_id</th><td class="ops-mono">{{ gateDetail.set_id }}</td></tr>
+            <tr><th>version_id</th><td class="ops-mono">{{ gateDetail.version_id || '—' }}</td></tr>
+            <tr><th>template</th><td>{{ gateDetail.template }}</td></tr>
+            <tr><th>baseline_run_id</th><td class="ops-mono">{{ gateDetail.baseline_run_id || '—' }}</td></tr>
+          </table>
+
+          <h4 class="ops-sub-title">{{ $t('ops.eval.thresholds') }}</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>metric</th><th>{{ $t('ops.eval.min') }}</th><th>{{ $t('ops.eval.max_drop') }}</th></tr>
+              </thead>
+              <tbody>
+                <tr><th>recall</th><td>{{ fixed(gateDetail.min_recall) }}</td><td>{{ pct(gateDetail.max_recall_drop) }}</td></tr>
+                <tr><th>MRR</th><td>{{ fixed(gateDetail.min_mrr) }}</td><td>{{ pct(gateDetail.max_mrr_drop) }}</td></tr>
+                <tr><th>nDCG</th><td>{{ fixed(gateDetail.min_ndcg) }}</td><td>{{ pct(gateDetail.max_ndcg_drop) }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4 class="ops-sub-title">{{ $t('ops.eval.checks') }} · {{ gateChecks.length }}</h4>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>check_id</th><th>status</th><th>candidate_ref</th><th>run_id</th><th>{{ $t('ops.queue.created') }}</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in gateChecks" :key="c.check_id" class="ops-job-row"
+                    @click="c.run_id ? openRun(c.run_id, 'gate') : null">
+                  <td class="ops-mono">{{ c.check_id }}</td>
+                  <td><span :class="['pill', pillClass(c.status)]">{{ c.status }}</span></td>
+                  <td class="ops-mono">{{ c.candidate_ref }}</td>
+                  <td class="ops-mono">{{ c.run_id || '—' }}</td>
+                  <td>{{ formatTs(c.created_ts) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- gate list -->
+        <div v-else class="section">
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>gate_id</th><th>scope</th><th>set_id</th><th>baseline</th><th>{{ $t('ops.queue.created') }}</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="g in gates" :key="g.gate_id" class="ops-job-row" @click="openGate(g)">
+                  <td class="ops-mono">{{ g.gate_id }}</td>
+                  <td class="ops-mono">{{ g.database }}/{{ g.collection }}</td>
+                  <td class="ops-mono">{{ g.set_id }}</td>
+                  <td class="ops-mono">{{ g.baseline_run_id || '—' }}</td>
+                  <td>{{ formatTs(g.created_ts) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+});

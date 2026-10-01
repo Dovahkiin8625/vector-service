@@ -14,12 +14,24 @@ import time
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
+from opentelemetry import trace
 
 from vector_service.chunking.llm_chunker import (
     get_chat_client,
     is_llm_configured,
 )
 from vector_service.core.errors import CollectionNotFound
+from vector_service.core.metrics import (
+    RETRIEVAL_CHANNEL_HIT_REQUESTS_TOTAL,
+    RETRIEVAL_CHANNEL_RUNS_TOTAL,
+    RETRIEVAL_FUSION_INPUT_TOTAL,
+    RETRIEVAL_FUSION_OUTPUT_TOTAL,
+    RETRIEVAL_RECALLED_HITS_TOTAL,
+    RETRIEVAL_REQUESTS_TOTAL,
+    RETRIEVAL_RERANK_CANDIDATES,
+    RETRIEVAL_RERANK_INPUT_CHARS,
+    RETRIEVAL_RERANK_STAGE_DURATION_SECONDS,
+)
 from vector_service.graph.names import graph_collection_names
 from vector_service.retrieval import transforms as T
 from vector_service.retrieval.base import (
@@ -53,6 +65,10 @@ from vector_service.schemas.retrieval import (
 
 _SPARSE_FIELD = "sparse"
 _VECTOR_FIELD = "vector"
+
+# With tracing disabled the API's proxy tracer hands back non-recording
+# spans, so every ``start_as_current_span`` below stays a cheap no-op.
+_TRACER = trace.get_tracer("vector_service.retrieval")
 
 StageEmit = Callable[[dict], Any]
 
@@ -283,168 +299,228 @@ class RetrievalPipeline:
         loop = asyncio.get_running_loop()
         traces: list[StageTrace] = []
 
-        # ---- route ----
-        decision = None
-        if req.routing.enabled:
-            await _send(emit, {"type": "stage", "stage": "route"})
-            timer = _Timer("route")
-            decision = await self._route(loop, req)
+        RETRIEVAL_REQUESTS_TOTAL.inc()
+        rerank_model = (
+            getattr(self._reranker, "model_name", "unknown")
+            if self._reranker is not None
+            else "unknown"
+        )
+
+        with _TRACER.start_as_current_span("retrieval") as root_span:
+            root_span.set_attributes({
+                "vs.database": req.database,
+                "vs.collection": req.collection,
+                "vs.physical_collection": ctx["physical"],
+                "vs.query_length": len(req.query),
+                "vs.top_k": req.top_k,
+            })
+
+            # ---- route ----
+            decision = None
+            if req.routing.enabled:
+                await _send(emit, {"type": "stage", "stage": "route"})
+                timer = _Timer("route")
+                with _TRACER.start_as_current_span("route"):
+                    decision = await self._route(loop, req)
+                traces.append(timer.done({
+                    "router": decision.router,
+                    "intents": list(decision.intents),
+                    "signals": list(decision.signals),
+                }))
+
+            effective_query = (
+                decision.query if decision is not None else req.query.strip()
+            )
+
+            # ---- rewrite ----
+            await _send(emit, {"type": "stage", "stage": "rewrite"})
+            timer = _Timer("rewrite")
+            with _TRACER.start_as_current_span("rewrite"):
+                chat_fn = None
+                if ctx["rewrite_on"]:
+                    chat_client = await loop.run_in_executor(
+                        None, self._chat_getter, self._settings
+                    )
+                    chat_fn = chat_client.as_chat_fn()
+                plan = await loop.run_in_executor(
+                    None, self._build_plan, req, chat_fn, effective_query
+                )
             traces.append(timer.done({
-                "router": decision.router,
-                "intents": list(decision.intents),
-                "signals": list(decision.signals),
+                "dense_queries": len(plan.dense_specs),
+                "lexical_queries": len(plan.lexical_queries),
             }))
 
-        effective_query = (
-            decision.query if decision is not None else req.query.strip()
-        )
+            # Recall legs may need to feed a wider rerank pool later.
+            want_pool = req.rerank.candidate_pool if req.rerank.enabled else 25
+            recall_limit = min(64, max(req.top_k, want_pool))
 
-        # ---- rewrite ----
-        await _send(emit, {"type": "stage", "stage": "rewrite"})
-        timer = _Timer("rewrite")
-        chat_fn = None
-        if ctx["rewrite_on"]:
-            chat_client = await loop.run_in_executor(
-                None, self._chat_getter, self._settings
+            # ---- resolve filters (predicates + corpus doc-id resolution) ----
+            ctx["decision"] = decision
+            recall_filter = await loop.run_in_executor(
+                None, self._resolve_filter, req, decision
             )
-            chat_fn = chat_client.as_chat_fn()
-        plan = await loop.run_in_executor(
-            None, self._build_plan, req, chat_fn, effective_query
-        )
-        traces.append(timer.done({
-            "dense_queries": len(plan.dense_specs),
-            "lexical_queries": len(plan.lexical_queries),
-        }))
 
-        # Recall legs may need to feed a wider rerank pool later.
-        want_pool = req.rerank.candidate_pool if req.rerank.enabled else 25
-        recall_limit = min(64, max(req.top_k, want_pool))
+            # ---- recall ----
+            await _send(emit, {"type": "stage", "stage": "recall"})
+            timer = _Timer("recall")
+            with _TRACER.start_as_current_span("recall"):
+                runs = await self._recall(
+                    loop, plan, req, recall_limit, recall_filter, ctx
+                )
+            traces.append(timer.done({"legs": len(runs), "per_leg_top_k": recall_limit}))
+            for run in runs:
+                leg_status = "ok" if run.hits else "empty"
+                RETRIEVAL_CHANNEL_RUNS_TOTAL.labels(
+                    channel=run.channel, status=leg_status
+                ).inc()
+                RETRIEVAL_RECALLED_HITS_TOTAL.labels(
+                    channel=run.channel
+                ).inc(len(run.hits))
+            fusion_input_ids = {
+                hit.chunk_id for run in runs for hit in run.hits
+            }
+            RETRIEVAL_FUSION_INPUT_TOTAL.labels(
+                method=req.fusion.method
+            ).inc(len(fusion_input_ids))
 
-        # ---- resolve filters (predicates + corpus doc-id resolution) ----
-        ctx["decision"] = decision
-        recall_filter = await loop.run_in_executor(
-            None, self._resolve_filter, req, decision
-        )
+            # ---- fuse ----
+            await _send(emit, {"type": "stage", "stage": "fuse"})
+            timer = _Timer("fuse")
+            with _TRACER.start_as_current_span("fuse"):
+                if req.fusion.method == "rrf":
+                    chunks = rrf_fuse(runs, rrf_k=req.fusion.rrf_k)
+                else:
+                    chunks = weighted_fuse(runs, req.fusion.weights.model_dump())
 
-        # ---- recall ----
-        await _send(emit, {"type": "stage", "stage": "recall"})
-        timer = _Timer("recall")
-        runs = await self._recall(
-            loop, plan, req, recall_limit, recall_filter, ctx
-        )
-        traces.append(timer.done({"legs": len(runs), "per_leg_top_k": recall_limit}))
+                # ---- hydrate content + citation fields from the corpus ----
+                with _TRACER.start_as_current_span("hydrate"):
+                    hydrated = 0
+                    if self._repo is not None and chunks:
+                        rows = await loop.run_in_executor(
+                            None,
+                            self._repo.hydrate, [c.chunk_id for c in chunks],
+                        )
+                        for chunk in chunks:
+                            row = rows.get(chunk.chunk_id)
+                            if row is not None:
+                                chunk.fields.update(row)
+                        hydrated = len(rows)
+            RETRIEVAL_FUSION_OUTPUT_TOTAL.labels(
+                method=req.fusion.method
+            ).inc(len(chunks))
+            traces.append(timer.done({
+                "method": req.fusion.method, "chunks": len(chunks),
+                "hydrated": hydrated,
+            }))
 
-        # ---- fuse ----
-        await _send(emit, {"type": "stage", "stage": "fuse"})
-        timer = _Timer("fuse")
-        if req.fusion.method == "rrf":
-            chunks = rrf_fuse(runs, rrf_k=req.fusion.rrf_k)
-        else:
-            chunks = weighted_fuse(runs, req.fusion.weights.model_dump())
+            if not chunks:
+                return RetrievalResult(
+                    req.query, [], plan, runs, traces, route=decision
+                )
 
-        # ---- hydrate content + citation fields from the corpus ----
-        hydrated = 0
-        if self._repo is not None and chunks:
-            rows = await loop.run_in_executor(
-                None, self._repo.hydrate, [c.chunk_id for c in chunks]
-            )
-            for chunk in chunks:
-                row = rows.get(chunk.chunk_id)
-                if row is not None:
-                    chunk.fields.update(row)
-            hydrated = len(rows)
-        traces.append(timer.done({
-            "method": req.fusion.method, "chunks": len(chunks),
-            "hydrated": hydrated,
-        }))
+            # ---- mmr ----
+            if req.mmr.enabled:
+                await _send(emit, {"type": "stage", "stage": "mmr"})
+                timer = _Timer("mmr")
+                select_count = (
+                    req.rerank.candidate_pool if req.rerank.enabled else req.top_k
+                )
+                with _TRACER.start_as_current_span("mmr"):
+                    pool = chunks[: min(len(chunks), max(select_count * 2, 30))]
+                    query_vector = await loop.run_in_executor(
+                        None, self._embedder.embed_query, req.query
+                    )
+                    doc_vectors = await loop.run_in_executor(
+                        None,
+                        self._embedder.embed_documents,
+                        [str(c.fields.get("text", "")) for c in pool],
+                    )
+                    chunks = mmr(
+                        pool, doc_vectors, query_vector,
+                        lambda_mult=req.mmr.lambda_mult, top_k=select_count,
+                    )
+                traces.append(timer.done({
+                    "pool": len(pool), "selected": len(chunks),
+                }))
 
-        if not chunks:
+            # ---- rerank ----
+            rerank_input_ids = None
+            if req.rerank.enabled:
+                await _send(emit, {"type": "stage", "stage": "rerank"})
+                timer = _Timer("rerank")
+                with _TRACER.start_as_current_span("retrieval.rerank"):
+                    pool = chunks[: req.rerank.candidate_pool]
+                    # Snapshot the fused order before reranking for pre/post
+                    # comparison (eval metrics consume this on the result).
+                    rerank_input_ids = [c.chunk_id for c in pool]
+                    documents = [str(c.fields.get("text", "")) for c in pool]
+                    scored = await loop.run_in_executor(
+                        None,
+                        functools.partial(self._reranker.rerank, req.query, documents,
+                                          req.top_k),
+                    )
+                    reranked: list[RetrievedChunk] = []
+                    for hit in scored:
+                        chunk = pool[hit.index]
+                        chunk.rerank_score = float(hit.score)
+                        reranked.append(chunk)
+                    chunks = reranked[: req.top_k]
+                stage = timer.done({"candidates": len(pool)})
+                traces.append(stage)
+                RETRIEVAL_RERANK_STAGE_DURATION_SECONDS.labels(
+                    model=rerank_model
+                ).observe(stage.duration_ms / 1000.0)
+                RETRIEVAL_RERANK_INPUT_CHARS.labels(model=rerank_model).observe(
+                    sum(len(d) for d in documents)
+                )
+                RETRIEVAL_RERANK_CANDIDATES.labels(model=rerank_model).observe(
+                    len(pool)
+                )
+            else:
+                chunks = chunks[: req.top_k]
+
+            # ---- expand leaves up to the requested context level ----
+            if req.context_level != "chunk" and self._repo is not None:
+                await _send(emit, {"type": "stage", "stage": "expand"})
+                timer = _Timer("expand")
+                leaf_count = len(chunks)
+                with _TRACER.start_as_current_span("expand"):
+                    chunks = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            expand_to_level,
+                            repo=self._repo, level=req.context_level,
+                        ),
+                        chunks,
+                    )
+                traces.append(timer.done({
+                    "level": req.context_level,
+                    "leaves": leaf_count, "outputs": len(chunks),
+                }))
+
+            # ---- compress to token budget ----
+            if req.context.max_tokens is not None:
+                await _send(emit, {"type": "stage", "stage": "compress"})
+                timer = _Timer("compress")
+                before = len(chunks)
+                with _TRACER.start_as_current_span("compress"):
+                    chunks = _compress_to_budget(chunks, req.context.max_tokens)
+                traces.append(timer.done({
+                    "budget": req.context.max_tokens,
+                    "kept": len(chunks), "dropped": before - len(chunks),
+                }))
+
+            # Per-request channel hit rate: a channel counts when any
+            # final chunk came back through it.
+            for channel in {
+                ch for chunk in chunks for ch in chunk.matched_channels
+            }:
+                RETRIEVAL_CHANNEL_HIT_REQUESTS_TOTAL.labels(channel=channel).inc()
+
             return RetrievalResult(
-                req.query, [], plan, runs, traces, route=decision
+                req.query, chunks, plan, runs, traces, route=decision,
+                rerank_input_ids=rerank_input_ids,
             )
-
-        # ---- mmr ----
-        if req.mmr.enabled:
-            await _send(emit, {"type": "stage", "stage": "mmr"})
-            timer = _Timer("mmr")
-            select_count = (
-                req.rerank.candidate_pool if req.rerank.enabled else req.top_k
-            )
-            pool = chunks[: min(len(chunks), max(select_count * 2, 30))]
-            query_vector = await loop.run_in_executor(
-                None, self._embedder.embed_query, req.query
-            )
-            doc_vectors = await loop.run_in_executor(
-                None,
-                self._embedder.embed_documents,
-                [str(c.fields.get("text", "")) for c in pool],
-            )
-            chunks = mmr(
-                pool, doc_vectors, query_vector,
-                lambda_mult=req.mmr.lambda_mult, top_k=select_count,
-            )
-            traces.append(timer.done({
-                "pool": len(pool), "selected": len(chunks),
-            }))
-
-        # ---- rerank ----
-        rerank_input_ids = None
-        if req.rerank.enabled:
-            await _send(emit, {"type": "stage", "stage": "rerank"})
-            timer = _Timer("rerank")
-            pool = chunks[: req.rerank.candidate_pool]
-            # Snapshot the fused order before reranking for pre/post
-            # comparison (eval metrics consume this on the result).
-            rerank_input_ids = [c.chunk_id for c in pool]
-            documents = [str(c.fields.get("text", "")) for c in pool]
-            scored = await loop.run_in_executor(
-                None,
-                functools.partial(self._reranker.rerank, req.query, documents,
-                                  req.top_k),
-            )
-            reranked: list[RetrievedChunk] = []
-            for hit in scored:
-                chunk = pool[hit.index]
-                chunk.rerank_score = float(hit.score)
-                reranked.append(chunk)
-            chunks = reranked[: req.top_k]
-            traces.append(timer.done({"candidates": len(pool)}))
-        else:
-            chunks = chunks[: req.top_k]
-
-        # ---- expand leaves up to the requested context level ----
-        if req.context_level != "chunk" and self._repo is not None:
-            await _send(emit, {"type": "stage", "stage": "expand"})
-            timer = _Timer("expand")
-            leaf_count = len(chunks)
-            chunks = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    expand_to_level,
-                    repo=self._repo, level=req.context_level,
-                ),
-                chunks,
-            )
-            traces.append(timer.done({
-                "level": req.context_level,
-                "leaves": leaf_count, "outputs": len(chunks),
-            }))
-
-        # ---- compress to token budget ----
-        if req.context.max_tokens is not None:
-            await _send(emit, {"type": "stage", "stage": "compress"})
-            timer = _Timer("compress")
-            before = len(chunks)
-            chunks = _compress_to_budget(chunks, req.context.max_tokens)
-            traces.append(timer.done({
-                "budget": req.context.max_tokens,
-                "kept": len(chunks), "dropped": before - len(chunks),
-            }))
-
-        return RetrievalResult(
-            req.query, chunks, plan, runs, traces, route=decision,
-            rerank_input_ids=rerank_input_ids,
-        )
 
     # ---- internal ----
 
@@ -598,29 +674,31 @@ class RetrievalPipeline:
                               _SPARSE_FIELD)
         summary_ch = SummaryChannel(self._store, req.database, physical,
                                     self._embedder)
-        tasks: list[Awaitable] = []
+        # (channel, query, awaitable): legs are scheduled as before,
+        # and gathered each inside its own ``recall.<channel>`` span.
+        legs: list[tuple[str, str, Awaitable]] = []
         if use_dense:
             for spec in plan.dense_specs:
-                tasks.append(loop.run_in_executor(
+                legs.append(("dense", spec.query, loop.run_in_executor(
                     None,
                     functools.partial(dense_ch.recall, spec, top_k,
                                       recall_filter.expr, output_fields),
-                ))
+                )))
         if use_summary:
             for spec in plan.dense_specs:
-                tasks.append(loop.run_in_executor(
+                legs.append(("summary", spec.query, loop.run_in_executor(
                     None,
                     functools.partial(summary_ch.recall, spec, top_k,
                                       recall_filter.expr, output_fields),
-                ))
+                )))
         if use_bm25:
             for query_text in plan.lexical_queries:
                 spec = RecallSpec(query=query_text)
-                tasks.append(loop.run_in_executor(
+                legs.append(("bm25", query_text, loop.run_in_executor(
                     None,
                     functools.partial(bm25_ch.recall, spec, top_k,
                                       recall_filter.expr, output_fields),
-                ))
+                )))
         if use_graph:
             entity_coll, community_coll = graph_collection_names(req.collection)
             graph_ch = GraphChannel(
@@ -631,7 +709,7 @@ class RetrievalPipeline:
                 community_collection=community_coll,
                 embedder=self._embedder,
             )
-            tasks.append(loop.run_in_executor(
+            legs.append(("graph", plan.original_query, loop.run_in_executor(
                 None,
                 functools.partial(
                     graph_ch.recall,
@@ -640,8 +718,17 @@ class RetrievalPipeline:
                     doc_ids=recall_filter.doc_ids,
                     index_predicates=recall_filter.index_predicates,
                 ),
-            ))
-        return list(await asyncio.gather(*tasks))
+            )))
+
+        async def _run_leg(channel: str, query: str, coro: Awaitable):
+            with _TRACER.start_as_current_span(f"recall.{channel}") as leg_span:
+                leg_span.set_attribute("vs.query_length", len(query))
+                return await coro
+
+        return list(await asyncio.gather(*(
+            _run_leg(channel, query, coro)
+            for channel, query, coro in legs
+        )))
 
     @staticmethod
     def _empty_runs(

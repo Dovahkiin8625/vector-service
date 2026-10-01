@@ -367,3 +367,67 @@ def test_dashboard_exposes_retrieval_panel():
     assert ".retrieval-modes" in _CSS
     assert ".retrieval-migrate-banner" not in _CSS
     assert ".retrieval-chunk" in _CSS
+
+
+def test_dashboard_exposes_operations_panels():
+    """Operations group (TODO §7): job queue, index rebuild, consistency
+    scan and evaluation/gates panels wired into the app shell."""
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    # All five new modules serve as static assets.
+    with TestClient(app) as c:
+        for path in [
+            "/static/dashboard/components/ops-common.js",
+            "/static/dashboard/components/ops-queue.js",
+            "/static/dashboard/components/ops-reindex.js",
+            "/static/dashboard/components/ops-consistency.js",
+            "/static/dashboard/components/ops-eval.js",
+        ]:
+            rr = c.get(path)
+            assert rr.status_code == 200, f"{path} -> {rr.status_code}"
+    # Imports + component registration + panel mounts.
+    for stmt in [
+        "import OpsQueuePanel from './ops-queue.js'",
+        "import OpsReindexPanel from './ops-reindex.js'",
+        "import OpsConsistencyPanel from './ops-consistency.js'",
+        "import OpsEvalPanel from './ops-eval.js'",
+    ]:
+        assert stmt in app_js
+    assert "OpsQueuePanel, OpsReindexPanel, OpsConsistencyPanel, OpsEvalPanel," in app_js
+    for tag in [
+        "<ops-queue-panel v-show=\"store.view === 'queue'\" />",
+        "<ops-reindex-panel v-show=\"store.view === 'reindex'\" />",
+        "<ops-consistency-panel v-show=\"store.view === 'consistency'\" />",
+        "<ops-eval-panel v-show=\"store.view === 'eval'\" />",
+    ]:
+        assert tag in app_js
+    # Sidebar group + data-view bindings + NAV_LABELS entries.
+    assert 'data-group="ops"' in app_js
+    for view in ["queue", "reindex", "consistency", "eval"]:
+        assert f'data-view="{view}"' in app_js
+        assert f"'{view}':" in app_js
+    # Endpoints consumed by the panels (pills + template strings are
+    # both covered by _ALL).
+    for ep in [
+        "/v1/jobs", "/v1/jobs/{id}", "/v1/jobs/{id}/cancel",
+        "/v1/jobs/{id}/events",
+        "/v1/databases/{db}/collections/{coll}/reindex",
+        "/v1/databases/{db}/collections/{coll}/consistency",
+        "/v1/evaluation/sets", "/v1/evaluation/gates",
+        "/v1/evaluation/runs/{id}",
+    ]:
+        assert _has(ep), f"{ep} missing"
+    # i18n keys exist in both locales. 'nav.*' also appears in NAV_LABELS
+    # and the sidebar (4 total); 'cat.ops' backs four NAV_LABELS entries
+    # plus two locales (6); 'nav.Operations' is sidebar + two locales (3).
+    for key in ["nav.queue", "nav.reindex", "nav.consistency", "nav.eval"]:
+        assert app_js.count(f"'{key}'") == 4
+    assert app_js.count("'cat.ops'") == 6
+    assert app_js.count("'nav.Operations'") == 3
+    # Shared panel keys land in both locales (exactly one entry each).
+    for key in [
+        "ops.queue.status", "ops.reindex.submit", "ops.consistency.scan",
+        "ops.eval.tab_sets", "common.prev", "common.next",
+    ]:
+        assert app_js.count(f"'{key}'") == 2

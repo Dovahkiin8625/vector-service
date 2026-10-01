@@ -15,6 +15,11 @@ import EmbeddingsPanel from './embeddings.js';
 import SimilarityPanel from './similarity.js';
 import KnowledgeBasePanel from './knowledge-base.js';
 import RetrievalPanel from './retrieval.js';
+// Operations panels (TODO §7): queue / rebuild / consistency / evaluation.
+import OpsQueuePanel from './ops-queue.js';
+import OpsReindexPanel from './ops-reindex.js';
+import OpsConsistencyPanel from './ops-consistency.js';
+import OpsEvalPanel from './ops-eval.js';
 import { NewDbModal, NewCollModal } from './modals.js';
 
 // =====================================================================
@@ -291,6 +296,80 @@ const I18N = {
     'profile.desc.standard': 'DocLayNet 版面分析 + TableFormer 表格识别 + 选择性 RapidOCR：数字页面跳过 OCR，扫描页面自动识别。适用于绝大多数 PDF 与图片。',
     'profile.desc.native': '基于 docling-parse 的纯文本提取，无需加载模型、速度极快；但无法识别扫描件，表格还原较弱。仅适用于带文本层的数字 PDF。',
     'profile.desc.vlm': '端到端视觉语言模型（默认 Granite-Docling-258M）直接理解整页版面，适合复杂排版；速度较慢，首次使用需下载模型权重。',
+
+    // Operations (TODO §7): queue / reindex / consistency / evaluation
+    'cat.ops': '运维',
+    'nav.Operations': '运维 · Operations',
+    'nav.queue': '任务队列',
+    'nav.reindex': '索引重建',
+    'nav.consistency': '一致性校验',
+    'nav.eval': '评测与门禁',
+    'common.apply': '应用',
+    'common.back': '返回',
+    'common.close': '关闭',
+    'common.next': '下一页',
+    'common.prev': '上一页',
+    'ops.queue.all': '全部',
+    'ops.queue.attempts': '尝试次数',
+    'ops.queue.cancel': '取消任务',
+    'ops.queue.cancel_confirm': '确定要取消该任务吗？',
+    'ops.queue.cancel_requested': '已请求取消',
+    'ops.queue.chunk_count': '分片数',
+    'ops.queue.created': '创建时间',
+    'ops.queue.detail': '任务详情',
+    'ops.queue.filename': '文件名',
+    'ops.queue.finished': '完成时间',
+    'ops.queue.job_id': '任务 ID',
+    'ops.queue.page_count': '页数',
+    'ops.queue.progress': '进度',
+    'ops.queue.stage': '阶段',
+    'ops.queue.status': '状态',
+    'ops.queue.tokens_used': '已用 Tokens',
+    'ops.queue.updated': '更新时间',
+    'ops.reindex.canary_hint': '金丝雀比例：新版本先服务该比例的请求，通过门禁后再整体提升。',
+    'ops.reindex.confirm': '确定要提交重建任务吗？',
+    'ops.reindex.embed_hint': '嵌入模型留空则沿用当前绑定；指定其他模型将构建全新向量索引。',
+    'ops.reindex.embed_keep': '留空：沿用当前模型',
+    'ops.reindex.gate': '发布门禁',
+    'ops.reindex.job': '重建任务',
+    'ops.reindex.no_check': '尚无门禁检查结果。',
+    'ops.reindex.no_gate': '未配置门禁',
+    'ops.reindex.no_gate_hint': '可直接提升金丝雀；建议先配置回归门禁再提升。',
+    'ops.reindex.promote': '金丝雀提升',
+    'ops.reindex.promote_confirm': '确定将金丝雀索引提升为正式索引吗？',
+    'ops.reindex.promote_hint': '提升在单事务内完成：金丝雀引用切换为正式引用，旧物理索引随后由维护任务清理。',
+    'ops.reindex.submit': '提交重建',
+    'ops.consistency.missing': 'Milvus 缺失',
+    'ops.consistency.orphans': 'Milvus 孤儿',
+    'ops.consistency.repair': '修复',
+    'ops.consistency.repair_confirm': '确定按 SQLite 事实来源修复差异吗？（缺失补写、孤儿删除）',
+    'ops.consistency.repair_hint': '修复以 SQLite 为准：补写缺失向量、删除孤儿向量。',
+    'ops.consistency.report': '一致性报告',
+    'ops.consistency.scan': '开始扫描',
+    'ops.consistency.show_ids': '展开 ID 列表',
+    'ops.eval.all_gates': '全部门禁',
+    'ops.eval.all_sets': '全部评测集',
+    'ops.eval.answer': '答案',
+    'ops.eval.channel_attribution': '通道归因',
+    'ops.eval.checks': '检查记录',
+    'ops.eval.chunks': '命中分片',
+    'ops.eval.expected': '期望',
+    'ops.eval.gate': '门禁',
+    'ops.eval.has_answer': '含标准答案',
+    'ops.eval.max_drop': '最大降幅',
+    'ops.eval.min': '下限',
+    'ops.eval.per_question': '逐题明细',
+    'ops.eval.question': '问题',
+    'ops.eval.questions': '问题列表',
+    'ops.eval.rerank_compare': '重排前后对比',
+    'ops.eval.run': '运行',
+    'ops.eval.runs': '运行历史',
+    'ops.eval.set_name': '评测集',
+    'ops.eval.show_answer': '展开答案',
+    'ops.eval.tab_gates': '门禁',
+    'ops.eval.tab_sets': '评测集',
+    'ops.eval.thresholds': '阈值',
+    'ops.eval.versions': '版本',
   },
   en: {
     // Brand + topbar
@@ -551,6 +630,80 @@ const I18N = {
     'profile.desc.standard': 'DocLayNet layout analysis + TableFormer table recognition + selective RapidOCR: digital pages skip OCR while scanned pages are recognized automatically. Fits most PDFs and images.',
     'profile.desc.native': 'Plain text extraction via docling-parse — no model loading, near-instant; cannot read scans and table recovery is weak. Digital PDFs with a text layer only.',
     'profile.desc.vlm': 'End-to-end vision-language model (Granite-Docling-258M by default) reads whole pages directly — great for complex layouts; slower, and weights download on first use.',
+
+    // Operations (TODO §7): queue / reindex / consistency / evaluation
+    'cat.ops': 'Operations',
+    'nav.Operations': 'Operations',
+    'nav.queue': 'Job Queue',
+    'nav.reindex': 'Index Rebuild',
+    'nav.consistency': 'Consistency',
+    'nav.eval': 'Evaluation & Gates',
+    'common.apply': 'Apply',
+    'common.back': 'Back',
+    'common.close': 'Close',
+    'common.next': 'Next',
+    'common.prev': 'Prev',
+    'ops.queue.all': 'All',
+    'ops.queue.attempts': 'Attempts',
+    'ops.queue.cancel': 'Cancel job',
+    'ops.queue.cancel_confirm': 'Cancel this job?',
+    'ops.queue.cancel_requested': 'Cancel requested',
+    'ops.queue.chunk_count': 'Chunks',
+    'ops.queue.created': 'Created',
+    'ops.queue.detail': 'Job detail',
+    'ops.queue.filename': 'Filename',
+    'ops.queue.finished': 'Finished',
+    'ops.queue.job_id': 'Job ID',
+    'ops.queue.page_count': 'Pages',
+    'ops.queue.progress': 'Progress',
+    'ops.queue.stage': 'Stage',
+    'ops.queue.status': 'Status',
+    'ops.queue.tokens_used': 'Tokens used',
+    'ops.queue.updated': 'Updated',
+    'ops.reindex.canary_hint': 'Canary percentage: the new build serves this share of traffic first; promote it fully after gates pass.',
+    'ops.reindex.confirm': 'Submit this rebuild job?',
+    'ops.reindex.embed_hint': 'Leave the embedding model empty to keep the current binding; a different model builds a brand-new vector index.',
+    'ops.reindex.embed_keep': 'Empty: keep current model',
+    'ops.reindex.gate': 'Release gate',
+    'ops.reindex.job': 'Rebuild job',
+    'ops.reindex.no_check': 'No gate check yet.',
+    'ops.reindex.no_gate': 'No gate configured',
+    'ops.reindex.no_gate_hint': 'You can promote the canary directly; configuring a regression gate first is recommended.',
+    'ops.reindex.promote': 'Promote canary',
+    'ops.reindex.promote_confirm': 'Promote the canary index to active?',
+    'ops.reindex.promote_hint': 'Promotion runs in one transaction: the canary ref becomes active; the old physical index is later cleaned up by maintenance.',
+    'ops.reindex.submit': 'Submit rebuild',
+    'ops.consistency.missing': 'Missing in Milvus',
+    'ops.consistency.orphans': 'Orphans in Milvus',
+    'ops.consistency.repair': 'Repair',
+    'ops.consistency.repair_confirm': 'Repair differences against the SQLite source of truth? (rewrite missing, delete orphans)',
+    'ops.consistency.repair_hint': 'Repair takes SQLite as truth: rewrite missing vectors and delete orphan vectors.',
+    'ops.consistency.report': 'Consistency report',
+    'ops.consistency.scan': 'Run scan',
+    'ops.consistency.show_ids': 'Show IDs',
+    'ops.eval.all_gates': 'All gates',
+    'ops.eval.all_sets': 'All sets',
+    'ops.eval.answer': 'Answer',
+    'ops.eval.channel_attribution': 'Channel attribution',
+    'ops.eval.checks': 'Checks',
+    'ops.eval.chunks': 'Hit chunks',
+    'ops.eval.expected': 'Expected',
+    'ops.eval.gate': 'Gate',
+    'ops.eval.has_answer': 'with gold answer',
+    'ops.eval.max_drop': 'Max drop',
+    'ops.eval.min': 'Min',
+    'ops.eval.per_question': 'Per-question detail',
+    'ops.eval.question': 'Question',
+    'ops.eval.questions': 'Questions',
+    'ops.eval.rerank_compare': 'Rerank before/after',
+    'ops.eval.run': 'Run',
+    'ops.eval.runs': 'Runs',
+    'ops.eval.set_name': 'Eval set',
+    'ops.eval.show_answer': 'Show answer',
+    'ops.eval.tab_gates': 'Gates',
+    'ops.eval.tab_sets': 'Sets',
+    'ops.eval.thresholds': 'Thresholds',
+    'ops.eval.versions': 'Versions',
   },
 };
 
@@ -727,6 +880,10 @@ const NAV_LABELS = {
   'ingest':              { catKey: 'cat.kb',        subKey: 'nav.ingest' },
   'ingested':            { catKey: 'cat.kb',        subKey: 'nav.chunks_view' },
   'retrieval':           { catKey: 'cat.kb',        subKey: 'nav.retrieval' },
+  'queue':               { catKey: 'cat.ops',       subKey: 'nav.queue' },
+  'reindex':             { catKey: 'cat.ops',       subKey: 'nav.reindex' },
+  'consistency':         { catKey: 'cat.ops',       subKey: 'nav.consistency' },
+  'eval':                { catKey: 'cat.ops',       subKey: 'nav.eval' },
 };
 
 const App = defineComponent({
@@ -735,6 +892,7 @@ const App = defineComponent({
     OverviewPanel, ModelsPanel, DatabasesPanel, CollectionsPanel,
     RecordsPanel, SearchPanel, BrowsePanel, RerankPanel,
     EmbeddingsPanel, SimilarityPanel, KnowledgeBasePanel, RetrievalPanel,
+    OpsQueuePanel, OpsReindexPanel, OpsConsistencyPanel, OpsEvalPanel,
     NewDbModal, NewCollModal,
   },
   setup() {
@@ -833,6 +991,16 @@ const App = defineComponent({
               <div :class="['nav-item', store.view === 'retrieval' ? 'active' : '']" data-view="retrieval" @click="store.view = 'retrieval'"><span>{{ t('nav.retrieval') }}</span></div>
             </div>
           </div>
+
+          <div class="nav-group" data-group="ops">
+            <div class="nav-group-label"><span>{{ t('nav.Operations') }}</span></div>
+            <div class="nav-items">
+              <div :class="['nav-item', store.view === 'queue' ? 'active' : '']" data-view="queue" @click="store.view = 'queue'">{{ t('nav.queue') }}</div>
+              <div :class="['nav-item', store.view === 'reindex' ? 'active' : '']" data-view="reindex" @click="store.view = 'reindex'">{{ t('nav.reindex') }}</div>
+              <div :class="['nav-item', store.view === 'consistency' ? 'active' : '']" data-view="consistency" @click="store.view = 'consistency'">{{ t('nav.consistency') }}</div>
+              <div :class="['nav-item', store.view === 'eval' ? 'active' : '']" data-view="eval" @click="store.view = 'eval'">{{ t('nav.eval') }}</div>
+            </div>
+          </div>
         </div>
       </nav>
 
@@ -860,6 +1028,10 @@ const App = defineComponent({
           <browse-panel v-show="store.view === 'browse'" />
           <knowledge-base-panel v-show="store.view === 'parse' || store.view === 'chunk' || store.view === 'ingest' || store.view === 'ingested'" :view="store.view" />
           <retrieval-panel v-show="store.view === 'retrieval'" />
+          <ops-queue-panel v-show="store.view === 'queue'" />
+          <ops-reindex-panel v-show="store.view === 'reindex'" />
+          <ops-consistency-panel v-show="store.view === 'consistency'" />
+          <ops-eval-panel v-show="store.view === 'eval'" />
         </div>
       </main>
 

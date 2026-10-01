@@ -24,6 +24,7 @@ from vector_service.core.threadpools import (
     run_in_store,
     unbind_pools,
 )
+from vector_service.core.tracing import init_tracing, shutdown_tracing
 from vector_service.corpus import CorpusRepository
 from vector_service.corpus.blobs import BlobStore
 from vector_service.corpus.bm25 import SparseBM25
@@ -95,6 +96,10 @@ async def lifespan(app: "FastAPI"):
         embedding_backend=settings.embedding_backend,
         vector_store_backend=settings.vector_store_backend,
     ).set(1)
+
+    # Opt-in OpenTelemetry provider. Disabled (default) returns None
+    # and the pipeline's spans hit the API's cheap no-op proxy.
+    tracer_provider = init_tracing(settings)
 
     app.state.settings = settings
     app.state.startup_ts = time.time()
@@ -367,3 +372,5 @@ async def lifespan(app: "FastAPI"):
         thread_pools.shutdown()
         instance_lock.release()
         log.info("shutdown")
+        # Last: flush/stop the tracer so no span is created afterwards.
+        shutdown_tracing(tracer_provider)

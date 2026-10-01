@@ -358,6 +358,32 @@ class MaintenanceSettings(BaseSettings):
     blob_sweep_enabled: bool = True
 
 
+class TracingSettings(BaseSettings):
+    """OpenTelemetry tracing configuration.
+
+    Env prefix: ``VS_TRACING__``. When enabled the SDK installs a
+    global tracer provider; spans export over OTLP/HTTP to ``endpoint``
+    (e.g. ``http://collector:4318/v1/traces``). With no endpoint the
+    provider records in-process but exports nothing. Disabled (the
+    default) leaves the API's no-op proxy in place.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VS_TRACING__", extra="ignore"
+    )
+
+    enabled: bool = False
+
+    #: Resource ``service.name``.
+    service_name: str = "vector-service"
+
+    #: Fraction of traces sampled (parent-based ratio sampler).
+    sample_ratio: float = Field(1.0, ge=0.0, le=1.0)
+
+    #: OTLP/HTTP endpoint; empty = record but don't export.
+    endpoint: str = ""
+
+
 class PoolSettings(BaseModel):
     """One isolated thread pool: worker count + admission cap.
 
@@ -534,6 +560,9 @@ class Settings(BaseSettings):
     maintenance: MaintenanceSettings = Field(
         default_factory=MaintenanceSettings
     )
+
+    # OpenTelemetry tracing (nested; env prefix VS_TRACING__)
+    tracing: TracingSettings = Field(default_factory=TracingSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",
