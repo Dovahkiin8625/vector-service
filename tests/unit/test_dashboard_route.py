@@ -112,10 +112,14 @@ def test_dashboard_exposes_similarity_panel():
     assert "/v1/text_similarity" in sim
     assert "/v1/image_similarity" in sim
     assert "/v1/multimodal_similarity" in sim
-    # Internal segmented mode switch (no kind prop from the App).
+    # Internal segmented mode switch (no kind prop from the App). The
+    # panel declares no ``kind`` prop and the App passes none — note the
+    # ``{ kind: ... }`` in the model-list copy is an i18n placeholder,
+    # not a prop, so match the prop-declaration shape specifically.
     assert "seg-toggle" in sim
     assert "const mode = ref('text')" in sim
-    assert 'kind:' not in sim
+    assert "kind: { type:" not in sim
+    assert "<similarity-panel :kind" not in _ALL
 
 
 def test_dashboard_exposes_knowledge_base_panels():
@@ -206,7 +210,9 @@ def test_dashboard_browse_panel_supports_delete():
 
     Both flows POST the existing ``.../vectors/delete`` endpoint with
     exactly one of ``ids`` / ``filter_expr`` (the backend enforces the
-    XOR), and destructive clicks go through a confirm() guard.
+    XOR), and destructive clicks go through the shared askConfirm()
+    modal guard, which spells out the blast radius (db, collection,
+    row count) that a native confirm() could not show.
     """
     browse = (
         _ST / "static" / "dashboard" / "components" / "browse.js"
@@ -220,7 +226,7 @@ def test_dashboard_browse_panel_supports_delete():
     assert "primary_field: primary.value, ids" in browse
     assert "primary_field: primary.value, filter_expr: expr" in browse
     # Both destructive actions require confirmation.
-    assert browse.count("confirm(") >= 2
+    assert browse.count("askConfirm(") >= 2
 
 
 def test_dashboard_browse_panel_refreshes_after_delete():

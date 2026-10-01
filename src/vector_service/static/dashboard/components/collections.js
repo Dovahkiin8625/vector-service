@@ -1,6 +1,7 @@
 // Collections panel: list + create (modal) + expandable detail (schema + indexes + index management).
-import { defineComponent, ref, watch, onMounted } from '../vue.esm-browser.prod.js';
-import { store, api, enc, extractApiError } from './app.js';
+import { defineComponent, ref, computed, watch, onMounted } from '../vue.esm-browser.prod.js';
+import { t, store, api, enc, extractApiError } from './app.js';
+import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 
 export default defineComponent({
   name: 'CollectionsPanel',
@@ -9,19 +10,42 @@ export default defineComponent({
     const dbs = ref([]);
     const colls = ref([]);
     const detailCache = ref(Object.create(null));
+    // Detail-load failures, keyed like detailCache. Without this the
+    // expansion kept rendering "loading…" forever: the failure was
+    // swallowed and nothing was ever written to the cache.
+    const detailErr = ref(Object.create(null));
     const expanded = ref(new Set());
+    // List-level load failure (databases or collections).
+    const loadErr = ref('');
+    // Outcome of the last mutating call (drop collection / index).
+    const opStatus = ref('idle');
+    const opMsg = ref('');
+    // Which control is in flight: 'drop:<name>' | 'index:<coll>:<field>'
+    // | 'newindex:<coll>'. Keeps one row's spinner off its siblings.
+    const busyKey = ref('');
+
+    function opOk(msg) { opStatus.value = 'ok'; opMsg.value = msg; }
+    function opFailed(prefix, e) {
+      opStatus.value = 'error';
+      opMsg.value = t(prefix) + extractApiError(e, t('common.unknown'));
+    }
 
     async function refreshDbs() {
+      loadErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/databases');
         dbs.value = (payload && payload.databases) || [];
         store.databases.list = dbs.value;
         if (!db.value && dbs.value.length) db.value = dbs.value[0];
-      } catch (_e) {}
+      } catch (e) {
+        dbs.value = [];
+        loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
 
     async function refreshColls() {
       if (!db.value) { colls.value = []; return; }
+      loadErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections');
         colls.value = (payload && payload.collections) || [];
@@ -30,18 +54,37 @@ export default defineComponent({
         Object.keys(detailCache.value).forEach(k => {
           if (!live.has(k)) delete detailCache.value[k];
         });
+        Object.keys(detailErr.value).forEach(k => {
+          if (!live.has(k)) delete detailErr.value[k];
+        });
         expanded.value.forEach(k => { if (!live.has(k)) expanded.value.delete(k); });
-      } catch (_e) { colls.value = []; }
+      } catch (e) {
+        colls.value = [];
+        loadErr.value = t('collections.list_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
 
     async function loadDetail(name) {
       const key = db.value + '::' + name;
       if (detailCache.value[key]) return detailCache.value[key];
+      delete detailErr.value[key];
       try {
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections/' + enc(name));
         detailCache.value[key] = payload;
         return payload;
-      } catch (_e) { return null; }
+      } catch (e) {
+        // Recorded, not swallowed: the expansion below renders the
+        // reason plus a retry instead of spinning forever.
+        detailErr.value[key] = t('collections.detail_failed') + extractApiError(e, t('common.unknown'));
+        return null;
+      }
+    }
+    // Retry entry point for the detail error state: drop the remembered
+    // failure, then load again.
+    async function reloadDetail(name) {
+      const key = db.value + '::' + name;
+      delete detailErr.value[key];
+      await loadDetail(name);
     }
 
     async function toggleDetail(name) {
@@ -52,34 +95,68 @@ export default defineComponent({
     }
 
     async function dropColl(name) {
-      if (!confirm('确认删除集合 "' + db.value + '/' + name + '"?')) return;
-      try { await api('DELETE', '/v1/databases/' + enc(db.value) + '/collections/' + enc(name)); }
-      catch (e) { alert('删除失败: ' + extractApiError(e, 'unknown')); return; }
+      const confirmed = await askConfirm({
+        title: t('collections.confirm_drop_title'),
+        message: t('collections.confirm_drop', { name: db.value + '/' + name }),
+        details: [
+          { label: t('common.database'), value: db.value },
+          { label: t('common.collection'), value: name },
+        ],
+        confirmLabel: t('common.delete'),
+      });
+      if (!confirmed) return;
+      busyKey.value = 'drop:' + name;
+      try {
+        await api('DELETE', '/v1/databases/' + enc(db.value) + '/collections/' + enc(name));
+      } catch (e) {
+        opFailed('common.delete_failed', e);
+        return;
+      } finally {
+        busyKey.value = '';
+      }
       const key = db.value + '::' + name;
       delete detailCache.value[key];
+      delete detailErr.value[key];
       expanded.value.delete(key);
+      opOk(t('collections.dropped', { name }));
       await refreshColls();
     }
 
     async function dropIndex(coll, fieldName) {
-      if (!confirm('确认删除字段 "' + fieldName + '" 上的索引?')) return;
+      const confirmed = await askConfirm({
+        title: t('collections.confirm_drop_index_title'),
+        message: t('collections.confirm_drop_index', { field: fieldName }),
+        details: [
+          { label: t('common.database'), value: db.value },
+          { label: t('common.collection'), value: coll },
+          { label: t('collections.index_field'), value: fieldName },
+        ],
+        confirmLabel: t('common.delete'),
+      });
+      if (!confirmed) return;
+      busyKey.value = 'index:' + coll + ':' + fieldName;
       try {
         await api('DELETE',
           '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll) + '/index?field_name=' + enc(fieldName));
         const key = db.value + '::' + coll;
         delete detailCache.value[key];
         await loadDetail(coll);
-      } catch (e) { alert('删除索引失败: ' + extractApiError(e, 'unknown')); }
+        opOk(t('collections.index_dropped', { field: fieldName }));
+      } catch (e) { opFailed('collections.drop_index_failed', e); }
+      finally { busyKey.value = ''; }
     }
 
     async function createIndex(coll, body) {
+      busyKey.value = 'newindex:' + coll;
       try {
         await api('POST',
           '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll) + '/index', body);
         const key = db.value + '::' + coll;
         delete detailCache.value[key];
         await loadDetail(coll);
-      } catch (e) { alert('新建索引失败: ' + extractApiError(e, 'unknown')); }
+        opOk(t('collections.index_created', { field: body.field_name }));
+      } catch (e) { opFailed('collections.create_index_failed', e); }
+      finally { busyKey.value = ''; }
     }
 
     function submitNewIndex(coll, ev) {
@@ -90,10 +167,27 @@ export default defineComponent({
       const raw = card.querySelector('[data-new-index-params]').value.trim();
       let params = {};
       if (raw) {
-        try { params = JSON.parse(raw); } catch (_e) { alert('params 必须是合法 JSON 对象.'); return; }
+        try { params = JSON.parse(raw); } catch (_e) {
+          opStatus.value = 'error';
+          opMsg.value = t('collections.err.bad_params');
+          return;
+        }
       }
       createIndex(coll, { field_name: field, metric_type: metric, index_type: type, params: params });
     }
+
+    // Busy wrappers for the two reload buttons, which had no in-flight
+    // state at all (a slow refresh looked like a dead button).
+    async function reloadDbs() {
+      busyKey.value = 'dbs';
+      try { await refreshDbs(); } finally { busyKey.value = ''; }
+    }
+    async function reloadColls() {
+      busyKey.value = 'colls';
+      try { await refreshColls(); } finally { busyKey.value = ''; }
+    }
+
+    const opKind = computed(() => (opStatus.value === 'error' ? 'error' : 'success'));
 
     watch(db, () => { refreshColls(); });
     onMounted(() => {
@@ -104,82 +198,100 @@ export default defineComponent({
 
     return {
       store,
-      db, dbs, colls, detailCache, expanded, refreshDbs, refreshColls,
-             toggleDetail, dropColl, dropIndex, createIndex, submitNewIndex };
+      db, dbs, colls, detailCache, detailErr, expanded, loadErr,
+      opKind, opMsg, busyKey, refreshDbs, reloadDbs, refreshColls, reloadColls,
+             toggleDetail, reloadDetail, dropColl, dropIndex, createIndex, submitNewIndex };
   },
+  components: { StatusBanner, BusyButton, EmptyState },
   template: `
     <div>
+      <!-- Panel-level outcome strip: the mutating calls here (drop
+           collection, drop/create index) had no visible result at all
+           beyond the list happening to change. -->
+      <status-banner kind="error" :text="loadErr" :retry="loadErr ? refreshDbs : null" />
+      <status-banner :kind="opKind" :text="opMsg" />
       <div class="section">
-        <div class="section-head"><h3 class="section-title">选择数据库</h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('collections.select_db') }}</h3></div>
         <div class="row split">
           <div class="row">
-            <label>当前数据库</label>
+            <label>{{ $t('collections.current_db') }}</label>
             <select id="colls-db" v-model="db">
               <option v-for="d in dbs" :key="d" :value="d">{{ d }}</option>
-              <option v-if="!dbs.length" value="">（暂无数据库）</option>
+              <option v-if="!dbs.length" value="">{{ $t('collections.no_dbs') }}</option>
             </select>
           </div>
           <div class="row">
             <label>&nbsp;</label>
-            <button id="btn-colls-refresh-db" class="btn" @click="refreshDbs">↻ 重新加载数据库列表</button>
+            <busy-button id="btn-colls-refresh-db" variant="" :busy="busyKey === 'dbs'"
+                         :label="'↻ ' + $t('collections.reload_dbs')" @click="reloadDbs" />
           </div>
         </div>
       </div>
 
       <div class="section">
         <div class="section-head">
-          <h3 class="section-title">集合列表 <span class="pill accent">GET /v1/databases/{db}/collections</span></h3>
+          <h3 class="section-title">{{ $t('collections.list_title') }} <span class="pill accent">GET /v1/databases/{db}/collections</span></h3>
         </div>
         <div class="actions">
-          <button id="btn-refresh-colls" class="btn primary" :disabled="!db" @click="refreshColls">刷新</button>
-          <button id="btn-open-new-coll" class="btn" :disabled="!db" @click="store.modals.newColl = true">+ 新建集合</button>
+          <busy-button id="btn-refresh-colls" :busy="busyKey === 'colls'" :label="$t('common.refresh')"
+                       :disabled="!db" @click="reloadColls" />
+          <button id="btn-open-new-coll" class="btn" :disabled="!db" @click="store.modals.newColl = true">{{ $t('collections.new') }}</button>
         </div>
         <div class="list" id="colls-list">
-          <div v-if="!db" class="empty">请先选择数据库。</div>
-          <div v-else-if="!colls.length" class="empty">该数据库下暂无集合。</div>
+          <empty-state v-if="!db" state="idle" :text="$t('collections.pick_db_first')" />
+          <empty-state v-else-if="!colls.length" state="empty" :text="$t('collections.empty')" />
           <template v-for="name in colls" :key="db + '::' + name">
             <div class="list-item" :data-coll-key="db + '::' + name" @click="toggleDetail(name)">
               <span class="name">{{ db }} / {{ name }}</span>
               <span class="meta">
                 <template v-if="detailCache[db + '::' + name]">
-                  {{ detailCache[db + '::' + name].metric || '—' }} · {{ detailCache[db + '::' + name].dim || '—' }} 维 · {{ formatCount(detailCache[db + '::' + name].count) }}
+                  {{ detailCache[db + '::' + name].metric || '—' }} · {{ $t('collections.dim_value', { dim: detailCache[db + '::' + name].dim || '—' }) }} · {{ formatCount(detailCache[db + '::' + name].count) }}
                 </template>
                 <template v-else>— · — · —</template>
               </span>
               <span style="color:var(--text-muted);font-size:12px;">{{ expanded.has(db + '::' + name) ? '▾' : '▸' }}</span>
-              <button class="btn sm danger" @click.stop="dropColl(name)">删除</button>
+              <busy-button class="sm" variant="danger" :busy="busyKey === 'drop:' + name"
+                           :label="$t('common.delete')" :busy-label="$t('common.deleting')"
+                           @click.stop="dropColl(name)" />
             </div>
             <div v-if="expanded.has(db + '::' + name)" class="field-card" :data-detail-for="db + '::' + name"
                  style="margin-left:0;margin-top:4px;padding:14px 16px;">
-              <div v-if="!detailCache[db + '::' + name]" class="empty"><span class="spinner"></span> 正在加载集合详情...</div>
+              <!-- A failed detail load used to leave this spinning
+                   forever: the error was swallowed and nothing was ever
+                   written to detailCache. -->
+              <empty-state v-if="detailErr[db + '::' + name]" state="error"
+                           :text="detailErr[db + '::' + name]"
+                           :retry="() => reloadDetail(name)" />
+              <empty-state v-else-if="!detailCache[db + '::' + name]" state="loading"
+                           :text="$t('collections.loading_detail')" />
               <template v-else>
                 <div class="kb-result">
-                  <div class="stat"><span class="key">维度</span><span class="val accent">{{ detailCache[db + '::' + name].dim }}</span></div>
-                  <div class="stat"><span class="key">数据量</span><span class="val">{{ formatCount(detailCache[db + '::' + name].count) }}</span></div>
-                  <div class="stat"><span class="key">度量</span><span class="val">{{ detailCache[db + '::' + name].metric }}</span></div>
-                  <div class="stat"><span class="key">主键 / 向量字段</span><span class="val">{{ detailCache[db + '::' + name].primary_field }} · {{ detailCache[db + '::' + name].vector_field }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('collections.stat.dim') }}</span><span class="val accent">{{ detailCache[db + '::' + name].dim }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('collections.stat.count') }}</span><span class="val">{{ formatCount(detailCache[db + '::' + name].count) }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('collections.stat.metric') }}</span><span class="val">{{ detailCache[db + '::' + name].metric }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('collections.stat.fields') }}</span><span class="val">{{ detailCache[db + '::' + name].primary_field }} · {{ detailCache[db + '::' + name].vector_field }}</span></div>
                 </div>
                 <details class="collapsible" open>
-                  <summary>基础信息</summary>
+                  <summary>{{ $t('common.basic_info') }}</summary>
                   <div class="body">
                     <table class="info-table">
-                      <tr><th>维度 dim</th><td>{{ detailCache[db + '::' + name].dim }}</td></tr>
-                      <tr><th>数据量 count</th><td>{{ formatCount(detailCache[db + '::' + name].count) }}</td></tr>
-                      <tr><th>距离度量 metric</th><td>{{ detailCache[db + '::' + name].metric }}</td></tr>
-                      <tr><th>主键字段</th><td>{{ detailCache[db + '::' + name].primary_field }}</td></tr>
-                      <tr><th>向量字段</th><td>{{ detailCache[db + '::' + name].vector_field }}</td></tr>
+                      <tr><th>{{ $t('collections.stat.dim') }}</th><td>{{ detailCache[db + '::' + name].dim }}</td></tr>
+                      <tr><th>{{ $t('collections.stat.count') }}</th><td>{{ formatCount(detailCache[db + '::' + name].count) }}</td></tr>
+                      <tr><th>{{ $t('collections.stat.metric') }}</th><td>{{ detailCache[db + '::' + name].metric }}</td></tr>
+                      <tr><th>{{ $t('common.primary_field') }}</th><td>{{ detailCache[db + '::' + name].primary_field }}</td></tr>
+                      <tr><th>{{ $t('common.vector_field') }}</th><td>{{ detailCache[db + '::' + name].vector_field }}</td></tr>
                     </table>
                   </div>
                 </details>
                 <details class="collapsible" open v-if="detailCache[db + '::' + name].fields && detailCache[db + '::' + name].fields.length">
-                  <summary>字段 ({{ detailCache[db + '::' + name].fields.length }})</summary>
+                  <summary>{{ $t('collections.fields_n', { n: detailCache[db + '::' + name].fields.length }) }}</summary>
                   <div class="body">
                     <div v-for="f in detailCache[db + '::' + name].fields" :key="f.name" class="field-card">
                       <div class="field-card-header">
                         <span class="index-badge">{{ f.dtype }}</span>
                         <span class="title">{{ f.name }}</span>
-                        <span v-if="f.is_primary" class="pill success">主键</span>
-                        <span v-if="f.dim" class="pill accent">{{ f.dim }} 维</span>
+                        <span v-if="f.is_primary" class="pill success">{{ $t('collections.primary') }}</span>
+                        <span v-if="f.dim" class="pill accent">{{ $t('collections.dim_value', { dim: f.dim }) }}</span>
                       </div>
                       <div v-if="f.max_length || f.nullable || f.default_value" class="grid">
                         <div v-if="f.max_length" class="field"><label>max_length</label><div style="font-family:var(--mono);font-size:13px;">{{ f.max_length }}</div></div>
@@ -190,13 +302,16 @@ export default defineComponent({
                   </div>
                 </details>
                 <div v-if="detailCache[db + '::' + name].indexes && detailCache[db + '::' + name].indexes.length" style="margin-top:14px;">
-                  <div class="section-head"><h4 class="section-title">索引 ({{ detailCache[db + '::' + name].indexes.length }})</h4></div>
+                  <div class="section-head"><h4 class="section-title">{{ $t('collections.indexes_n', { n: detailCache[db + '::' + name].indexes.length }) }}</h4></div>
                   <div v-for="ix in detailCache[db + '::' + name].indexes" :key="ix.field_name" class="field-card" :data-index-field="ix.field_name">
                     <div class="field-card-header">
                       <span class="index-badge">{{ ix.index_type }}</span>
                       <span class="title">{{ ix.metric_type }} → {{ ix.field_name }}</span>
-                      <button class="btn sm danger" :data-index-field="ix.field_name" :data-index-action="'drop-' + ix.field_name"
-                              @click="dropIndex(name, ix.field_name)">删除</button>
+                      <busy-button class="sm" variant="danger"
+                                   :data-index-field="ix.field_name" :data-index-action="'drop-' + ix.field_name"
+                                   :busy="busyKey === 'index:' + name + ':' + ix.field_name"
+                                   :label="$t('common.delete')" :busy-label="$t('common.deleting')"
+                                   @click="dropIndex(name, ix.field_name)" />
                     </div>
                     <div v-if="Object.keys(ix.params || {}).length" class="grid">
                       <div v-for="(v, k) in ix.params" :key="k" class="field">
@@ -206,23 +321,23 @@ export default defineComponent({
                     </div>
                   </div>
                   <details class="collapsible" style="margin-top:10px;">
-                    <summary>＋ 新建索引</summary>
+                    <summary>{{ $t('collections.new_index') }}</summary>
                     <div class="body">
                       <div class="row">
-                        <label>目标字段</label>
+                        <label>{{ $t('collections.target_field') }}</label>
                         <select :data-new-index-field="detailCache[db + '::' + name].vector_field">
-                          <option :value="detailCache[db + '::' + name].vector_field">{{ detailCache[db + '::' + name].vector_field }} (向量字段)</option>
+                          <option :value="detailCache[db + '::' + name].vector_field">{{ detailCache[db + '::' + name].vector_field }} {{ $t('collections.vector_field_suffix') }}</option>
                         </select>
                       </div>
                       <div class="row split">
-                        <div class="row"><label>度量</label>
+                        <div class="row"><label>{{ $t('common.metric') }}</label>
                           <select data-new-index-metric>
                             <option value="cosine" selected>cosine</option>
                             <option value="ip">ip</option>
                             <option value="l2">l2</option>
                           </select>
                         </div>
-                        <div class="row"><label>索引类型</label>
+                        <div class="row"><label>{{ $t('collections.index_type') }}</label>
                           <select data-new-index-type>
                             <option value="HNSW" selected>HNSW</option>
                             <option value="IVF_FLAT">IVF_FLAT</option>
@@ -233,12 +348,14 @@ export default defineComponent({
                         </div>
                       </div>
                       <div class="row">
-                        <label>params <span class="hint">JSON,例如 {"M":16,"efConstruction":200}</span></label>
+                        <label>params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
                         <textarea data-new-index-params rows="2">{}</textarea>
                       </div>
                       <div class="actions">
-                        <button class="btn primary" data-new-index-submit
-                                @click="submitNewIndex(name, $event)">创建 / 重建</button>
+                        <busy-button data-new-index-submit :busy="busyKey === 'newindex:' + name"
+                                     :label="$t('collections.create_rebuild')"
+                                     :busy-label="$t('collections.creating')"
+                                     @click="submitNewIndex(name, $event)" />
                       </div>
                     </div>
                   </details>

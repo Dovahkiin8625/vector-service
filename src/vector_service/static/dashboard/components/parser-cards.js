@@ -8,6 +8,7 @@
 // the converter rebuilds on the next request.
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { api, extractApiError, t } from './app.js';
+import { StatusBanner } from './feedback.js';
 
 const PROFILES = ['standard', 'native', 'vlm'];
 
@@ -38,9 +39,14 @@ export default defineComponent({
   setup(props, { emit }) {
     // Per-profile in-flight action: 'warm' | 'evict' | false.
     const busy = ref(Object.create(null));
+    // Per-profile failure of the last warm/evict request, shown on the
+    // card that was clicked rather than in a native alert() — the action
+    // belongs to one profile, so the complaint should too.
+    const err = ref(Object.create(null));
 
     async function act(action, profile) {
       busy.value[profile] = action;
+      err.value[profile] = '';
       try {
         await api('POST', '/v1/parser/' + action, { profile });
         // Let the parent re-pull status so the card settles from the
@@ -50,7 +56,7 @@ export default defineComponent({
         const prefix = action === 'warm'
           ? t('cap.warm_failed')
           : t('cap.evict_failed');
-        alert(prefix + ': ' + extractApiError(e, 'unknown'));
+        err.value[profile] = prefix + ': ' + extractApiError(e, t('common.unknown'));
         busy.value[profile] = false;
       }
     }
@@ -69,8 +75,9 @@ export default defineComponent({
       { deep: true },
     );
 
-    return { busy, act, PROFILES, formatParams, formatBytes };
+    return { busy, err, act, PROFILES, formatParams, formatBytes };
   },
+  components: { StatusBanner },
   template: `
     <div class="cap-grid">
       <div v-for="p in PROFILES" :key="p"
@@ -119,6 +126,8 @@ export default defineComponent({
         <div v-else class="cap-body">
           <span class="model-empty">{{ $t('cap.cold_hint') }}</span>
         </div>
+
+        <status-banner v-if="err[p]" kind="error" :text="err[p]" />
 
         <div v-if="!readonly" class="model-actions">
           <button v-if="busy[p] === 'warm'" class="btn sm is-pending" disabled>

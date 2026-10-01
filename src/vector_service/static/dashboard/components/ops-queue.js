@@ -7,6 +7,7 @@
 // =====================================================================
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
+import { StatusBanner, BusyButton, askConfirm } from './feedback.js';
 import {
   enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
 } from './ops-common.js';
@@ -28,6 +29,10 @@ export default defineComponent({
     const listErr = ref('');
     const detail = ref(null);
     const detailErr = ref('');
+    // The cancel POST had no in-flight state: the button stayed live
+    // for the whole round trip and could be fired repeatedly.
+    const cancelBusy = ref(false);
+    const manualBusy = ref(false);
     let es = null;
     let timer = null;
     let started = false;
@@ -45,6 +50,14 @@ export default defineComponent({
         }
       } catch (e) { listErr.value = e.message; }
       finally { loading.value = false; }
+    }
+
+    // The list also auto-polls every 4s, so `loading` is true on its own
+    // schedule; only an operator-initiated refresh drives the button's
+    // busy state (otherwise the spinner would flash on every poll).
+    async function reload() {
+      manualBusy.value = true;
+      try { await load(); } finally { manualBusy.value = false; }
     }
 
     function setFilter(s) {
@@ -96,13 +109,29 @@ export default defineComponent({
 
     async function cancelJob() {
       const job = detail.value;
-      if (!job || TERMINAL.has(job.status)) return;
-      if (!window.confirm(t('ops.queue.cancel_confirm'))) return;
+      if (!job || TERMINAL.has(job.status) || cancelBusy.value) return;
+      // The modal names the job being cancelled and the collection it is
+      // writing into, so the operator confirms a specific job rather
+      // than answering a yes/no question about an unnamed one.
+      const confirmed = await askConfirm({
+        title: t('ops.queue.cancel_title'),
+        message: t('ops.queue.cancel_confirm'),
+        details: [
+          { label: t('common.job_id'), value: job.job_id },
+          { label: t('common.scope'), value: job.database + '/' + job.collection },
+          { label: t('ops.queue.filename'), value: job.filename || '—' },
+          { label: t('ops.queue.status'), value: statusLabel(job.status) },
+        ],
+        confirmLabel: t('ops.queue.cancel'),
+      });
+      if (!confirmed) return;
+      cancelBusy.value = true;
       detailErr.value = '';
       try {
         const { payload } = await api('POST', `/v1/jobs/${enc(job.job_id)}/cancel`);
         detail.value = payload;
       } catch (e) { detailErr.value = e.message; }
+      finally { cancelBusy.value = false; }
     }
 
     function start() {
@@ -124,11 +153,12 @@ export default defineComponent({
 
     return {
       STATUS_FILTERS, PAGE, items, total, offset, statusFilter, loading, listErr,
-      detail, detailErr,
-      load, setFilter, prevPage, nextPage, openDetail, closeDetail, cancelJob,
+      detail, detailErr, cancelBusy, manualBusy,
+      load, reload, setFilter, prevPage, nextPage, openDetail, closeDetail, cancelJob,
       formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
+  components: { StatusBanner, BusyButton },
   template: `
     <div class="ops-panel">
       <div class="section">
@@ -138,7 +168,8 @@ export default defineComponent({
             <span class="pill accent">GET /v1/jobs</span>
           </h3>
           <span class="section-sub">
-            <button class="btn sm ghost" @click="load">{{ $t('common.refresh') }}</button>
+            <busy-button class="sm" variant="ghost" :busy="manualBusy" :label="$t('common.refresh')"
+                         @click="reload" />
           </span>
         </div>
 
@@ -150,7 +181,7 @@ export default defineComponent({
           </button>
         </div>
 
-        <div v-if="listErr" class="empty error">{{ listErr }}</div>
+        <status-banner kind="error" :text="listErr" :retry="listErr ? reload : null" />
         <div v-if="loading" class="spinner"></div>
 
         <div class="data-table-wrap">
@@ -197,14 +228,14 @@ export default defineComponent({
             <span class="pill accent">SSE /v1/jobs/{id}/events</span>
           </h3>
           <span class="section-sub">
-            <button v-if="!TERMINAL.has(detail.status)" class="btn sm danger" @click="cancelJob">
-              {{ $t('ops.queue.cancel') }}
-            </button>
+            <busy-button v-if="!TERMINAL.has(detail.status)" class="sm" variant="danger"
+                         :busy="cancelBusy" :label="$t('ops.queue.cancel')"
+                         :busy-label="$t('common.deleting')" @click="cancelJob" />
             <button class="btn sm ghost" @click="closeDetail">{{ $t('common.close') }}</button>
           </span>
         </div>
 
-        <div v-if="detailErr" class="empty error">{{ detailErr }}</div>
+        <status-banner kind="error" :text="detailErr" />
 
         <div class="ops-detail-grid">
           <table class="info-table">

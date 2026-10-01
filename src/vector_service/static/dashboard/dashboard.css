@@ -718,6 +718,15 @@ input, textarea, select { font-family: inherit; color: inherit; }
   animation: spin 0.8s linear infinite;
 }
 
+/* Busy submit button (components/feedback.js). Disabled so a second
+   click cannot re-fire the request, but NOT dimmed like an unavailable
+   control — the request is in flight, not blocked. */
+.btn.is-busy {
+  opacity: 1;
+  cursor: progress;
+  font-weight: 600;
+}
+
 .model-current {
   font-family: var(--mono);
   font-size: 13px;
@@ -1380,6 +1389,100 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 }
 .empty.error { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .empty .hint { display: block; margin-top: 6px; font-size: 12px; color: var(--text-muted); }
+/* Four-state empty block (components/feedback.js). The plain `.empty`
+   stays the one-line placeholder; the component adds the state class so
+   "loading" can never look like "the collection really is empty". */
+.empty .empty-text { display: block; }
+.empty.loading { border-style: solid; }
+.empty.loading .spinner { margin-bottom: 10px; }
+.empty.idle { border-style: dashed; }
+.empty .empty-retry { margin-top: 12px; }
+
+/* ============ Inline status banner ============ */
+/* The replacement for alert(): same three outcomes, but it stays on the
+   page next to the control that produced it. */
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.banner-icon {
+  flex-shrink: 0;
+  width: 15px; height: 15px;
+  margin-top: 1px;
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  color: var(--surface-1);
+  background: var(--text-muted);
+}
+.banner-text { flex: 1; min-width: 0; word-break: break-word; }
+.banner-retry { flex-shrink: 0; align-self: center; }
+.banner.error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.banner.error .banner-icon { background: var(--danger); }
+.banner.success {
+  border-color: var(--success);
+  background: var(--success-soft);
+  color: var(--success);
+}
+.banner.success .banner-icon { background: var(--success); }
+.banner.warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.banner.warn .banner-icon { background: var(--warn); }
+.banner.info { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-dim); }
+.banner.info .banner-icon { background: var(--accent); }
+
+/* ============ App-level notice strip ============ */
+/* For failures that belong to no panel (a background model load, a poll
+   that starts failing). Sits under the topbar and stays until dismissed. */
+.notice-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.notice-bar.error { background: var(--danger-soft); color: var(--danger); border-bottom-color: var(--danger); }
+.notice-bar.error .banner-icon { background: var(--danger); }
+.notice-bar.info { background: var(--accent-soft); color: var(--accent-dim); }
+.notice-bar.info .banner-icon { background: var(--accent); }
+.notice-close {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.notice-close:hover { background: var(--surface-1); border-color: var(--border-strong); }
 
 .spinner {
   display: inline-block;
@@ -1982,6 +2085,28 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
 .modal-foot .btn { margin-left: 0; }
 .modal-foot .btn + .btn { margin-left: 8px; }
 .modal-foot .btn.primary { margin-left: auto; }
+/* A destructive confirm keeps the same right-aligned seat as primary. */
+.modal-foot .btn.danger { margin-left: auto; }
+
+/* Confirmation modal (components/feedback.js): the message states the
+   action, the impact table states what it destroys. */
+.confirm-msg {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.confirm-impact-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.confirm-impact .info-table th { width: 120px; }
 
 @media (max-width: 1280px) {
   .model-grid { grid-template-columns: repeat(2, 1fr); }

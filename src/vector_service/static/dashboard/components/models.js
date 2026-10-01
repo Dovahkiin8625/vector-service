@@ -1,6 +1,7 @@
 // Models registry panel: lists every registered model with load/unload.
 import { defineComponent, onMounted, ref } from '../vue.esm-browser.prod.js';
 import { store, api, extractApiError, applyModelsData, t } from './app.js';
+import { notify, StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 const FAMILY_LABELS = {
   embedder: 'embedder', image_embedder: 'image_embedder',
@@ -45,14 +46,21 @@ export default defineComponent({
   name: 'ModelsPanel',
   setup() {
     const refreshing = ref(false);
+    // The list refresh used to fail silently: an empty grid is also what
+    // "no models registered" looks like, so the panel must say which one
+    // it is.
+    const loadErr = ref('');
     async function refresh() {
       refreshing.value = true;
+      loadErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/models');
         // Reconcile (busy flags, failure alerts, dim) in ONE place shared
         // with the background poller in app.js.
         applyModelsData((payload && payload.data) || []);
-      } catch (_e) { /* logged */ }
+      } catch (e) {
+        loadErr.value = t('models.load_failed') + ': ' + extractApiError(e, t('common.unknown'));
+      }
       refreshing.value = false;
     }
     async function lifecycle(verb, id) {
@@ -71,15 +79,20 @@ export default defineComponent({
         await refresh();
       } catch (e) {
         // Request itself failed (404/409/5xx) — no background state will
-        // ever settle this card, so release the spinner here.
+        // ever settle this card, so release the spinner here. The card
+        // has no error slot of its own (its `load_error` line belongs to
+        // a server-side load failure, not to a rejected request), so the
+        // failure goes to the app-level notice bar — which is also where
+        // a background poll failure for this panel would land.
         store.models.busy[id] = false;
         const label = verb === 'load' ? t('models.load_failed') : t('models.unload_failed');
-        alert(label + ': ' + extractApiError(e, 'unknown'));
+        notify('error', id + ' — ' + label + ': ' + extractApiError(e, t('common.unknown')));
       }
     }
     onMounted(refresh);
-    return { store, refresh, lifecycle, refreshing };
+    return { store, refresh, lifecycle, refreshing, loadErr };
   },
+  components: { StatusBanner, BusyButton, EmptyState },
   template: `
     <div>
       <div class="section">
@@ -88,13 +101,16 @@ export default defineComponent({
           <span class="section-sub">{{ $t('common.model_id_ops') }}</span>
         </div>
         <div class="actions">
-          <button class="btn primary" :disabled="refreshing" @click="refresh">{{ $t('common.refresh') }}</button>
+          <busy-button :busy="refreshing" :label="$t('common.refresh')"
+                       :busy-label="$t('models.refreshing')" @click="refresh" />
           <button class="btn sm" @click="store.models.autoRefresh = !store.models.autoRefresh">
-            {{ $t('models.auto_refresh_label') }} {{ store.models.autoRefresh ? '开' : '关' }}
+            {{ $t('models.auto_refresh_label') }} {{ $t(store.models.autoRefresh ? 'common.on' : 'common.off') }}
           </button>
         </div>
+        <status-banner kind="error" :text="loadErr" :retry="loadErr ? refresh : null" />
         <div class="model-grid" id="models-grid">
-          <div v-if="!store.models.data.length" class="empty">{{ $t('common.no_models') }}</div>
+          <empty-state v-if="!loadErr && !store.models.data.length" state="empty"
+                       :text="$t('common.no_models')" />
           <div v-for="m in store.models.data" :key="m.id" :data-id="m.id"
                :class="['model-card', m.loaded ? 'loaded' : '',
                         (isLoading(m) || isUnloading(m)) ? 'busy' : '',
@@ -113,7 +129,7 @@ export default defineComponent({
             <div class="model-current">
               <span v-if="m.loaded" class="dim">{{ m.dimensions }} {{ $t('topbar.dim_unit') }}</span>
               <span v-else-if="!isLoading(m) && m.load_status === 'failed'" class="model-load-error" :title="m.load_error">{{ m.load_error }}</span>
-              <span v-else-if="!isLoading(m)" class="model-empty">{{ $t('common.unloaded') }} - no instance</span>
+              <span v-else-if="!isLoading(m)" class="model-empty">{{ $t('common.no_instance') }}</span>
               <span v-if="m.loaded && m.model_info && deviceKind(m)"
                     :class="['device-chip', isGpu(m) ? 'gpu' : 'cpu']"
                     :title="deviceTitle(m)">
@@ -160,7 +176,7 @@ export default defineComponent({
     </div>
   `,
   methods: {
-    familyLabel(type) { return FAMILY_LABELS[type] || type || 'unknown'; },
+    familyLabel(type) { return FAMILY_LABELS[type] || type || this.$t('common.unknown'); },
     formatParams,
     formatBytes,
     formatDuration,
@@ -185,8 +201,10 @@ export default defineComponent({
       if (!info) return '';
       const kind = this.deviceKind(m);
       return [
-        info.device ? (kind ? kind + ' · ' : '') + 'device: ' + info.device : '',
-        info.dtype ? 'dtype: ' + info.dtype : '',
+        info.device
+          ? (kind ? kind + ' · ' : '') + this.$t('models.device_label') + ': ' + info.device
+          : '',
+        info.dtype ? this.$t('models.dtype_label') + ': ' + info.dtype : '',
       ].filter(Boolean).join('\n');
     },
     // A load is visually in flight when the SERVER says 'loading' OR when

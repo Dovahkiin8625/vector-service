@@ -6,7 +6,8 @@
 // consumed incrementally as newline-delimited JSON events —
 // stage / progress then a terminal result/error event.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
-import { store, api, enc, extractApiError, t } from './app.js';
+import { api, enc, extractApiError, t } from './app.js';
+import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 import { renderMarkdown } from './markdown.js';
 import ParserProfileCards from './parser-cards.js';
 
@@ -66,9 +67,11 @@ function formatBytes(n) {
   return v.toFixed(v >= 100 ? 0 : 1) + ' ' + units[i];
 }
 function formatDuration(ms) {
+  const sec = t('common.seconds');
   const s = ms / 1000;
-  if (s < 60) return s.toFixed(1) + ' s';
-  return Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s';
+  if (s < 60) return s.toFixed(1) + ' ' + sec;
+  return Math.floor(s / 60) + ' ' + t('common.minutes') + ' '
+    + Math.round(s % 60) + ' ' + sec;
 }
 function formatCount(n) {
   return n == null ? '—' : Number(n).toLocaleString();
@@ -99,18 +102,45 @@ function legacyCopy(text) {
 
 export default defineComponent({
   name: 'KnowledgeBasePanel',
-  components: { ParserProfileCards },
+  components: { StatusBanner, BusyButton, EmptyState, ParserProfileCards },
   props: { view: { type: String, default: 'parse' } },
   setup(props) {
+    // Run state of the last parse / chunk action. `status` is an internal
+    // value ('ok' / 'error'); only the localized rendering leaves the panel.
     const status = ref('');
+    const statusMsg = ref('');
+    // Form-level complaint (no file picked, no database selected). These
+    // used to be native alert() calls — a blocking dialog for something
+    // the panel can say inline next to the button that needs fixing.
+    const formErr = ref('');
+    // Selection load failures, previously swallowed: the db/model
+    // dropdowns just came up empty with no explanation.
+    const dbsErr = ref('');
+    const modelsErr = ref('');
+    // Same for the Docling engine status: a failed /v1/system/status used
+    // to leave the warm/evict cards silently showing stale (or no) data.
+    const parserErr = ref('');
+    // The chunk submit had no in-flight state at all, so a slow chunk
+    // run looked like a dead button and could be double-submitted.
+    const chunkBusy = ref(false);
+    // Replaces the old "last op: OK" footer line.
+    const statusBannerKind = computed(() => (status.value === 'error' ? 'error' : 'success'));
+    const statusBannerText = computed(() => {
+      if (status.value === 'error') return statusMsg.value;
+      if (status.value === 'ok') return statusMsg.value || t('common.status.ok');
+      return '';
+    });
     // Docling per-profile status (warm/evict cards); pulled from the
     // same aggregate payload as the overview.
     const parserStatus = ref(null);
     async function refreshParserStatus() {
+      parserErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/system/status');
         if (payload) parserStatus.value = payload.parser;
-      } catch (_e) { /* logged */ }
+      } catch (e) {
+        parserErr.value = t('kb.parser_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     const parseFile = ref(null);
     const parseResult = ref(null);
@@ -282,6 +312,7 @@ export default defineComponent({
     }
 
     async function refreshDbs() {
+      dbsErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/databases');
         dbs.value = (payload && payload.databases) || [];
@@ -290,9 +321,13 @@ export default defineComponent({
         if (db.value && !dbs.value.includes(db.value) && dbs.value.length) {
           db.value = dbs.value[0];
         }
-      } catch (_e) {}
+      } catch (e) {
+        dbs.value = [];
+        dbsErr.value = t('kb.dbs_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     async function refreshModels() {
+      modelsErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/models');
         models.value = ((payload && payload.data) || []).filter(m => m.type === 'embedder');
@@ -300,7 +335,10 @@ export default defineComponent({
           const loaded = models.value.find(m => m.loaded);
           model.value = (loaded || models.value[0]).id;
         }
-      } catch (_e) {}
+      } catch (e) {
+        models.value = [];
+        modelsErr.value = t('kb.models_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     onMounted(() => { refreshDbs(); refreshModels(); refreshParserStatus(); });
     // The panel stays mounted under v-show, so onMounted only fires
@@ -327,7 +365,8 @@ export default defineComponent({
 
     async function doParse() {
       if (parseBusy.value) return;
-      if (!parseFile.value) { alert(t('parse.err.no_file')); return; }
+      formErr.value = '';
+      if (!parseFile.value) { formErr.value = t('parse.err.no_file'); return; }
 
       const form = new FormData();
       form.append('file', parseFile.value);
@@ -366,6 +405,7 @@ export default defineComponent({
         } else {
           parseResult.value = res.payload;
           status.value = 'ok';
+          statusMsg.value = '';
         }
       } catch (e) {
         parseError.value = {
@@ -389,6 +429,10 @@ export default defineComponent({
     }
 
     async function doChunk() {
+      if (chunkBusy.value) return;
+      chunkBusy.value = true;
+      status.value = '';
+      statusMsg.value = '';
       try {
         // Field names mirror ChunkRequest in api/chunk.py.
         const { payload } = await api('POST', '/v1/chunk', {
@@ -401,7 +445,16 @@ export default defineComponent({
         });
         chunkResults.value = (payload && payload.chunks) || [];
         status.value = 'ok';
-      } catch (e) { status.value = 'error: ' + extractApiError(e, 'unknown'); }
+        // The count is the result the operator is looking for, so it
+        // goes in the outcome banner rather than a bare "OK".
+        statusMsg.value = t('kb.chunks_n', { n: chunkResults.value.length });
+      } catch (e) {
+        chunkResults.value = [];
+        status.value = 'error';
+        statusMsg.value = extractApiError(e, t('common.unknown'));
+      } finally {
+        chunkBusy.value = false;
+      }
     }
 
     function onIngestFile(ev) {
@@ -587,8 +640,9 @@ export default defineComponent({
 
     async function doIngest() {
       if (ingestBusy.value) return;
-      if (!db.value) { alert(t('ingest.err.no_db')); return; }
-      if (!ingestFile.value) { alert(t('ingest.err.no_file')); return; }
+      formErr.value = '';
+      if (!db.value) { formErr.value = t('ingest.err.no_db'); return; }
+      if (!ingestFile.value) { formErr.value = t('ingest.err.no_file'); return; }
 
       const size = Number(chunkParams.value.size);
       const overlap = Number(chunkParams.value.overlap);
@@ -698,7 +752,8 @@ export default defineComponent({
       }
     }
 
-    return { status, parserStatus, refreshParserStatus,
+    return { status, statusBannerKind, statusBannerText, parserStatus, refreshParserStatus,
+             formErr, dbsErr, modelsErr, parserErr, chunkBusy,
              parseFile, parseResult, parseCopied, chunkSize, chunkOverlap, chunkMd, chunkResults,
              chunkStrategy, chunkPercentile, chunkAddContext,
              dbs, db, models, model, ingestFile, chunkParams, metadata, ingestResult,
@@ -716,20 +771,23 @@ export default defineComponent({
              viewChunks, viewTotal, viewOffset, viewPageSize,
              viewDocId, viewNameKw, viewBusy, viewError, viewNoColl,
              viewPage, viewPages, copiedChunkDoc,
+             refreshDbs, refreshModels,
              loadChunks, chunksQuery, chunksReset,
              chunksFirst, chunksPrev, chunksNext, chunksLast, copyChunkDoc };
   },
   template: `
     <div>
       <div class="section" v-show="view === 'parse'">
-        <div class="section-head"><h3 class="section-title">parse <span class="pill accent">POST /v1/parse/stream</span></h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('kb.parse_title') }} <span class="pill accent">POST /v1/parse/stream</span></h3></div>
 
         <!-- Docling engine: per-profile warm / cache evict, plus the
              model components and resources each warm profile holds. -->
         <h4 class="cap-group-title">{{ $t('parse.engine_status') }}</h4>
+        <status-banner kind="error" :text="parserErr"
+                       :retry="parserErr ? refreshParserStatus : null" />
         <parser-profile-cards :parser="parserStatus" @changed="refreshParserStatus" />
 
-        <div class="row"><label>file</label>
+        <div class="row"><label>{{ $t('kb.file') }}</label>
           <input type="file" id="parse-file" :accept="INGEST_ACCEPT" :disabled="parseBusy" @change="onParseFile" />
           <div v-if="parseFile" class="ingest-file-meta">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
@@ -758,13 +816,14 @@ export default defineComponent({
                : $t('parse.upload') }}
           </button>
         </div>
+        <status-banner kind="error" :text="formErr" />
 
         <!-- In-flight: real upload byte % then per-page parse progress. -->
         <div v-if="parseBusy" class="response ingest-progress" id="parse-progress">
           <div class="ingest-progress-head">
             <span class="spinner"></span>
             <span class="ingest-phase-label">{{ parseStage === 'uploading' ? $t('parse.uploading') : $t('parse.parsing') }}</span>
-            <span class="ingest-elapsed">{{ parseElapsed.toFixed(1) }} s</span>
+            <span class="ingest-elapsed">{{ parseElapsed.toFixed(1) }} {{ $t('common.seconds') }}</span>
           </div>
           <div class="bar">
             <span v-if="parseStage === 'uploading'" :style="{ width: parseUploadPct + '%' }"></span>
@@ -805,17 +864,17 @@ export default defineComponent({
             <div class="seg-toggle" role="tablist">
               <button type="button" class="btn sm" id="btn-parse-source"
                       :class="{ primary: parseView === 'source' }"
-                      @click="parseView = 'source'">source</button>
+                      @click="parseView = 'source'">{{ $t('kb.source') }}</button>
               <button type="button" class="btn sm" id="btn-parse-preview"
                       :class="{ primary: parseView === 'preview' }"
-                      @click="parseView = 'preview'">preview</button>
+                      @click="parseView = 'preview'">{{ $t('kb.preview') }}</button>
             </div>
             <span class="head-actions">
               <button class="btn sm" id="btn-parse-copy" @click="copyParseMarkdown">
-                {{ parseCopied ? 'copied' : 'copy' }}
+                {{ parseCopied ? $t('kb.copied') : $t('kb.copy') }}
               </button>
               <button class="btn sm" id="btn-parse-download" @click="downloadParseMarkdown">
-                download .md
+                {{ $t('kb.download_md') }}
               </button>
             </span>
           </div>
@@ -837,9 +896,9 @@ export default defineComponent({
       </div>
 
       <div class="section" v-show="view === 'chunk'">
-        <div class="section-head"><h3 class="section-title">chunk <span class="pill accent">POST /v1/chunk</span></h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('kb.chunk_title') }} <span class="pill accent">POST /v1/chunk</span></h3></div>
         <div class="row split">
-          <div class="row"><label>strategy</label>
+          <div class="row"><label>{{ $t('kb.strategy') }}</label>
             <select id="chunk-strategy" v-model="chunkStrategy">
               <option v-for="s in STRATEGIES" :key="s.value" :value="s.value">
                 {{ $t(s.labelKey) }}
@@ -847,14 +906,14 @@ export default defineComponent({
             </select>
           </div>
           <div class="row" v-if="chunkStrategy === 'semantic'">
-            <label>breakpoint %</label>
+            <label>{{ $t('kb.breakpoint') }}</label>
             <input type="number" id="chunk-percentile" min="50" max="100"
                    v-model.number="chunkPercentile" />
           </div>
         </div>
         <div class="row split">
-          <div class="row"><label>chunk size</label><input type="number" id="chunk-size" v-model.number="chunkSize" /></div>
-          <div class="row"><label>overlap</label><input type="number" id="chunk-overlap" v-model.number="chunkOverlap" /></div>
+          <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="chunk-size" v-model.number="chunkSize" /></div>
+          <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="chunk-overlap" v-model.number="chunkOverlap" /></div>
         </div>
         <div class="row checkbox-row">
           <label class="checkbox-label">
@@ -862,16 +921,19 @@ export default defineComponent({
             {{ $t('chunk.add_context') }}
           </label>
         </div>
-        <div class="row"><label>markdown text</label><textarea id="chunk-md" rows="6" v-model="chunkMd"></textarea></div>
-        <div class="actions"><button class="btn primary" id="btn-chunk" @click="doChunk">chunk</button></div>
+        <div class="row"><label>{{ $t('kb.markdown') }}</label><textarea id="chunk-md" rows="6" v-model="chunkMd"></textarea></div>
+        <div class="actions">
+          <busy-button id="btn-chunk" :busy="chunkBusy" :label="$t('kb.chunk_btn')"
+                       :busy-label="$t('kb.chunking')" @click="doChunk" />
+        </div>
         <div v-if="chunkResults.length" class="response" id="chunk-results">
-          <div class="response-head"><span>chunks: {{ chunkResults.length }}</span></div>
+          <div class="response-head"><span>{{ $t('kb.chunks_n', { n: chunkResults.length }) }}</span></div>
           <div v-for="(c, i) in chunkResults" :key="i" class="field-card">
             <div class="field-card-header">
               <span class="index-badge">#{{ i + 1 }}</span>
-              <span class="title">{{ c.text.length }} chars · {{ c.token_count }} tokens</span>
+              <span class="title">{{ $t('kb.chars_tokens', { chars: c.text.length, tokens: c.token_count }) }}</span>
               <span v-if="c.section_header" class="hint">{{ c.section_header }}</span>
-              <span v-if="c.page_number != null" class="hint">p.{{ c.page_number }}</span>
+              <span v-if="c.page_number != null" class="hint">{{ $t('kb.page', { n: c.page_number }) }}</span>
             </div>
             <div v-if="c.context" class="chunk-context" id="chunk-context-text">
               <span class="hint">{{ $t('chunk.context_prefix') }}</span>{{ c.context }}
@@ -882,11 +944,16 @@ export default defineComponent({
       </div>
 
       <div class="section" v-show="view === 'ingest'">
-        <div class="section-head"><h3 class="section-title">ingest <span class="pill accent">POST /v1/ingest/stream</span></h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('kb.ingest_title') }} <span class="pill accent">POST /v1/ingest/stream</span></h3></div>
+        <!-- Load failures for the two dropdowns below, previously
+             swallowed: an empty database list looked like "no databases
+             exist" rather than "the request failed". -->
+        <status-banner kind="error" :text="dbsErr" :retry="dbsErr ? refreshDbs : null" />
+        <status-banner kind="error" :text="modelsErr" :retry="modelsErr ? refreshModels : null" />
         <!-- 1 · source file -->
         <div class="form-group">
           <div class="form-group-title"><span class="form-group-step">1</span>{{ $t('ingest.group.file') }}</div>
-          <div class="row"><label>file</label>
+          <div class="row"><label>{{ $t('kb.file') }}</label>
             <input type="file" id="ingest-file" :accept="INGEST_ACCEPT" :disabled="ingestBusy" @change="onIngestFile" />
             <div v-if="ingestFile" class="ingest-file-meta">
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
@@ -918,7 +985,7 @@ export default defineComponent({
         <div class="form-group">
           <div class="form-group-title"><span class="form-group-step">3</span>{{ $t('ingest.group.chunk') }}</div>
           <div class="row split">
-            <div class="row"><label>strategy</label>
+            <div class="row"><label>{{ $t('kb.strategy') }}</label>
               <select id="ingest-strategy" v-model="chunkParams.strategy" :disabled="ingestBusy">
                 <option v-for="s in STRATEGIES" :key="s.value" :value="s.value">
                   {{ $t(s.labelKey) }}
@@ -926,14 +993,14 @@ export default defineComponent({
               </select>
             </div>
             <div class="row" v-if="chunkParams.strategy === 'semantic'">
-              <label>breakpoint %</label>
+              <label>{{ $t('kb.breakpoint') }}</label>
               <input type="number" id="ingest-percentile" min="50" max="100"
                      v-model.number="chunkParams.percentile" :disabled="ingestBusy" />
             </div>
           </div>
           <div class="row split">
-            <div class="row"><label>chunk size</label><input type="number" id="ingest-size" v-model.number="chunkParams.size" :disabled="ingestBusy" /></div>
-            <div class="row"><label>overlap</label><input type="number" id="ingest-overlap" v-model.number="chunkParams.overlap" :disabled="ingestBusy" /></div>
+            <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="ingest-size" v-model.number="chunkParams.size" :disabled="ingestBusy" /></div>
+            <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="ingest-overlap" v-model.number="chunkParams.overlap" :disabled="ingestBusy" /></div>
           </div>
           <div class="row checkbox-row">
             <label class="checkbox-label">
@@ -948,13 +1015,13 @@ export default defineComponent({
         <div class="form-group">
           <div class="form-group-title"><span class="form-group-step">4</span>{{ $t('ingest.group.dest') }}</div>
           <div class="row split">
-            <div class="row"><label>database</label>
+            <div class="row"><label>{{ $t('common.database') }}</label>
               <select id="ingest-db" v-model="db" :disabled="ingestBusy">
                 <option v-if="!dbs.length" value="" disabled>{{ $t('ingest.no_dbs') }}</option>
                 <option v-for="d in dbs" :key="d" :value="d">{{ d }}</option>
               </select>
             </div>
-            <div class="row"><label>embed model</label>
+            <div class="row"><label>{{ $t('kb.embed_model') }}</label>
               <select id="ingest-model" v-model="model" :disabled="ingestBusy">
                 <option v-for="mm in models" :key="mm.id" :value="mm.id">
                   {{ mm.id }}{{ mm.loaded ? ' · ' + $t('common.loaded') : '' }}
@@ -962,7 +1029,7 @@ export default defineComponent({
               </select>
             </div>
           </div>
-          <div class="row"><label>metadata (JSON) <span class="hint">{{ $t('ingest.metadata_hint') }}</span></label>
+          <div class="row"><label>{{ $t('kb.metadata') }} <span class="hint">{{ $t('ingest.metadata_hint') }}</span></label>
             <textarea id="ingest-metadata" rows="2" v-model="metadata" :disabled="ingestBusy">{}</textarea>
           </div>
         </div>
@@ -974,6 +1041,7 @@ export default defineComponent({
                : $t('ingest.upload') }}
           </button>
         </div>
+        <status-banner kind="error" :text="formErr" />
 
         <!-- In-flight: 5-stage stepper. Upload has a real byte %, the
              parse stage has a real per-page % (progress events); the
@@ -983,7 +1051,7 @@ export default defineComponent({
           <div class="ingest-progress-head">
             <span class="spinner"></span>
             <span class="ingest-phase-label">{{ $t(stageLabelKey(ingestStage)) }}</span>
-            <span class="ingest-elapsed">{{ ingestElapsed.toFixed(1) }} s</span>
+            <span class="ingest-elapsed">{{ ingestElapsed.toFixed(1) }} {{ $t('common.seconds') }}</span>
           </div>
           <ol class="ingest-stages">
             <li v-for="(s, i) in STAGES" :key="s.key"
@@ -1091,10 +1159,10 @@ export default defineComponent({
       </div>
 
       <div class="section" v-show="view === 'ingested'">
-        <div class="section-head"><h3 class="section-title">chunks <span class="pill accent">POST /v1/databases/&#123;db&#125;/collections/ingest/rows</span></h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('kb.chunks_title') }} <span class="pill accent">POST /v1/databases/&#123;db&#125;/collections/ingest/rows</span></h3></div>
 
         <div class="row split">
-          <div class="row"><label>database</label>
+          <div class="row"><label>{{ $t('common.database') }}</label>
             <select id="chunks-db" v-model="db" :disabled="viewBusy">
               <option v-if="!dbs.length" value="" disabled>{{ $t('ingest.no_dbs') }}</option>
               <option v-for="d in dbs" :key="d" :value="d">{{ d }}</option>
@@ -1117,9 +1185,8 @@ export default defineComponent({
           </div>
         </div>
         <div class="actions">
-          <button class="btn primary" id="btn-chunks-query" :disabled="viewBusy" @click="chunksQuery">
-            <span v-if="viewBusy" class="btn-spinner"></span>{{ $t('chunks.query') }}
-          </button>
+          <busy-button id="btn-chunks-query" :busy="viewBusy" :label="$t('chunks.query')"
+                       :busy-label="$t('chunks.running')" @click="chunksQuery" />
           <button class="btn" id="btn-chunks-reset" :disabled="viewBusy" @click="chunksReset">
             {{ $t('chunks.reset') }}
           </button>
@@ -1131,15 +1198,16 @@ export default defineComponent({
             <span v-if="viewBusy" class="spinner"></span>
           </div>
 
-          <div v-if="viewNoColl" class="empty" id="chunks-no-coll">
-            {{ $t('chunks.no_collection') }}
-          </div>
-          <div v-else-if="viewError" class="empty" id="chunks-error">
-            {{ viewError }}
-          </div>
-          <div v-else-if="!viewChunks.length && !viewBusy" class="empty" id="chunks-empty">
-            {{ $t('chunks.no_match') }}
-          </div>
+          <!-- Four states: the missing-collection case and the failed
+               case used to share the plain "no match" styling, so a
+               broken query looked like an empty collection. -->
+          <empty-state v-if="viewNoColl" id="chunks-no-coll" state="empty"
+                       :text="$t('chunks.no_collection')" />
+          <empty-state v-else-if="viewError" id="chunks-error" state="error" :text="viewError"
+                       :retry="loadChunks" />
+          <empty-state v-else-if="viewBusy && !viewChunks.length" state="loading" />
+          <empty-state v-else-if="!viewChunks.length" id="chunks-empty" state="empty"
+                       :text="$t('chunks.no_match')" />
 
           <template v-else>
             <div class="kb-result" id="chunks-stats">
@@ -1151,9 +1219,9 @@ export default defineComponent({
             <div v-for="it in viewChunks" :key="it.id" class="field-card">
               <div class="field-card-header">
                 <span class="index-badge">#{{ it.fields && it.fields.chunk_index }}</span>
-                <span class="title">{{ (it.fields && it.fields.text ? it.fields.text.length : 0) }} chars · {{ it.fields && it.fields.token_count }} tokens</span>
+                <span class="title">{{ $t('kb.chars_tokens', { chars: (it.fields && it.fields.text ? it.fields.text.length : 0), tokens: it.fields && it.fields.token_count }) }}</span>
                 <span v-if="it.fields && it.fields.section_header" class="hint">{{ it.fields.section_header }}</span>
-                <span v-if="it.fields && it.fields.page_number != null" class="hint">p.{{ it.fields.page_number }}</span>
+                <span v-if="it.fields && it.fields.page_number != null" class="hint">{{ $t('kb.page', { n: it.fields.page_number }) }}</span>
                 <span v-if="it.fields && it.fields.filename" class="hint">{{ it.fields.filename }}</span>
               </div>
               <pre class="code-pane">{{ (it.fields && it.fields.text) || '' }}</pre>
@@ -1168,17 +1236,19 @@ export default defineComponent({
             </div>
 
             <div class="pager" id="chunks-pager">
-              <button class="btn sm" id="btn-chunks-first" :disabled="viewPage <= 1" @click="chunksFirst">« first</button>
-              <button class="btn sm" id="btn-chunks-prev" :disabled="viewPage <= 1" @click="chunksPrev">‹ prev</button>
-              <span class="info">{{ viewOffset + 1 }}-{{ viewOffset + viewChunks.length }} / {{ viewTotal }} · page {{ viewPage }} of {{ viewPages }}</span>
-              <button class="btn sm" id="btn-chunks-next" :disabled="viewPage >= viewPages" @click="chunksNext">next ›</button>
-              <button class="btn sm" id="btn-chunks-last" :disabled="viewPage >= viewPages" @click="chunksLast">last »</button>
+              <button class="btn sm" id="btn-chunks-first" :disabled="viewPage <= 1 || viewBusy" @click="chunksFirst">« {{ $t('common.first') }}</button>
+              <button class="btn sm" id="btn-chunks-prev" :disabled="viewPage <= 1 || viewBusy" @click="chunksPrev">‹ {{ $t('common.prev') }}</button>
+              <span class="info">{{ $t('kb.pager_info', { from: viewOffset + 1, to: viewOffset + viewChunks.length, total: viewTotal, page: viewPage, pages: viewPages }) }}</span>
+              <button class="btn sm" id="btn-chunks-next" :disabled="viewPage >= viewPages || viewBusy" @click="chunksNext">{{ $t('common.next') }} ›</button>
+              <button class="btn sm" id="btn-chunks-last" :disabled="viewPage >= viewPages || viewBusy" @click="chunksLast">{{ $t('common.last') }} »</button>
             </div>
           </template>
         </div>
       </div>
 
-      <div v-if="status" class="empty hint">status: {{ status }}</div>
+      <!-- Replaces the "last op: OK" line, which reported the word OK
+           and nothing else — including for a failed chunk run. -->
+      <status-banner :kind="statusBannerKind" :text="statusBannerText" />
     </div>
   `,
 });

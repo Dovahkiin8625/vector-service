@@ -9,6 +9,7 @@
 // =====================================================================
 import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
+import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 import {
   enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
   DEFAULT_SCOPE,
@@ -28,6 +29,10 @@ export default defineComponent({
     const job = ref(null);
     const indexRef = ref(null);
     const promoted = ref(null);
+    // Promote and the manual gate refresh had no in-flight state: both
+    // could be fired repeatedly while the previous call was still out.
+    const promoting = ref(false);
+    const refreshing = ref(false);
 
     const gates = ref([]);
     const checks = ref([]);
@@ -63,16 +68,31 @@ export default defineComponent({
     }
 
     async function submit() {
-      if (!window.confirm(t('ops.reindex.confirm'))) return;
+      if (submitting.value) return;
+      const body = {
+        embed_model: embedModel.value || null,
+        canary_percent: Number(canaryPercent.value) || 0,
+        batch_size: Number(batchSize.value) || 64,
+      };
+      // The modal restates the request body that is about to be sent, so
+      // the operator confirms the actual scope/canary/model rather than
+      // answering an unqualified "rebuild this index?".
+      const confirmed = await askConfirm({
+        title: t('ops.reindex.confirm'),
+        message: t('ops.reindex.confirm'),
+        details: [
+          { label: t('common.database'), value: db.value },
+          { label: t('common.collection'), value: coll.value },
+          { label: t('ops.reindex.canary_percent'), value: String(body.canary_percent) },
+          { label: t('ops.reindex.embed_model'), value: body.embed_model || t('ops.reindex.embed_keep') },
+        ],
+        confirmLabel: t('ops.reindex.submit'),
+      });
+      if (!confirmed) return;
       submitting.value = true;
       formErr.value = '';
       promoted.value = null;
       try {
-        const body = {
-          embed_model: embedModel.value || null,
-          canary_percent: Number(canaryPercent.value) || 0,
-          batch_size: Number(batchSize.value) || 64,
-        };
         const { payload } = await api('POST', `${scopePath()}/reindex`, body);
         indexRef.value = payload.index_ref;
         await loadJob(payload.job_id);
@@ -82,6 +102,7 @@ export default defineComponent({
     }
 
     async function loadGates() {
+      refreshing.value = true;
       gateErr.value = '';
       try {
         const q = `/v1/evaluation/gates?database=${enc(db.value)}&collection=${enc(coll.value)}`;
@@ -97,10 +118,29 @@ export default defineComponent({
           checks.value = [];
         }
       } catch (e) { gateErr.value = e.message; }
+      finally { refreshing.value = false; }
     }
 
     async function promote() {
-      if (!window.confirm(t('ops.reindex.promote_confirm'))) return;
+      if (promoting.value) return;
+      const gate = gates.value[0] || null;
+      // Promotion retires the currently active index and makes the
+      // candidate live, so the modal names both the gate being cleared
+      // and the run that produced the candidate.
+      const confirmed = await askConfirm({
+        title: t('ops.reindex.promote_title'),
+        message: t('ops.reindex.promote_confirm'),
+        details: [
+          { label: t('common.database'), value: db.value },
+          { label: t('common.collection'), value: coll.value },
+          { label: t('common.gate_id'), value: gate ? gate.gate_id : '—' },
+          { label: t('common.candidate_ref'), value: latestCheck.value ? latestCheck.value.candidate_ref : '—' },
+          { label: t('common.run_id'), value: (latestCheck.value && latestCheck.value.run_id) || '—' },
+        ],
+        confirmLabel: t('ops.reindex.promote'),
+      });
+      if (!confirmed) return;
+      promoting.value = true;
       gateErr.value = '';
       try {
         const { payload } = await api('POST', `${scopePath()}/reindex/promote`);
@@ -108,6 +148,7 @@ export default defineComponent({
         stopTimer();
         await loadGates();
       } catch (e) { gateErr.value = e.message; }
+      finally { promoting.value = false; }
     }
 
     function start() {
@@ -126,11 +167,13 @@ export default defineComponent({
     return {
       db, coll, embedModel, canaryPercent, batchSize,
       submitting, formErr, job, indexRef, promoted,
+      promoting, refreshing,
       gates, checks, gateErr, latestCheck,
       submit, loadGates, promote,
       formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
+  components: { StatusBanner, BusyButton, EmptyState },
   template: `
     <div class="ops-panel">
       <div class="section">
@@ -168,13 +211,11 @@ export default defineComponent({
           </div>
         </div>
 
-        <div v-if="formErr" class="empty error">{{ formErr }}</div>
+        <status-banner kind="error" :text="formErr" />
 
         <div class="actions">
-          <button class="btn primary" :disabled="submitting" @click="submit">
-            <span v-if="submitting" class="btn-spinner"></span>
-            {{ $t('ops.reindex.submit') }}
-          </button>
+          <busy-button :busy="submitting" :label="$t('ops.reindex.submit')"
+                       :busy-label="$t('ops.reindex.submitting')" @click="submit" />
         </div>
       </div>
 
@@ -198,25 +239,27 @@ export default defineComponent({
         <div class="section-head">
           <h3 class="section-title">{{ $t('ops.reindex.gate') }}</h3>
           <span class="section-sub">
-            <button class="btn sm ghost" @click="loadGates">{{ $t('common.refresh') }}</button>
+            <busy-button class="sm" variant="ghost" :busy="refreshing"
+                         :label="$t('common.refresh')"
+                         :busy-label="$t('ops.reindex.refreshing')" @click="loadGates" />
           </span>
         </div>
 
-        <div v-if="gateErr" class="empty error">{{ gateErr }}</div>
+        <status-banner kind="error" :text="gateErr"
+                       :retry="gateErr ? loadGates : null" />
 
-        <div v-if="!gates.length" class="empty">
-          {{ $t('ops.reindex.no_gate') }}
-          <span class="hint">{{ $t('ops.reindex.no_gate_hint') }}</span>
-        </div>
+        <empty-state v-if="!gateErr && !gates.length" state="empty"
+                     :text="$t('ops.reindex.no_gate')"
+                     :hint="$t('ops.reindex.no_gate_hint')" />
 
-        <template v-else>
+        <template v-else-if="gates.length">
           <table class="info-table ops-gate-meta">
             <tr><th>{{ $t('common.gate_id') }}</th><td class="ops-mono">{{ gates[0].gate_id }}</td></tr>
             <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ gates[0].set_id }}</td></tr>
             <tr><th>{{ $t('common.baseline_run_id') }}</th><td class="ops-mono">{{ gates[0].baseline_run_id || '—' }}</td></tr>
           </table>
 
-          <div v-if="!latestCheck" class="empty">{{ $t('ops.reindex.no_check') }}</div>
+          <empty-state v-if="!latestCheck" state="empty" :text="$t('ops.reindex.no_check')" />
           <div v-else class="ops-check-card">
             <div class="ops-card-title">
               <span class="ops-mono">{{ latestCheck.check_id }}</span>
@@ -230,7 +273,8 @@ export default defineComponent({
           </div>
 
           <div class="actions">
-            <button class="btn primary" @click="promote">{{ $t('ops.reindex.promote') }}</button>
+            <busy-button :busy="promoting" :label="$t('ops.reindex.promote')"
+                         :busy-label="$t('ops.reindex.promoting')" @click="promote" />
           </div>
           <p class="ops-note">{{ $t('ops.reindex.promote_hint') }}</p>
         </template>

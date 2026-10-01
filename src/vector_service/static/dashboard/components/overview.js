@@ -1,6 +1,7 @@
 // Overview panel: service health + unified loaded-capability view.
 import { defineComponent, onMounted, onUnmounted, ref } from '../vue.esm-browser.prod.js';
-import { store, api } from './app.js';
+import { t, store, api, extractApiError } from './app.js';
+import { StatusBanner } from './feedback.js';
 import ParserProfileCards from './parser-cards.js';
 
 function formatUptime(seconds) {
@@ -33,24 +34,31 @@ function formatBytes(b) {
 
 export default defineComponent({
   name: 'OverviewPanel',
-  components: { ParserProfileCards },
+  components: { StatusBanner, ParserProfileCards },
   setup() {
     const summary = ref(null);
     const timer = ref(null);
+    // The 5s poll failing used to be invisible: the KPI tiles silently
+    // kept showing the last good values (or em-dashes) forever.
+    const loadErr = ref('');
     async function refresh() {
       try {
         const { payload } = await api('GET', '/v1/system/status');
         if (payload) summary.value = payload;
+        loadErr.value = '';
         const m = (store.models.data || []).find(x => x.type === 'embedder' && x.loaded);
         store.embedderDim = m && m.dimensions ? m.dimensions : 0;
-      } catch (_e) { /* logged via api() */ }
+      } catch (e) {
+        loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     onMounted(() => { refresh(); timer.value = setInterval(refresh, 5000); });
     onUnmounted(() => { if (timer.value) clearInterval(timer.value); });
-    return { store, summary, formatUptime, formatParams, formatBytes, refresh };
+    return { store, summary, loadErr, formatUptime, formatParams, formatBytes, refresh };
   },
   template: `
     <div>
+      <status-banner kind="error" :text="loadErr" :retry="loadErr ? refresh : null" />
       <div class="section">
         <div class="section-head">
           <h3 class="section-title">{{ $t('nav.overview') }} <span class="pill accent">GET /v1/system/status</span></h3>

@@ -1,6 +1,6 @@
 // Modals: NewDbModal + NewCollModal.
 import { defineComponent, ref, reactive } from '../vue.esm-browser.prod.js';
-import { store, api, enc, extractApiError } from './app.js';
+import { t, store, api, enc, extractApiError } from './app.js';
 
 export const NewDbModal = defineComponent({
   name: 'NewDbModal',
@@ -9,14 +9,14 @@ export const NewDbModal = defineComponent({
     function close() { store.modals.newDb = false; store.modalErr.newDb = ''; }
     async function submit() {
       const n = name.value.trim();
-      if (!n) { store.modalErr.newDb = 'database name is required.'; return; }
+      if (!n) { store.modalErr.newDb = t('modals.err.db_name_required'); return; }
       store.modalErr.newDb = '';
       try {
         await api('POST', '/v1/databases', { name: n });
         close();
         window.dispatchEvent(new CustomEvent('refresh-dbs'));
       } catch (e) {
-        store.modalErr.newDb = extractApiError(e, 'create failed');
+        store.modalErr.newDb = extractApiError(e, t('modals.err.create_failed'));
       }
     }
     return { name, close, submit };
@@ -95,16 +95,19 @@ export const NewCollModal = defineComponent({
 
     function buildBody() {
       const primaryCount = scalars.filter(s => s.is_primary).length;
-      if (primaryCount !== 1) { store.modalErr.newColl = 'exactly one primary key (is_primary) required. current: ' + primaryCount; return null; }
+      if (primaryCount !== 1) { store.modalErr.newColl = t('modals.err.one_primary', { n: primaryCount }); return null; }
       const pk = scalars.find(s => s.is_primary);
-      if (pk.dtype !== 'varchar') { store.modalErr.newColl = 'primary must be varchar. current: ' + pk.dtype; return null; }
-      if (!pk.name) { store.modalErr.newColl = 'primary key field name is required.'; return null; }
+      if (pk.dtype !== 'varchar') { store.modalErr.newColl = t('modals.err.primary_varchar', { dtype: pk.dtype }); return null; }
+      if (!pk.name) { store.modalErr.newColl = t('modals.err.primary_name_required'); return null; }
       for (const r of scalars) {
-        if (r.dtype === 'varchar' && (!r.max_length || r.max_length < 1)) { store.modalErr.newColl = 'varchar field ' + (r.name || 'unnamed') + ' needs max_length.'; return null; }
-        if (!r.name) { store.modalErr.newColl = 'every field must have a name.'; return null; }
+        if (r.dtype === 'varchar' && (!r.max_length || r.max_length < 1)) {
+          store.modalErr.newColl = t('modals.err.varchar_max_length', { name: r.name || t('modals.unnamed') });
+          return null;
+        }
+        if (!r.name) { store.modalErr.newColl = t('modals.err.field_name_required'); return null; }
       }
-      if (pk.name !== primary.value.trim()) { store.modalErr.newColl = 'primary field (' + primary.value + ') does not match is_primary field.'; return null; }
-      if (!Number.isFinite(vectorDim.value) || vectorDim.value < 1) { store.modalErr.newColl = 'vector dim must be >= 1.'; return null; }
+      if (pk.name !== primary.value.trim()) { store.modalErr.newColl = t('modals.err.primary_mismatch', { name: primary.value }); return null; }
+      if (!Number.isFinite(vectorDim.value) || vectorDim.value < 1) { store.modalErr.newColl = t('modals.err.dim'); return null; }
       const scalarFields = scalars.map(r => {
         const out = { name: r.name, dtype: r.dtype, is_primary: !!r.is_primary };
         if (r.dtype === 'varchar') out.max_length = r.max_length;
@@ -122,8 +125,8 @@ export const NewCollModal = defineComponent({
     }
 
     async function submit() {
-      if (!store.databases.list.length) { store.modalErr.newColl = 'select a database first.'; return; }
-      if (!name.value.trim()) { store.modalErr.newColl = 'collection name is required.'; return; }
+      if (!store.databases.list.length) { store.modalErr.newColl = t('modals.err.no_db'); return; }
+      if (!name.value.trim()) { store.modalErr.newColl = t('modals.err.coll_name_required'); return; }
       const body = buildBody(); if (!body) return;
       store.modalErr.newColl = '';
       try {
@@ -131,7 +134,7 @@ export const NewCollModal = defineComponent({
         await api('POST', '/v1/databases/' + enc(dbName) + '/collections', body);
         close();
         window.dispatchEvent(new CustomEvent('refresh-colls'));
-      } catch (e) { store.modalErr.newColl = extractApiError(e, 'create failed'); }
+      } catch (e) { store.modalErr.newColl = extractApiError(e, t('modals.err.create_failed')); }
     }
 
     return {

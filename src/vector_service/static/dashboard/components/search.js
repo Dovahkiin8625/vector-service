@@ -1,6 +1,8 @@
-// Search panel: k-NN search with text / vector / image queries.
-import { defineComponent, ref, watch, onMounted } from '../vue.esm-browser.prod.js';
-import { store, api, enc, extractApiError } from './app.js';
+// Search panel: k-NN search over one collection, either by text
+// (server-side embed) or by a pre-computed query vector.
+import { defineComponent, ref, computed, watch, onMounted } from '../vue.esm-browser.prod.js';
+import { t, api, enc, extractApiError } from './app.js';
+import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 export default defineComponent({
   name: 'SearchPanel',
@@ -19,13 +21,27 @@ export default defineComponent({
     const outputFields = ref(new Set());
     const schemaFields = ref([]);
     const result = ref(null);
+    // Outcome of the last search. Drives the results area, so "no hits",
+    // "still running" and "the request failed" stop looking identical.
+    const status = ref('idle');
+    const errMsg = ref('');
+    // Form-level complaints (nothing selected, malformed vector) are a
+    // different thing from a failed run and get their own banner.
+    const formErr = ref('');
+    // Selection/schema loading failures: previously swallowed, which left
+    // an empty dropdown with no explanation.
+    const loadErr = ref('');
 
     async function refreshDbs() {
+      loadErr.value = '';
       try {
         const { payload } = await api('GET', '/v1/databases');
         dbs.value = (payload && payload.databases) || [];
         if (!db.value && dbs.value.length) db.value = dbs.value[0];
-      } catch (_e) {}
+      } catch (e) {
+        dbs.value = [];
+        loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     async function refreshColls() {
       if (!db.value) { colls.value = []; return; }
@@ -33,7 +49,10 @@ export default defineComponent({
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections');
         colls.value = (payload && payload.collections) || [];
         if (!colls.value.includes(coll.value)) coll.value = colls.value[0] || '';
-      } catch (_e) { colls.value = []; }
+      } catch (e) {
+        colls.value = [];
+        loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     async function refreshSchema() {
       schemaFields.value = [];
@@ -41,7 +60,10 @@ export default defineComponent({
       try {
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll.value));
         schemaFields.value = (payload && payload.fields || []).map(f => f.name);
-      } catch (_e) {}
+      } catch (e) {
+        schemaFields.value = [];
+        loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
+      }
     }
     watch(db, refreshColls);
     watch(coll, refreshSchema);
@@ -55,7 +77,7 @@ export default defineComponent({
         body.query_text = text.value;
       } else {
         const v = safeParse(emb.value);
-        if (!Array.isArray(v)) { alert('query_vector must be a JSON array.'); return null; }
+        if (!Array.isArray(v)) { formErr.value = t('search.err.bad_vector'); return null; }
         body.query_vector = v;
       }
       if (filter.value.trim()) body.filter_expr = filter.value.trim();
@@ -64,13 +86,38 @@ export default defineComponent({
     }
 
     async function doSearch() {
-      if (!db.value || !coll.value) { alert('select database and collection.'); return; }
+      formErr.value = '';
+      if (!db.value || !coll.value) { formErr.value = t('search.err.no_selection'); return; }
       const body = buildBody(); if (!body) return;
+      status.value = 'loading';
+      errMsg.value = '';
       try {
         const { payload } = await api('POST', '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll.value) + '/search', body);
         result.value = payload;
-      } catch (e) { alert('search failed: ' + extractApiError(e, 'unknown')); result.value = null; }
+        status.value = 'ok';
+      } catch (e) {
+        result.value = null;
+        status.value = 'error';
+        errMsg.value = extractApiError(e, t('common.unknown'));
+      }
     }
+
+    // Four-state results area: loading / failed / genuinely no hits /
+    // not run yet. `search.no_hits` was already in the dictionary but
+    // had nothing rendering it.
+    const hitCount = computed(() => (result.value && result.value.hits ? result.value.hits.length : 0));
+    const resultState = computed(() => {
+      if (status.value === 'loading') return 'loading';
+      if (status.value === 'error') return 'error';
+      return status.value === 'ok' ? 'empty' : 'idle';
+    });
+    const resultText = computed(() => {
+      if (status.value === 'error') return t('common.status.error') + ': ' + errMsg.value;
+      if (status.value === 'ok') return t('search.no_hits');
+      if (status.value === 'idle') return t('search.idle_hint');
+      return '';
+    });
+    const showResultList = computed(() => status.value === 'ok' && hitCount.value > 0);
 
     function toggleOutput(name) {
       if (outputFields.value.has(name)) outputFields.value.delete(name);
@@ -79,48 +126,50 @@ export default defineComponent({
     }
 
     return { dbs, colls, db, coll, primary, vecfield, mode, topk, text, emb, filter,
-             schemaFields, outputFields, result, doSearch, toggleOutput };
+             schemaFields, outputFields, result, doSearch, toggleOutput,
+             status, formErr, loadErr, refreshDbs, resultState, resultText, showResultList };
   },
+  components: { StatusBanner, BusyButton, EmptyState },
   template: `
     <div>
       <div class="section">
         <div class="section-head">
-          <h3 class="section-title">vector search <span class="pill accent">POST /v1/databases/{db}/collections/{coll}/search</span></h3>
+          <h3 class="section-title">{{ $t('search.title') }} <span class="pill accent">POST /v1/databases/{db}/collections/{coll}/search</span></h3>
         </div>
         <div class="row split">
-          <div class="row"><label>database</label>
+          <div class="row"><label>{{ $t('common.database') }}</label>
             <select id="srch-db" v-model="db"><option v-for="d in dbs" :key="d" :value="d">{{ d }}</option></select>
           </div>
-          <div class="row"><label>collection</label>
+          <div class="row"><label>{{ $t('common.collection') }}</label>
             <select id="srch-coll" v-model="coll"><option v-for="c in colls" :key="c" :value="c">{{ c }}</option></select>
           </div>
         </div>
         <div class="row split">
-          <div class="row"><label>primary key field</label><input type="text" id="srch-primary" v-model="primary" /></div>
-          <div class="row"><label>vector field</label><input type="text" id="srch-vecfield" v-model="vecfield" /></div>
+          <div class="row"><label>{{ $t('common.primary_field') }}</label><input type="text" id="srch-primary" v-model="primary" /></div>
+          <div class="row"><label>{{ $t('common.vector_field') }}</label><input type="text" id="srch-vecfield" v-model="vecfield" /></div>
         </div>
         <div class="row split">
-          <div class="row"><label>query mode</label>
+          <div class="row"><label>{{ $t('search.query_mode') }}</label>
             <select id="srch-mode" v-model="mode">
-              <option value="text">server-side embed (query_text)</option>
-              <option value="emb">direct vector (query_vector)</option>
+              <option value="text">{{ $t('search.mode.text') }}</option>
+              <option value="emb">{{ $t('search.mode.vector') }}</option>
             </select>
           </div>
           <div class="row"><label>top_k</label><input type="number" id="srch-topk" v-model.number="topk" min="1" max="1000" /></div>
         </div>
-        <div class="row" v-show="mode === 'text'"><label>query text</label><input type="text" id="srch-text" v-model="text" /></div>
-        <div class="row" v-show="mode === 'emb'"><label>query vector</label><textarea id="srch-emb" rows="2" v-model="emb"></textarea></div>
+        <div class="row" v-show="mode === 'text'"><label>{{ $t('search.query_text') }}</label><input type="text" id="srch-text" v-model="text" /></div>
+        <div class="row" v-show="mode === 'emb'"><label>{{ $t('search.query_vector') }}</label><textarea id="srch-emb" rows="2" v-model="emb"></textarea></div>
         <details class="collapsible">
-          <summary>filter expression (Milvus native)</summary>
+          <summary>{{ $t('search.filter_title') }}</summary>
           <div class="body">
             <div class="row"><label>filter_expr</label><textarea id="srch-filter" rows="2" v-model="filter" placeholder="category == 'mouse'"></textarea></div>
           </div>
         </details>
         <details class="collapsible" v-if="schemaFields.length">
-          <summary>output fields</summary>
+          <summary>{{ $t('search.output_fields') }}</summary>
           <div class="body">
             <div class="row">
-              <label>output fields <span class="hint">click to toggle</span></label>
+              <label>{{ $t('search.output_fields') }} <span class="hint">{{ $t('search.hint.click_toggle') }}</span></label>
               <div id="srch-output-tokens">
                 <span v-for="f in schemaFields" :key="f"
                       :class="['tag-token', outputFields.has(f) ? 'active' : '']"
@@ -130,17 +179,24 @@ export default defineComponent({
           </div>
         </details>
         <div class="actions">
-          <button class="btn primary" id="btn-search" @click="doSearch">search</button>
+          <busy-button id="btn-search" :busy="status === 'loading'" :label="$t('search.run')"
+                       :busy-label="$t('search.running')" @click="doSearch" />
         </div>
+        <status-banner kind="error" :text="formErr" />
       </div>
-      <div class="section" v-if="result">
-        <div class="section-head"><h3 class="section-title">results</h3></div>
-        <div v-for="(hit, i) in result.hits" :key="i" class="result-row">
-          <span class="result-rank">#{{ i + 1 }}</span>
-          <span class="result-score">{{ (hit.score * 100).toFixed(2) }}</span>
-          <span class="result-doc">{{ hit.id }}</span>
-          <pre class="code-pane" v-if="hit.fields && Object.keys(hit.fields).length" style="margin:0;">{{ JSON.stringify(hit.fields, null, 2) }}</pre>
-        </div>
+      <div class="section">
+        <div class="section-head"><h3 class="section-title">{{ $t('common.results') }}</h3></div>
+        <status-banner kind="error" :text="loadErr" :retry="loadErr ? refreshDbs : null" />
+        <empty-state v-if="!showResultList" :state="resultState" :text="resultText"
+                     :retry="resultState === 'error' ? doSearch : null" />
+        <template v-else>
+          <div v-for="(hit, i) in result.hits" :key="i" class="result-row">
+            <span class="result-rank">#{{ i + 1 }}</span>
+            <span class="result-score">{{ (hit.score * 100).toFixed(2) }}</span>
+            <span class="result-doc">{{ hit.id }}</span>
+            <pre class="code-pane" v-if="hit.fields && Object.keys(hit.fields).length" style="margin:0;">{{ JSON.stringify(hit.fields, null, 2) }}</pre>
+          </div>
+        </template>
       </div>
     </div>
   `,

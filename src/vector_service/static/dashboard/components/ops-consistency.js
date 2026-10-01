@@ -8,6 +8,7 @@
 // =====================================================================
 import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
+import { StatusBanner, BusyButton, askConfirm } from './feedback.js';
 import { enc, DEFAULT_SCOPE } from './ops-common.js';
 
 export default defineComponent({
@@ -16,6 +17,9 @@ export default defineComponent({
     const db = ref(DEFAULT_SCOPE.db);
     const coll = ref(DEFAULT_SCOPE.coll);
     const scanning = ref(false);
+    // Which button is running ('scan' | 'repair') so only the one that
+    // was clicked shows the busy state.
+    const scanningKind = ref('');
     const actionErr = ref('');
     const report = ref(null);
 
@@ -23,24 +27,40 @@ export default defineComponent({
       `/v1/databases/${enc(db.value)}/collections/${enc(coll.value)}`;
 
     async function scan(repair) {
-      if (repair && !window.confirm(t('ops.consistency.repair_confirm'))) return;
+      if (scanning.value) return;
+      if (repair) {
+        // Repair mutates both stores, so the modal spells out the scope
+        // it will be applied to — confirm() could only ask "sure?".
+        const confirmed = await askConfirm({
+          title: t('ops.consistency.repair_title'),
+          message: t('ops.consistency.repair_confirm'),
+          details: [
+            { label: t('common.database'), value: db.value },
+            { label: t('common.collection'), value: coll.value },
+          ],
+          confirmLabel: t('ops.consistency.repair'),
+        });
+        if (!confirmed) return;
+      }
       scanning.value = true;
+      scanningKind.value = repair ? 'repair' : 'scan';
       actionErr.value = '';
       try {
         const { payload } = await api('POST', `${scopePath()}/consistency`, { repair });
         report.value = payload;
       } catch (e) { actionErr.value = e.message; }
-      finally { scanning.value = false; }
+      finally { scanning.value = false; scanningKind.value = ''; }
     }
 
     function start() { /* on-demand panel: no polling */ }
     watch(() => store.view, (v) => { if (v === 'consistency') start(); });
 
     return {
-      db, coll, scanning, actionErr, report,
+      db, coll, scanning, scanningKind, actionErr, report,
       scan: (repair) => scan(repair),
     };
   },
+  components: { StatusBanner, BusyButton },
   template: `
     <div class="ops-panel">
       <div class="section">
@@ -61,17 +81,18 @@ export default defineComponent({
         </div>
 
         <div class="actions">
-          <button class="btn primary" :disabled="scanning" @click="scan(false)">
-            <span v-if="scanning" class="btn-spinner"></span>
-            {{ $t('ops.consistency.scan') }}
-          </button>
-          <button class="btn danger" :disabled="scanning" @click="scan(true)">
-            {{ $t('ops.consistency.repair') }}
-          </button>
+          <busy-button :busy="scanningKind === 'scan'" :label="$t('ops.consistency.scan')"
+                       :busy-label="$t('ops.consistency.scanning')" :disabled="scanning"
+                       @click="scan(false)" />
+          <busy-button variant="danger" :busy="scanningKind === 'repair'"
+                       :label="$t('ops.consistency.repair')"
+                       :busy-label="$t('ops.consistency.repairing')" :disabled="scanning"
+                       @click="scan(true)" />
         </div>
         <p class="ops-note">{{ $t('ops.consistency.repair_hint') }}</p>
 
-        <div v-if="actionErr" class="empty error">{{ actionErr }}</div>
+        <status-banner kind="error" :text="actionErr"
+                       :retry="actionErr ? () => scan(false) : null" />
       </div>
 
       <div v-if="report" class="section">
