@@ -22,6 +22,20 @@ client ──HTTP──▶ vector-service ──gRPC──▶ Milvus server
 5. **知识库摄取管线**（Docling → 分片 → 嵌入 → 写入）：把任意文档一键转成可检索的 chunks。
    详见 [ingest-pipeline.md](ingest-pipeline.md)。
 
+### 阻塞调用隔离
+
+所有外部依赖都是同步阻塞接口，事件循环上绝不直接调用。阻塞调用按性质进入三个互相独立的有界线程池（`core/threadpools.py`，lifespan 装配）：
+
+- **store 池** — Milvus RPC；
+- **model 池** — 本地模型/CPU 推理（嵌入、rerank、BM25、解析、社区检测）；
+- **sqlite 池** — 语料库读写（SQLite 是事实来源）。
+
+每池独立 worker 数与准入信号量，超限排队产生背压，三类流量不会互相饿死。LLM 外呼与文件系统清理保留在 asyncio 默认 executor。配置见 [configuration.md](configuration.md#线程池隔离)。
+
+### 语料存储
+
+SQLite（`data/corpus/corpus.db`）是唯一事实来源；Milvus 只存向量与最少标量，BM25 统计与原文都是可重建/可重取的派生物。原始上传二进制**不入库**：摄取成功后 spool 原子提升为 SHA-256 内容寻址文件（`data/corpus/originals/<hash[:2]>/<hash>`），`documents.content_hash` 持有引用，相同内容全局去重。blob 删除分两层：删除路由按 repository 返回的孤立 hash 即时 GC，后台维护 worker（`jobs/maintenance.py`）定期兜底清扫；同一 worker 按空闲页比例阈值执行 VACUUM + WAL 截断，并在周期开头用 sqlite 在线 backup API 写语料库快照（保留最新 N 份；Milvus 不备份，可重建）。摄取/维护 worker 在进程内运行，同一语料目录只允许一个实例：启动时对 `instance.lock` 取 OS 级排他锁，第二个实例 fail fast；多实例需求出现时再将 repository 实现替换为 Postgres（接口不变）。配置见 [configuration.md](configuration.md#语料存储与维护)。
+
 ## 源码结构
 
 ```
@@ -77,7 +91,8 @@ vector-service/
 │   │   ├── multimodal_embeddings.py
 │   │   ├── rerank.py
 │   │   ├── management.py       # database/collection/vector CRUD
-│   │   ├── ingest.py           # /v1/parse · /v1/chunk · /v1/ingest
+│   │   ├── ingest.py           # shared pipeline core (/v1/parse · /v1/chunk)
+│   │   ├── jobs.py             # /v1/jobs/ingest · /v1/jobs/{id}(/events)
 │   │   └── errors.py           # ErrorEnvelope
 │   └── stores/                 # 向量库抽象与实现
 │       ├── base.py             # VectorStore ABC

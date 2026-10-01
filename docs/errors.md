@@ -43,13 +43,21 @@
 | `conflict_loaded` | 同族已加载了不同 id | 409 |
 | `model_load_failed` | 后台加载时 factory 或实例 `load()` 抛异常；**不再同步返回**，改为在 `GET /v1/models` 该 id 的 `load_status="failed"` / `load_error` 中观测（POST 返回 202） | 202 → 轮询 |
 | `not_loaded` | 对一个空 slot 做 unload | 409 |
-| `unsupported_mime` | `/v1/parse` 或 `/v1/ingest` 上传了不支持的 MIME（支持 PDF / Office / HTML / jpg·png·tiff·webp·bmp / md / txt） | 415 |
+| `unsupported_mime` | `/v1/parse` 或 `/v1/jobs/ingest` 上传了不支持的 MIME（支持 PDF / Office / HTML / jpg·png·tiff·webp·bmp / md / txt） | 415 |
 | `file_too_large` | 上传文件超过 `VS_PARSER__MAX_FILE_SIZE_MB` | 413 |
 | `invalid_profile` | `profile` 字段不在 `auto` / `standard` / `native` / `vlm` 中；预检阶段返回，错误体含 `got` / `allowed` | 400 |
 | `parser_failed` | Docling 解析失败 | 500 |
 | `parser_unavailable` | Docling converter 构建失败（依赖缺失等） | 503 |
 | `chunk_failed` | 分片器内部错误 | 500 |
 | `retrieval_empty_query` | 检索 query 为空 | 422 |
-| `retrieval_channel_unsupported` | BM25 channel 需要 schema v2（错误体带 `channels` / `migration_available`） | 422 |
-| `llm_unavailable` | 查询改写需要的 LLM 未配置（`VS_LLM__BASE_URL` / `VS_LLM__MODEL`） | 503 |
+| `retrieval_channel_unsupported` | 请求的召回路在集合上不可用：bm25 需要 `sparse` 字段、摘要路需要 `summary_vector` 字段（错误体带 `channels`） | 422 |
+| `retrieval_unknown_index_ref` | 请求 pin 的 `index_ref` 既非该逻辑 collection 的 active 也非 canary | 422 |
+| `reindex_no_canary` | promote 时 binding 上没有停放 canary | 409 |
+| `rebuild_empty` | 逻辑 collection 下没有叶子切片，无可重建内容 | 400 |
+| `rebuild_count_mismatch` | 重建后物理行数与 SQLite 叶子数不一致（5xx，worker 可重试；错误体带 `expected` / `got`） | 500 |
+| `sparse_encode_failed` | 重建时拟合全新 BM25 统计失败 | 503 |
+| `graph_not_built` | 检索请求开启 `graph` 但该 collection 无图谱行或实体/社区向量 collection 缺失；先 POST `.../graph/build` | 422 |
+| `graph_empty` | 逻辑 collection 下没有叶子切片，图谱构建无从抽取 | 400 |
+| `graph_count_mismatch` | 图谱构建写入的实体/社区向量行数与预期不一致（5xx，worker 可重试） | 500 |
+| `llm_unavailable` | 查询改写 / 图谱构建需要的 LLM 未配置（`VS_LLM__BASE_URL` / `VS_LLM__MODEL`） | 503 |
 | `internal` | 未捕获异常 | 500 |

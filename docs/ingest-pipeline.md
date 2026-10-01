@@ -1,9 +1,9 @@
 # 摄取管线（Docling → Chunk → Embed → Milvus）
 
-为知识库（RAG）场景设计的端到端文档摄取管线。Lumos 等上层应用只需 POST 一个文件 + 目标 collection，
-即可在服务端串起 **Docling 解析 → 文本分片（5 种可选策略）→ BGE-M3 嵌入 → Milvus 写入** 四个步骤，
-失败时按 `doc_id` 原子回滚已写入的向量。默认分片策略为 `recursive`（递归 markdown-aware），
-不带新字段的旧请求行为与重构前完全一致。
+为知识库（RAG）场景设计的端到端文档摄取管线。Lumos 等上层应用通过 `POST /v1/jobs/ingest`
+提交文件 + 目标 collection，后台 worker 即串起 **Docling 解析 → 文本分片（5 种可选策略）→
+BGE-M3 嵌入 → Milvus 写入** 四个步骤，失败时按 `doc_id` 原子回滚。默认分片策略为
+`recursive`（递归 markdown-aware）。任务进度可通过 `GET /v1/jobs/{id}/events` SSE 实时订阅。
 
 > 该子系统与 [embedding-subsystems.md](embedding-subsystems.md) 共享已加载的 embedder；
 > chunk 步骤独立于模型（纯文本操作），parser 步骤独立于模型（Docling 是文档转换库）。
@@ -17,12 +17,13 @@
 | `POST` | `/v1/parse` | 文件 → Markdown + 元数据 |
 | `POST` | `/v1/parse/stream` | 同上，但返回 NDJSON 事件流（上传 % + 逐页解析进度） |
 | `POST` | `/v1/chunk` | Markdown → chunks（含 token 数 / 章节 / 页码） |
-| `POST` | `/v1/ingest` | 一体化：文件 → 解析 → 分片 → 嵌入 → Milvus |
-| `POST` | `/v1/ingest/stream` | 同上，但返回 NDJSON 阶段事件流（含逐页解析进度） |
+| `POST` | `/v1/jobs/ingest` | 提交异步摄取任务（multipart）：校验 + spool 字节，`202` 返回 `job_id` |
+| `GET` | `/v1/jobs` · `/v1/jobs/{id}` | 任务列表 / 单个任务状态 |
+| `GET` | `/v1/jobs/{id}/events` | SSE 进度推送（见下文） |
+| `POST` | `/v1/jobs/{id}/cancel` | 请求取消任务 |
 
-三个端点均接收 `multipart/form-data`（`/v1/chunk` 是 `application/json`）。dashboard 在
-**知识库** 导航组下实际调用的是两个流式端点（`/v1/parse/stream`、`/v1/ingest/stream`），
-非流式变体保留给 API 客户端使用。
+摄取请求接收 `multipart/form-data`（`/v1/chunk` 是 `application/json`）。文档处理完全异步：
+请求只做预检与落 spool，解析/分片/嵌入/写入由进程内后台 worker 执行。
 
 ---
 
@@ -164,6 +165,7 @@ Content-Type: application/json
   "strategy": "recursive",
   "options": {},
   "add_context": false,
+  "add_summary": false,
   "chunk_size": 500,
   "chunk_overlap": 75,
   "page_numbers": null,
@@ -180,6 +182,7 @@ Content-Type: application/json
 | `strategy` | string | `recursive` | `fixed` / `paragraph` / `recursive` / `semantic` / `llm`，详见[分片策略](#分片策略chunking-strategies) |
 | `options` | object | `{}` | 策略参数：通用 `min_chunk_size`（默认 chunk_size 的 10%），以及各策略专属的 `breakpoint_percentile` / `protect_code` / `input_token_budget`；未知 key 会被忽略并记日志 |
 | `add_context` | bool | `false` | 是否做 Anthropic contextual retrieval 式上下文增强（需配置 LLM），详见[上下文增强](#上下文增强contextual-retrieval) |
+| `add_summary` | bool | `false` | 是否让 LLM 为每个分片生成摘要（独立存储、独立嵌入，检索时新增摘要召回路，需配置 LLM），详见[LLM 摘要](#llm-摘要summary) |
 | `chunk_size` | int | 500 | 单 chunk 最大 token 数（cl100k_base） |
 | `chunk_overlap` | int | 75 | 相邻 chunk 的重叠 token 数，必须 `< chunk_size` |
 | `page_numbers` | array[int] \| null | null | 按源页给出的边界提示；缺省时按 markdown 中的页标记标注，均无则视为第 1 页 |
@@ -192,7 +195,7 @@ Content-Type: application/json
 ### 运行前依赖（pre-flight）
 
 - `semantic` 需要已加载的 embedder（复用其 `embed_documents`，即 BGE-M3）；未加载 → **503 `embedder_unavailable`**。
-- `llm` 与 `add_context` 需要配置外部 OpenAI 兼容 LLM（`VS_LLM__BASE_URL` + `VS_LLM__MODEL`）；
+- `llm`、`add_context` 与 `add_summary` 需要配置外部 OpenAI 兼容 LLM（`VS_LLM__BASE_URL` + `VS_LLM__MODEL`）；
   未配置 → **503 `llm_unavailable`**。
 
 ### 响应
@@ -206,7 +209,11 @@ Content-Type: application/json
       "token_count": 487,
       "section_header": "1. Intro > 1.1 Background",
       "page_number": 1,
-      "context": null
+      "context": null,
+      "summary": null,
+      "level": "chunk",
+      "char_start": 0,
+      "char_end": 512
     },
     {
       "chunk_index": 1,
@@ -214,7 +221,8 @@ Content-Type: application/json
       "token_count": 412,
       "section_header": "2. Details",
       "page_number": 2,
-      "context": "本片段出自 2026 年季度报告的背景章节，讨论营收结构。"
+      "context": "本片段出自 2026 年季度报告的背景章节，讨论营收结构。",
+      "summary": "2026 年季度报告背景章节：营收结构及变化原因。"
     }
   ]
 }
@@ -222,6 +230,12 @@ Content-Type: application/json
 
 - `context` —— 仅 `add_context=true` 时可能非空：LLM 为该 chunk 生成的 1–2 句定位前缀。
   它只在后续嵌入时拼接到正文前，**不是 chunk 正文的一部分**。
+- `summary` —— 仅 `add_summary=true` 时可能非空：LLM 为该 chunk 生成的
+  事实性摘要。它是**独立存储的产物**，有自己的嵌入与检索召回路，与只用于
+  嵌入拼接的 `context` 不同。单个分片摘要失败时为 `null`。
+- `level` / `char_start` / `char_end` —— `/v1/chunk` 只返回叶子，故
+  `level` 恒为 `"chunk"`；后两者为该叶子在输入 Markdown 中的字符区间
+  （层级结构中的父行只在摄取时产生，详见[层级切片](#层级切片small-to-large)）。
 
 错误码：请求体校验失败（422）/ `invalid_chunk_config`（400）/ `embedder_unavailable`（503）/
 `llm_unavailable`（503）/ `chunk_failed`（500）。
@@ -329,6 +343,37 @@ recursive 输出 32 个切片（最小 733 tokens），五种策略均无低于�
 
 ---
 
+## 层级切片（small-to-large）
+
+chunker 产出的每个 chunk 是**叶子**；摄取时由 `chunking/hierarchy.py`
+包成三级结构一并写入 `chunks` 表：
+
+| level | key（文档局部链接） | 内容 | 是否进 ANN |
+|-------|--------------------|------|-----------|
+| `document` | `"document"` | 整篇解析后 Markdown（1 行，根） | 否 |
+| `section` | `"section:{ord}"` | 每个非空分节：字面 header 前缀 + 节正文 | 否 |
+| `chunk` | `"chunk:{i}"` | chunker 叶子，源顺序 | 是 |
+
+- 叶子只在节内产生——chunk 绝不跨节（节边界强制 flush，
+  `merge_small_chunks` 也禁止跨 `section_ord`），所以每个叶子有且只有
+  一个父节；无 header 的结构块同样有 ordinal，也会成为父行。
+- 持久化时局部 key 经 `id_for_key` 解析为真实 `chunk_id =
+  f"{doc_id}_{flat_index}"`，`parent_key` 解析为父行 `chunk_id`
+  （写入 `parent_id`）；扁平顺序为 document → sections → leaves，
+  `chunk_index` 跨整列稠密编号。
+- `char_start` / `char_end` 记录该行在解析 Markdown 中的字符区间：
+  section 的坐标在分节时精确计算（header 起、raw body 止），叶子的
+  span 是其打包 units 的区间并集，支持检索结果回链高亮。
+- **父子索引分离**：只有 level=`chunk` 的行进入 Milvus upsert，
+  BM25 统计（`leaf_chunk_texts`）也只拟合叶子语料——父级文本不会
+  重复计数、不会污染召回；父级是纯内容行，丢失后可随时从... （父级
+  本身即 corpus 内容，Milvus 整体可重建）。
+
+检索时如何上扩到父级见
+[retrieval.md § Small-to-large 扩展](retrieval.md#small-to-large-扩展parent-document-retrieval)。
+
+---
+
 ## 上下文增强（Contextual Retrieval）
 
 `add_context=true` 时，分片完成后会按 [Anthropic Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)
@@ -346,15 +391,37 @@ LLM 调用，建议与 `paragraph` / `recursive` 搭配用于高价值知识库�
 
 ---
 
-## `POST /v1/ingest`
+## LLM 摘要（summary）
 
-一键端到端：上传文件 → 解析 → 分片 → 嵌入 → Milvus 写入。
-**任何步骤失败都会原子回滚** —— 已 upsert 的向量会按 `doc_id` filter 删除，避免半成品数据污染 collection。
+`add_summary=true` 时，分片完成后让 LLM 为**每个 chunk** 生成一段事实性
+摘要：
 
-### 请求
+- prompt 携带 chunk 所属章节（`section_header`，缺失时省略）与 chunk 原文，
+  要求只输出精炼摘要；
+- 按 `VS_LLM__MAX_CONCURRENCY`（默认 4）在有界线程池内并发请求；
+- **单个 chunk 的请求失败 / 超时 / 返回空白只记日志（`summarize_call_failed`），
+  该 chunk 的 `summary` 保持 `null`，绝不阻断摄取**；
+- 摘要入库为 `summary` 字段，并再做一次批量嵌入写入
+  `summary_vector`；**摘要失败的 chunk 用原文嵌入兜底**，保证每行都有
+  摘要向量（Milvus 向量字段不可空、无默认值）；
+- 与 `add_context` 可同时开启，两者互不影响：context 只拼接到正文嵌入前、
+  不入库；summary 独立存储、独立成路。
+
+检索侧行为（摘要 ANN 召回路、权重语义、缺字段拒绝）详见
+[retrieval.md § 摘要召回路](retrieval.md#摘要召回路)。
+
+---
+
+## 异步任务：`POST /v1/jobs/ingest`
+
+文档摄取完全异步：提交请求只执行预检并把上传字节落 spool，立即返回 `202`；
+解析 → 分片 → 嵌入 → 写入由进程内后台 worker 执行。**任何步骤失败都会原子回滚** ——
+已写入的 corpus 行与已 upsert 的向量会按 `doc_id` 删除，避免半成品数据污染。
+
+### 提交请求
 
 ```
-POST /v1/ingest
+POST /v1/jobs/ingest
 Content-Type: multipart/form-data
 
 file:          <binary>            # 必填，表单字段
@@ -363,89 +430,143 @@ collection:    kb_a1b2c3d4e5f6    # 表单字段；不存在时自动创建，�
 strategy:      recursive           # 可选，fixed | paragraph | recursive | semantic | llm
 chunk_options: {}                  # 可选，JSON 字符串（策略参数，同 /v1/chunk 的 options）
 add_context:   false               # 可选，开启 LLM 上下文增强（详见上文）
+add_summary:   false               # 可选，开启 LLM 摘要（检索新增摘要召回路）
 chunk_size:    500                 # 可选，表单字段，默认 500
 chunk_overlap: 75                  # 可选，默认 75
-embed_model:   bge-m3              # 必填，必须已加载
+embed_model:   bge-m3              # 提交时不要求已加载；worker 执行时检查
 profile:       auto                # 可选，auto | standard | native | vlm
 metadata:      {"title": "...", "author": "...", "filename": "..."}   # 可选，JSON 字符串
 ```
 
-`embed_model` 必须是已通过 `POST /v1/models/{id}/load` 加载的 embedder；不指定 `is_query`
-（上传路径走文档嵌入，前缀由服务端控制）。
+提交成功响应（202）：
 
-`doc_id` 在解析**之前**生成（UUID4），同时用作图片落盘的目录名：
+```json
+{"job_id": "a3f9c2e1…", "status": "queued"}
+```
+
+`doc_id` 在提交时生成（UUID4），同时用作图片落盘的目录名：
 `<artifacts_dir>/<doc_id>/images/`，markdown 中的图片 URL 即为
 `/artifacts/<doc_id>/images/image_*.png`，因此入库后图片链接与文档长期对应。
 
-### 响应
+### worker：执行、重试、取消
+
+- 单进程后台 worker 逐个消费 queued 任务，任务阶段（`parsing` / `chunking` / `embedding` /
+  `upserting`）与进度落 `ingest_jobs` 行。
+- **重试**：4xx（参数/状态错误）立即终态失败；5xx（parser/store/embedder 不可用）按指数退避
+  重排（`not_before_ts`），直到 `max_attempts`（默认 3）耗尽。
+- **取消**：`POST /v1/jobs/{id}/cancel` 置 cancel 标记，worker 在阶段边界观察后回滚并置
+  `cancelled`；终态任务返回 409。
+- **启动恢复**：进程重启时，lifespan 在 worker 启动前把遗留的阶段状态任务逐行处理——清理
+  半成品（corpus / 薄索引 / 产物）后 attempts+1 重排；spool 已丢失 → `failed/interrupted`；
+  遗留 cancel 标记 → `cancelled`。
+
+### 状态查询：`GET /v1/jobs/{id}`
 
 ```json
 {
-  "doc_id": "a3f9c2e1-...-...-...-...",
-  "chunk_count": 23,
-  "page_count": 12,
-  "tokens_used": 12453
+  "job_id": "a3f9c2e1…",
+  "doc_id": "…",
+  "status": "embedding",          // queued | parsing | … | done | failed | cancelled
+  "stage": "embedding",           // 运行中与 status 相同；queued/终态为 null
+  "database": "lumos",
+  "collection": "kb_a1b2c3d4e5f6",
+  "filename": "doc.pdf",
+  "mime": "application/pdf",
+  "attempts": 1,
+  "max_attempts": 3,
+  "cancel_requested": false,
+  "progress": {"current": 3, "total": 12},
+  "chunk_count": 0,
+  "page_count": null,
+  "tokens_used": 0,
+  "error": null,
+  "created_ts": 1769…,
+  "updated_ts": 1769…,
+  "finished_ts": null
 }
 ```
 
-### 流式变体：`POST /v1/ingest/stream`
+终态 `done` 时 `chunk_count` / `page_count` / `tokens_used` 为最终统计；`failed` 时
+`error = {"code", "message"}`。
 
-multipart 契约与 `/v1/ingest` 完全相同，但响应是 `application/x-ndjson` —— 每行一个 JSON 事件，
-dashboard 用它渲染「上传 → 解析 → 分片 → 嵌入 → 写入」阶段步进器：
+### SSE 进度推送：`GET /v1/jobs/{id}/events`
+
+`text/event-stream` 长连接，适合 dashboard / 前端实时展示，无需轮询：
 
 ```
-{"type": "stage", "stage": "parse"}
-{"type": "progress", "stage": "parse", "page": 1, "total": 12}
-{"type": "progress", "stage": "parse", "page": 2, "total": 12}
-...
-{"type": "stage", "stage": "chunk"}
-{"type": "stage", "stage": "embed"}
-{"type": "stage", "stage": "upsert"}
-{"type": "result", "doc_id": "...", "chunk_count": 23, "page_count": 12, "tokens_used": 12453}
+event: job
+data: {"job_id":"…","status":"queued", … }
+
+event: job
+data: {"job_id":"…","status":"parsing","stage":"parsing", … }
 ```
 
-- `stage` 事件共 4 个，名称固定（`parse` / `chunk` / `embed` / `upsert`），属于公开 API 契约。
-- parse 阶段内可能穿插 `progress` 事件（逐页，字段同 `/v1/parse/stream`；仅 PDF / DOCX / PPTX /
-  HTML，文本上传没有），全部位于 parse 与 chunk 两个 stage 事件之间。
-  字节级上传进度不经过该流，由客户端从 multipart 上传本身取（dashboard 用 XHR `upload.onprogress`）。
-- 终态事件二选一：成功为 `result`（字段同 `IngestResponse`）；管道内失败为
-  `{"type": "error", "status": 503, "error": {"code": "...", "message": "..."}}`，
-  此时 HTTP 状态码仍是 200 —— 流已经开始。
-- **预检失败**（参数非法 / strategy 或 chunk_options 非法 / MIME 不支持 / 文件超限 / profile 非法 /
-  embedder 未加载 / LLM 策略未配置）发生在流开启之前，仍按普通 JSON 错误信封返回
-  （4xx/503，`Content-Type: application/json`），客户端需同时兼容两种响应。
-- 文档解析后未产生任何分片时，只发出 `parse`、`chunk` 两个 stage 事件，随后直接 `result`
-  （`chunk_count: 0`），不会进入嵌入 / 写入；该文档的图片目录会一并清理。
+- **连接即发**当前完整状态（与 `GET /v1/jobs/{id}` 同形），之后**每次变更**推送一帧：
+  阶段切换、parse 逐页 progress tick（仅 PDF/DOCX/PPTX/HTML）、重试重排、cancel 标记、终态。
+- 帧数据始终是**完整 JobStatus**，客户端整体替换即可，天然幂等；重复 nudge 按行签名去重。
+- **心跳**：`VS_JOBS__HEARTBEAT_SECONDS`（默认 15s）发送 `: keepalive` 注释帧，防止代理断连。
+- **兜底 resync**：`VS_JOBS__SSE_RESYNC_SECONDS`（默认 2s）即使没有 nudge 也重读一次行，
+  丢失/满队列 nudge 不可能让视图长期过期。
+- 任务不存在 → 连接开启前直接 404 `job_not_found`（普通 JSON 信封）。
+- **终态帧（done/failed/cancelled）发送后流立即关闭**；客户端按需重连只会重复收到终态快照。
 
-### Collection schema（写入约定）
+浏览器消费：
 
-目标 collection 不存在时按下列固定 schema 自动创建（database 也会自动创建）；
-已存在则只校验向量维度，schema 必须与下面兼容：
+```js
+const es = new EventSource(`/v1/jobs/${jobId}/events`);
+es.addEventListener("job", (e) => renderJob(JSON.parse(e.data)));
+```
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `id` | `varchar` PK | 是 | 形如 `{doc_id}_{chunk_index}` 的确定性主键（重试不会产生重复） |
-| `doc_id` | `varchar` | 是 | UUID4，用于过滤 / 回滚 |
-| `chunk_index` | `int64` | 是 | 文档内 chunk 序号 |
-| `text` | `varchar` | 是 | chunk 文本（用于 RAG 检索回显） |
-| `section_header` | `varchar` | 是 | breadcrumb 章节路径 |
-| `page_number` | `int64` | 否 | 来源页码 |
-| `title` | `varchar` | 否 | 来自 metadata.title |
-| `author` | `varchar` | 否 | 来自 metadata.author |
-| `page_count` | `int64` | 否 | 文档总页数 |
-| `filename` | `varchar` | 否 | 来自 metadata.filename |
-| `token_count` | `int64` | 是 | chunk 的 token 数 |
-| `vector` | `float_vector` | 是 | 维度 = embedder.dim（如 BGE-M3 = 1024） |
+预检失败（参数非法 / strategy 或 chunk_options 非法 / MIME 不支持 / 文件超限 / profile 非法 /
+LLM 策略未配置）发生在 spool 之前，按普通 JSON 错误信封返回（4xx/503）。
+
+### 写入约定：SQLite 事实来源 + Milvus 薄索引
+
+**内容先落 SQLite，向量再写 Milvus。** 文档与全部 chunk 在单个事务内
+写入 corpus 后，才开始编码与 upsert——Milvus 的每一行都是 corpus 中某条
+chunk 的派生物。整体定位见 [architecture.md](architecture.md)。
+
+SQLite（`data/corpus/corpus.db`）：
+
+| 表 | 内容 |
+|----|------|
+| `documents` | `doc_id`、database/collection、filename、mime、content_hash、title、author、page_count、status |
+| `chunks` | `chunk_id`、`doc_id`、`chunk_index`、`text`、`section_header`、`page_number`、`token_count`、`summary`，以及层级列 `parent_id` / `level`（`document` / `section` / `chunk` 三级）/ `char_start` / `char_end`，见[层级切片](#层级切片small-to-large) |
+| `chunk_indexes` | 每个 chunk 的派生索引登记：`index_kind`（dense/sparse/summary）、`model`、`index_ref` |
+| `ingest_jobs` | 本次摄取任务的状态与统计 |
+
+目标 Milvus collection 不存在时按下列**薄 schema** 自动创建（database 同
+理）；已存在则只校验向量维度：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | `varchar` PK | 形如 `{doc_id}_{chunk_index}` 的确定性主键（重试不会产生重复） |
+| `doc_id` | `varchar` | 用于过滤 / 回滚 |
+| `chunk_index` | `int64` | 文档内 chunk 序号 |
+| `vector` | `float_vector` | 正文向量，维度 = embedder.dim（如 BGE-M3 = 1024），HNSW cosine |
+| `sparse` | `sparse_float_vector` | 客户端 BM25 编码（jieba），`SPARSE_INVERTED_INDEX` / IP |
+| `summary_vector` | `float_vector` | 摘要向量，HNSW cosine；无摘要时用 chunk 原文嵌入兜底 |
+
+Milvus **不存** text / summary / 章节路径 / 文档元数据——这些只在 SQLite，
+检索命中后经 hydrate 阶段组装（见 [retrieval.md](retrieval.md)）。
+**只有叶子行（level=`chunk`）进入 Milvus**：document / section 父级是
+SQLite 中的纯内容行，upsert 与 BM25 拟合都跳过它们（父子索引分离）。
+
+`summary_vector` 每次入库都会写入：即使未带 `add_summary`，也会嵌入摘要
+向量（未配置 LLM 时全部走原文兜底，不报错），只是 SQLite 中的 `summary`
+列为空。
 
 > Lumos 端会按此 schema 自动创建 collection（参见 lumos 项目的 `KnowledgeBaseConfig` + `VectorServiceClient.ensure_collection`）。
 > 直接调用 `vector-service` 的运维可手动 `POST /v1/databases/{db}/collections` 创建。
 
 ### 原子回滚与产物清理
 
-服务端用 try/except 包裹整条管道。一旦以下任一步失败，已成功 upsert 的向量会按
-`filter_expr = 'doc_id == "{new_doc_id}"'` 删除，同时 best-effort 删除
-`<artifacts_dir>/<doc_id>/` 整个图片目录（清理失败只记 warning，不影响回滚结果），
-向上抛出错误，collection 与磁盘都不留半成品。
+服务端用 try/except 包裹整条管道。一旦以下任一步失败，且文档已写入 corpus：
+先按 `doc_id` 删除 SQLite 全部行（documents/chunks/chunk_indexes），再按
+`filter_expr = 'doc_id == "{new_doc_id}"'` best-effort 删除已 upsert 的
+Milvus 行，同时 best-effort 删除 `<artifacts_dir>/<doc_id>/` 整个图片目录
+（清理失败只记 warning，不影响回滚结果）。向上抛出错误，corpus、collection
+与磁盘都不留半成品。
 
 可能的失败点与对应错误码：
 
@@ -455,7 +576,7 @@ dashboard 用它渲染「上传 → 解析 → 分片 → 嵌入 → 写入」�
 | strategy 非法（预检） | `invalid_strategy` | 400 |
 | chunk_options 不是合法 JSON 对象（预检） | `invalid_chunk_options` | 400 |
 | chunk_size / overlap 非法（预检） | `invalid_chunk_size` 等 | 400 |
-| llm 策略 / add_context 但未配置 LLM（预检） | `llm_unavailable` | 503 |
+| llm 策略 / add_context / add_summary 但未配置 LLM（预检） | `llm_unavailable` | 503 |
 | semantic 策略但 embedder 未加载（预检） | `embedder_unavailable` | 503 |
 | 文件解析 | `parser_failed` | 500 |
 | 分片（含零分片提前返回，仅清理产物） | `chunk_failed` | 500 |
@@ -474,8 +595,8 @@ dashboard 用它渲染「上传 → 解析 → 分片 → 嵌入 → 写入」�
 | 面板 | 端点 | 功能 |
 |------|------|------|
 | 文档解析 | `POST /v1/parse/stream` | 解析方案下拉（自动按类型/标准/原生/VLM），选中即显示方案介绍 + multipart 上传（字节 %）+ 逐页解析进度条 → 统计区（字符/页数/图片/表格/OCR 页数/耗时）+ Markdown 预览（图片可点开） |
-| 分片测试 | `POST /v1/chunk` | 策略下拉（5 种，semantic 显示百分位参数、显示上下文增强开关）+ Markdown 输入 → 可折叠 chunk 列表（含 token / 页码 / 章节 / 原文 / LLM 上下文前缀），不落库 |
-| 一键入库 | `POST /v1/ingest/stream` | database/embed_model 联动选择 + 分片策略下拉（含策略参数与上下文增强）+ 解析方案下拉 + multipart 上传（支持图片文件），5 阶段步进器（parse 阶段显示 n/total 页） → 摄取结果统计 |
+| 分片测试 | `POST /v1/chunk` | 策略下拉（5 种，semantic 显示百分位参数、显示上下文/摘要增强开关）+ Markdown 输入 → 可折叠 chunk 列表（含 token / 页码 / 章节 / 原文 / LLM 上下文前缀与摘要），不落库 |
+| 一键入库 | `POST /v1/jobs/ingest` + `GET /v1/jobs/{id}/events` | database/embed_model 联动选择 + 分片策略下拉（含策略参数与上下文/摘要增强）+ 解析方案下拉 + multipart 上传（支持图片文件），阶段进度改由 SSE 订阅渲染 → 摄取结果统计。**dashboard 旧 ingest 视图仍依赖已删除的 `/v1/ingest/stream`，当前失效，待 TODO 第 7 项重写** |
 | 入库浏览 | `POST /v1/databases/{db}/collections/ingest/rows` | 分页浏览已入库分片，支持按 doc_id 精确匹配 / 文件名关键字过滤 |
 
 ---
@@ -485,17 +606,17 @@ dashboard 用它渲染「上传 → 解析 → 分片 → 嵌入 → 写入」�
 ```
 Lumos 用户上传 PDF
   │
-  ▼ Lumos 后端 BackgroundTask
+  ▼ Lumos 后端调 POST /v1/jobs/ingest（202 → job_id），订阅 SSE
   │
-  ▼ 调用 vector-service /v1/ingest
-  │
+  ▼ vector-service 后台 worker：
   ├─ 1. Docling 解析 PDF → Markdown
-  ├─ 2. build_chunker(strategy) 切 Markdown → chunks（默认 recursive；可选 LLM 上下文增强）
-  ├─ 3. BGE-M3 嵌入每个 chunk（若有 context 则拼接后嵌入）→ 1024 维向量
-  └─ 4. Milvus upsert 到 collection kb_xxx（doc_id 前缀）
+  ├─ 2. build_chunker(strategy) 切 Markdown → chunks（默认 recursive；可选 LLM 上下文增强 / LLM 摘要）
+  ├─ 3. BGE-M3 嵌入每个 chunk（若有 context 则拼接后嵌入）→ 1024 维向量；
+  │      开启摘要时再批量嵌入摘要（缺失摘要走原文兜底）→ summary_vector
+  └─ 4. Milvus upsert 到 collection kb_xxx（doc_id 前缀，含正文/摘要双向量）
       │
-      ▼ 失败任一步：按 doc_id filter 删除已 upsert 的向量，向上抛错
-      ▼ 成功：返回 {doc_id, chunk_count, page_count, tokens_used}
+      ▼ 失败任一步：原子回滚（4xx 立即 failed，5xx 退避重排），SSE 推送阶段/终态
+      ▼ 成功：GET /v1/jobs/{id} 终态为 {doc_id, chunk_count, page_count, tokens_used}
   │
   ▼ Lumos 写本地 SQLite + 落盘原文
 ```
@@ -569,5 +690,6 @@ Lumos 是薄客户端：
 - **不直接调 Milvus** —— 所有 collection / vectors 操作都走 vector-service。
 - **持久化 KB 元数据** —— 知识库名、chunk 配置、原文落盘路径等放在 Lumos 的 SQLite。
 
-Lumos 后端通过 httpx 调用 vector-service，超时 300s（`/v1/ingest` 首次可能更久）。
+Lumos 后端通过 httpx 调用 vector-service 提交任务（`/v1/jobs/ingest`，立即 202 返回），
+执行耗时（大文件首次解析可能较久）通过 SSE / 状态查询观察，不需要长超时阻塞请求。
 详见 lumos 项目的 `KnowledgeManager` + `VectorServiceClient`。

@@ -12,8 +12,11 @@
 | [api.md](api.md) | 全部 HTTP 端点表（Health / Model registry / 嵌入 / 重排 / 向量库管理 / 摄取管线 / Backend 诊断）+ 调用示例 |
 | [embedding-subsystems.md](embedding-subsystems.md) | 4 个推理子系统的详细文档：BGE-M3 文本嵌入、OpenCLIP 图像嵌入、Chinese-CLIP 跨模态嵌入、BGE-Reranker 重排 |
 | [vector-store.md](vector-store.md) | Milvus 数据库 CRUD：collection schema、upsert/search 规则、`/backend/raw` 诊断 |
-| [ingest-pipeline.md](ingest-pipeline.md) | Docling 解析 + 递归 markdown 分片 + 一键入库（`/v1/parse` · `/v1/chunk` · `/v1/ingest`）|
-| [retrieval.md](retrieval.md) | 分片检索：dense/BM25 混合召回、RRF/加权融合、查询改写、MMR、重排、schema v2 迁移 |
+| [ingest-pipeline.md](ingest-pipeline.md) | Docling 解析 + markdown 分片 + 异步摄取任务（`/v1/jobs/ingest`，SSE 进度推送），含 LLM 上下文增强与 LLM 摘要 |
+| [retrieval.md](retrieval.md) | 分片检索：dense/BM25/摘要 多路召回、RRF/加权融合、查询改写、MMR、重排 |
+| [graph.md](graph.md) | GraphRAG：知识图谱构建、实体/社区向量、社区检测与社区摘要检索 |
+| [feedback.md](feedback.md) | 检索反馈：点赞/点踩/点击/采纳落库与管道版本快照 |
+| [evaluation.md](evaluation.md) | 评测集：期望切片/文档/答案、版本冻结、批量运行与 Recall/MRR/nDCG·rerank 对比·通道归因、回归门禁与 promote 强制 |
 | [model-lifecycle.md](model-lifecycle.md) | 模型热加载 / 热卸载：默认不加载策略、`load` / `unload` 端点、dashboard 面板、错误码、实现细节 |
 | [errors.md](errors.md) | 统一错误信封结构 + 错误码清单 |
 | [testing.md](testing.md) | 单元测试与 contract 测试、运行命令、目录组织 |

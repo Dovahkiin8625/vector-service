@@ -7,7 +7,7 @@
 ## 0. 前置条件
 
 - Python ≥ 3.11
-- 一台可访问的 Milvus server（standalone / cluster），版本 ≥ 2.4（推荐启用 native database）
+- 一台可访问的 Milvus server（standalone / cluster），版本 ≥ 3.0（native database）
 - 可选：GPU + CUDA（如需用 torch fp16 后端跑 BGE-M3；否则自动落到 ONNX int8 CPU）
 
 ## 1. 准备 `.env`
@@ -41,7 +41,7 @@ cp .env.example .env
 参考 [Milvus 官方文档](https://milvus.io/docs/install_standalone-docker.md) 起一个 standalone：
 
 ```bash
-wget https://github.com/milvus-io/milvus/releases/download/v2.4.10/milvus-standalone-docker-compose.yml -O docker-compose.yml
+wget https://github.com/milvus-io/milvus/releases/download/v3.0.2/milvus-standalone-docker-compose.yml -O docker-compose.yml
 docker compose up -d
 ```
 
@@ -50,11 +50,12 @@ docker compose up -d
 ## 3. 安装依赖
 
 ```bash
-uv venv --python 3.11
-uv pip install -e ".[all]"
+uv sync --python 3.11
 ```
 
-`[all]` 同时装 BGE-M3、pymilvus、open_clip_torch 与 transformers。也可以分开装：`uv pip install -e ".[embed,store,image-embed,multimodal-embed]"`。
+所有运行时依赖都是必装项（pymilvus、BGE-M3、open_clip_torch、transformers）。
+在 win32/linux 上 torch 与 onnxruntime 自动使用官方 cu130 GPU wheel（见 `pyproject.toml` 的 `[tool.uv.sources]`），cuDNN 来自 torch/lib，不再需要手工安装 GPU torch；macOS 使用 CPU 版。
+`dev` 依赖组（pytest / ruff / mypy）默认一并安装。
 
 ## 4. 启动服务
 
@@ -85,6 +86,15 @@ vector-service
 
 ![文本相似度调试面板](dashboard-text-similarity.png)
 *新加的「文本相似度」调试面板（侧栏 模型 → 文本相似度）：左选模型 + 度量，中间填查询与候选（按行拆分），底部按所选度量排序展示 `result-row` 列表。*
+
+侧栏「运维」组提供四个运维操作面：
+
+| 面板 | 对应端点 | 能做什么 |
+|------|----------|----------|
+| 索引重建 | `POST .../reindex`、`.../reindex/promote` | 从 SQLite 全量重算向量建 canary，跟踪重建任务与门禁检查，通过后一键提升 |
+| 任务队列 | `GET /v1/jobs`、`/v1/jobs/{id}/events` | 按状态过滤、分页浏览全部任务；点开任务经 SSE 实时跟踪进度、请求取消 |
+| 一致性校验 | `POST .../consistency` | 对比 SQLite 叶子与 Milvus 行，展示缺失 / 孤儿明细，一键修复（需 embedder 已加载） |
+| 评测结果 | `/v1/evaluation/*` | 浏览评测集 / 问题 / 版本 / 运行，run 详情含聚合 KPI、rerank 前后对比与通道归因；查看门禁阈值与检查记录 |
 
 ## 下一步
 

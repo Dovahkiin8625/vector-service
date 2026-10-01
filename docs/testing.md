@@ -4,7 +4,7 @@
 # 单元测试（不需要 Milvus / 模型权重）
 uv run pytest -m "not contract and not integration" -q
 
-# 跑全部测试（contract 测试需要真实 Milvus ≥ 2.4）
+# 跑全部测试（contract 测试需要真实 Milvus ≥ 3.0）
 uv run pytest -q
 ```
 

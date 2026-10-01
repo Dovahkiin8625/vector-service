@@ -42,6 +42,50 @@
 
 `filter_expr` 会被原样转发给 pymilvus，字段名必须匹配创建 collection 时声明的标量字段名。
 
+dense 与 sparse 搜索固定以 **Strong 一致性**发出：Milvus 默认 Bounded 带约数秒陈旧窗口，摄取 / 修复刚提交的行立刻检索可能返回零结果（重建行数校验通过、三路召回却全空）。Strong 让服务端按最新时间戳执行，代价是搜索不能复用更旧的可读快照。
+
+## 多向量集合（multi-vector）
+
+Milvus 的 collection 可声明**多个 `FLOAT_VECTOR` 字段**。store 接口
+（Python 层）通过两个可选参数支持：
+
+- `create_collection(..., extra_vector_fields=[FieldSpec(name, dtype="float_vector", dim=...), ...])`
+  —— 在主向量之外追加向量字段，各自独立维度；
+- `upsert(..., extra_vectors={"field_name": [[...], ...]})` —— 按字段名
+  传入与 `ids` 逐行对齐的额外向量。
+
+校验规则：
+
+- 额外字段必须是 `float_vector` 且 dim 为正；字段名不得与主键 / 标量 /
+  主向量重名；
+- 每个额外向量字段都要有索引，只接受 dense 度量（cosine / ip / l2）；
+- Milvus 向量字段不可空、无默认值——**每行都必须携带全部向量**，缺向量
+  的行无法写入（调用方需自行兜底，例如用原文嵌入）；
+- `search(field=...)` 可指定任一已声明向量字段，按该字段自己的 dim 校验；
+- browse 默认投影排除**所有**向量字段，`include_vectors` 时保留 dense
+  向量。
+
+## Sparse 向量与 BM25（客户端编码）
+
+Milvus 只持有 sparse **向量本身**（`SPARSE_FLOAT_VECTOR`，
+`SPARSE_INVERTED_INDEX` + `IP`），**不做服务端分词、不注册 BM25 Function、
+不存切片正文**：
+
+- sparse 字段的索引度量只接受 `ip`（不再有 `"bm25"` 度量）；
+- 服务侧 `SparseBM25`（`corpus/bm25.py`）用 jieba 分析器在客户端编码：
+  ingest 后对整个语料 fit 统计，文档编码为 `{term_id: weight}` 字典写入；
+- BM25 统计按 `(database, collection)` 持久化在 `data/corpus/bm25/`，
+  与 Milvus 行一样是**派生物**——文件丢失时从 SQLite 全量重建，空语料
+  查询报 RuntimeError；
+- 查询时 `encode_query` 生成 sparse 向量，`store.search_sparse(...)` 检索；
+  查询编码结果为空（词项全不在词表）则跳过该路 RPC；
+- sparse 向量无法取回（Milvus `not allowed to retrieve raw data of field
+  sparse`），browse/投影中不出现，这是向量字段本身的限制，与编码方式无关。
+
+> 通用 collection 管理 HTTP 端点目前只暴露一个 `vector_field`；多向量的
+> 实际消费者是摄取管线的固定 schema——`summary_vector` 摘要向量
+> （见 [ingest-pipeline.md § Collection schema](ingest-pipeline.md#collection-schema写入约定)）。
+
 ## 运维诊断：`/backend/raw`
 
 ```bash

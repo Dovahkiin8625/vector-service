@@ -20,7 +20,7 @@ VS_PARSER__AUTO_LOAD=true                # Docling 解析器
 
 每个开关独立，不开 eager 的族保持默认的「未加载」状态。
 
-> 摄取管线（`/v1/ingest`）依赖文本 embedder 已加载 —— 通常运维需要先 `POST /v1/models/bge-m3/load`，
+> 异步摄取 worker（`/v1/jobs/ingest` 任务的执行）依赖文本 embedder 已加载；提交任务本身不要求 —— 通常运维需要先 `POST /v1/models/bge-m3/load`，
 > 再触发 ingest。`/v1/parse` 与 `/v1/chunk` 不依赖模型，但 Docling 首次加载较慢（30-60 秒）。
 
 ## 加载 / 卸载端点
