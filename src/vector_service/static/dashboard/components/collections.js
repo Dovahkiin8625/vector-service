@@ -283,15 +283,20 @@ export default defineComponent({
           <empty-state v-if="!db" state="idle" :text="$t('collections.pick_db_first')" />
           <empty-state v-else-if="!colls.length" state="empty" :text="$t('collections.empty')" />
           <template v-for="name in colls" :key="db + '::' + name">
-            <div class="list-item" :data-coll-key="db + '::' + name" @click="toggleDetail(name)">
+            <div class="list-item" :data-coll-key="db + '::' + name" role="button" tabindex="0"
+                 :aria-expanded="expanded.has(db + '::' + name) ? 'true' : 'false'"
+                 @click="toggleDetail(name)"
+                 @keydown.enter.prevent="toggleDetail(name)"
+                 @keydown.space.prevent="toggleDetail(name)">
               <span class="name">{{ db }} / {{ name }}</span>
               <span class="meta">
+                <!-- Same S5 rule as the db list: no "— · — · —" stack
+                     before the detail lands, caret detached from meta. -->
                 <template v-if="detailCache[db + '::' + name]">
                   {{ detailCache[db + '::' + name].metric || '—' }} · {{ $t('collections.dim_value', { dim: detailCache[db + '::' + name].dim || '—' }) }} · {{ formatCount(detailCache[db + '::' + name].count) }}
                 </template>
-                <template v-else>— · — · —</template>
               </span>
-              <span style="color:var(--text-muted);font-size:12px;">{{ expanded.has(db + '::' + name) ? '▾' : '▸' }}</span>
+              <span class="expand-caret" aria-hidden="true">{{ expanded.has(db + '::' + name) ? '▾' : '▸' }}</span>
               <busy-button class="sm" variant="danger" :busy="busyKey === 'drop:' + name"
                            :label="$t('common.delete')" :busy-label="$t('common.deleting')"
                            @click.stop="dropColl(name)" />
@@ -392,7 +397,7 @@ export default defineComponent({
                       </div>
                       <div class="row">
                         <label>params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
-                        <textarea data-new-index-params rows="2"
+                        <textarea data-new-index-params rows="2" class="code-input"
                                   v-model="newIndex[db + '::' + name].params"></textarea>
                       </div>
                       <div class="actions">

@@ -230,19 +230,19 @@ export default defineComponent({
 
         <div class="ops-form-grid">
           <div class="form-group">
-            <label class="form-label">{{ $t('ops.reindex.embed_model') }}</label>
-            <input v-model="embedModel" type="text" spellcheck="false"
+            <label class="form-label" for="reindex-embed-model">{{ $t('ops.reindex.embed_model') }}</label>
+            <input id="reindex-embed-model" v-model="embedModel" type="text" spellcheck="false"
                    :placeholder="$t('ops.reindex.embed_keep')" />
             <span class="form-hint">{{ $t('ops.reindex.embed_hint') }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label">{{ $t('ops.reindex.canary_percent') }}</label>
-            <input v-model.number="canaryPercent" type="number" min="0" max="100" step="1" />
+            <label class="form-label" for="reindex-canary">{{ $t('ops.reindex.canary_percent') }}</label>
+            <input id="reindex-canary" v-model.number="canaryPercent" type="number" min="0" max="100" step="1" />
             <span class="form-hint">{{ $t('ops.reindex.canary_hint') }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label">{{ $t('ops.reindex.batch_size') }}</label>
-            <input v-model.number="batchSize" type="number" min="1" step="1" />
+            <label class="form-label" for="reindex-batch">{{ $t('ops.reindex.batch_size') }}</label>
+            <input id="reindex-batch" v-model.number="batchSize" type="number" min="1" step="1" />
           </div>
         </div>
 

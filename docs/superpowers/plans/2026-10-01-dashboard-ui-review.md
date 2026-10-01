@@ -10,7 +10,8 @@
 > | S2 操作反馈 | **已实施**（2026-10-01，见 §1 S2 实施记录） |
 > | S3 功能 Bug 清单（B1–B14） | **已实施**（2026-10-01，见 §1 S3 实施记录） |
 > | S4 版本号单一来源 | **已实施**（2026-10-01，见 §1 S4 实施记录） |
-> | S5–S7、阶段三、阶段四 | 未开始 |
+> | S5 排版与字体 | **已实施**（2026-10-01，见 §1 S5 实施记录） |
+> | S6 表单/数据加载规范、S7 a11y、阶段三、阶段四 | 未开始 |
 | 阶段一第 4 项（records 危险默认值） | **已实施**（2026-10-01，见 §3 阶段一实施记录） |
 
 ---
@@ -191,6 +192,17 @@
 3. 占位元信息与展开箭头视觉分离（间距 + 弱化占位符色），加载完成前不渲染无意义的 `–` 堆。
 4. 取消分片卡内部滚动（正文自然展开，由页面统一滚动）；超长正文给「展开全文/折叠」。
 
+**实施记录（2026-10-01）**：四条措施全部落地。
+
+1. token 两套字体用途 + 字号/字重层级表写入 `dashboard.css` 顶部注释；新增 `--fz-lg/xl/2xl`（15/17/20px）拉开标题与正文；css 全量 mono→sans 清扫（导航、label、按钮、状态 pill、表单控件、表格、空态、summary 等约 26 处），mono 仅保留代码面板、端点 pill、ID、字段名、数值类（KEEP-mono 清单同注释）；JSON/表达式类输入（records ids/texts/vectors/fields/delIds/delFilter、embeddings listInput/listJson、browse/search filter、retrieval customJson、kb ingest-metadata、collections index params、modals params）加 `.code-input` 显式回到 mono。
+2. 模型卡标题两行截断（`-webkit-line-clamp: 2`）+ `min-width` 柔性换行；状态 pill `white-space: nowrap` 禁止竖排；`model-card-head` 允许 wrap；运维 `ops-scope` 改为 label 在上/控件在下纵向布局（label 260px 宽列），`form-label/form-hint` 补齐样式；新增完整 `ops-*` 段样式（scope/form-grid/filters/jobs-table/detail-grid/kpi-grid/check-card/id-list/answer 等约 33 类，此前零 CSS）；`.pager-info` 并入 `.pager .info` 规则。
+3. databases/collections 行：加载完成前不再渲染 `— / —`、`— · — · —` 占位堆；展开箭头独立为 `.expand-caret`（左分隔线 + 10px 间距 + 弱化色 + `aria-hidden`）。
+4. 分片卡正文改 `pre.code-pane.chunk-text` 随页面流动（无内嵌滚动条）；超长正文（>900 字符或 >22 行）初始 320px 截断 + 「展开全文/折叠」按钮（`kb.expand_full`/`kb.collapse` 双语 key，`aria-expanded` 同步）；解析结果 `pre.code-pane` 与 `.md-preview` 保持有界结果面板（单区域内滚动是合理模式，问题只在分片卡逐卡滚动）。
+
+顺手补 S7 a11y（本阶段触及的元素）：ops-reindex 三个表单 label 补 `for`/`id` 关联；databases/collections 可展开行、queue/eval 可点击表格行补 `role="button"`、`tabindex`、Enter/Space 键盘触发与 `aria-expanded`。
+
+测试：`tests` 全量 921 通过（0 失败，2 跳过）。冒烟：1440×900 与 1024×768 中/英双语走查（分片测试长文本展开/折叠、索引重建 label 布局、数据库列表占位与箭头、EN 无中文残留/切回 ZH 无英文残留、1024 宽无竖排截断）均通过，无 console error。
+
 ### S6. 【P1】表单/按钮/数据加载缺少统一规范
 
 - 初始加载即产生 **5 次重复的 `GET /v1/models`**：三个 v-show 常驻的 embeddings 实例 + rerank + similarity 各发一次；面板顶部的"已注册模型列表"与下方 model 下拉又是同数据两次展示，且列表项不可操作、纯冗余。
@@ -339,9 +351,12 @@
 ### 阶段二（P1 基础）：i18n 全覆盖 + 设计令牌收口
 
 1. 补齐两语言全部 key 并替换全部硬编码（S1）；加"双语 key 集合一致"校验；`t()` 缺 key 开发告警。
+   → **已于 2026-10-01 完成**（见 §1 S1 实施记录）。
 2. 字体分流（S5）：mono 收窄到技术元素；建立字号/字重层级表；修复全部截断（卡片标题、徽标、运维 label 列）。
+   → **已于 2026-10-01 完成**（见 §1 S5 实施记录）。
 3. 模型数据收敛（S6）：单一缓存来源，消灭 5 次重复请求与不可操作列表区；数字输入校验；共享工具提取（fileToB64、MIME、dtype、pager）。
 4. 元信息占位与展开箭头解耦；分片卡取消内嵌滚动。
+   → **已于 2026-10-01 完成**（见 §1 S5 实施记录，措施 3/4）。
 
 验收：切换 EN 后无中文残留（技术字除外），切回 ZH 无英文残留；1024 宽无文字竖排/截断。
 

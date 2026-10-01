@@ -180,7 +180,7 @@ export default defineComponent({
           <label>{{ $t('embeddings.input_text') }}</label><textarea rows="3" v-model="textInput"></textarea>
         </div>
         <div class="row" v-if="kind === 'text' && modeText === 'list'">
-          <label>{{ $t('embeddings.list_json_array') }}</label><textarea rows="3" v-model="listInput"></textarea>
+          <label>{{ $t('embeddings.list_json_array') }}</label><textarea rows="3" class="code-input" v-model="listInput"></textarea>
         </div>
 
         <div class="row" v-if="kind !== 'text'">
@@ -195,7 +195,7 @@ export default defineComponent({
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.json_list') }} <span class="hint">{{ $t('embeddings.hint.each_item') }}</span></label>
-          <textarea rows="4" v-model="listJson" placeholder='[{"data":"<base64>","mime":"image/png"}]'>[]</textarea>
+          <textarea rows="4" class="code-input" v-model="listJson" placeholder='[{"data":"<base64>","mime":"image/png"}]'>[]</textarea>
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('common.mime') }}</label>

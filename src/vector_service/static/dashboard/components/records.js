@@ -246,13 +246,13 @@ export default defineComponent({
             <option value="vectors">{{ $t('records.mode.vectors') }}</option>
           </select>
         </div>
-        <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-ids" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
-        <div class="row" v-show="mode === 'texts'"><label>{{ $t('records.texts') }}</label><textarea id="vec-texts" rows="3" v-model="texts" :placeholder="$t('records.ph.texts')"></textarea></div>
-        <div class="row" v-show="mode === 'vectors'"><label>{{ $t('records.vectors') }}</label><textarea id="vec-embs" rows="3" v-model="embs" :placeholder="$t('records.ph.vectors')"></textarea></div>
+        <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-ids" class="code-input" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
+        <div class="row" v-show="mode === 'texts'"><label>{{ $t('records.texts') }}</label><textarea id="vec-texts" class="code-input" rows="3" v-model="texts" :placeholder="$t('records.ph.texts')"></textarea></div>
+        <div class="row" v-show="mode === 'vectors'"><label>{{ $t('records.vectors') }}</label><textarea id="vec-embs" class="code-input" rows="3" v-model="embs" :placeholder="$t('records.ph.vectors')"></textarea></div>
         <details class="collapsible">
           <summary>{{ $t('records.fields') }}</summary>
           <div class="body">
-            <div class="row"><label>{{ $t('records.field_set') }}</label><textarea id="vec-fields" rows="3" v-model="fields" :placeholder="$t('records.ph.fields')"></textarea></div>
+            <div class="row"><label>{{ $t('records.field_set') }}</label><textarea id="vec-fields" class="code-input" rows="3" v-model="fields" :placeholder="$t('records.ph.fields')"></textarea></div>
           </div>
         </details>
 
@@ -265,8 +265,8 @@ export default defineComponent({
                 <option value="filter">{{ $t('records.del_mode.filter') }}</option>
               </select>
             </div>
-            <div class="row" id="vec-del-ids-row" v-show="delMode === 'ids'"><label>{{ $t('records.del_ids') }}</label><textarea id="vec-del-ids" rows="2" v-model="delIds" :placeholder="$t('records.ph.del_ids')"></textarea></div>
-            <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label>{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
+            <div class="row" id="vec-del-ids-row" v-show="delMode === 'ids'"><label>{{ $t('records.del_ids') }}</label><textarea id="vec-del-ids" class="code-input" rows="2" v-model="delIds" :placeholder="$t('records.ph.del_ids')"></textarea></div>
+            <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label>{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" class="code-input" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
             <!-- Why the red button below is disabled. Lives here, beside
                  the params that would unblock it. -->
             <div class="row" v-if="deleteBlockReason"><span class="hint">{{ deleteBlockReason }}</span></div>

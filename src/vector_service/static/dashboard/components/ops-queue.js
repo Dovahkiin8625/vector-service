@@ -201,7 +201,11 @@ export default defineComponent({
               <tr v-for="j in items" :key="j.job_id"
                   class="ops-job-row"
                   :class="{ 'ops-row-selected': detail && detail.job_id === j.job_id }"
-                  @click="openDetail(j.job_id)">
+                  role="button" tabindex="0"
+                  :aria-expanded="detail && detail.job_id === j.job_id ? 'true' : 'false'"
+                  @click="openDetail(j.job_id)"
+                  @keydown.enter.prevent="openDetail(j.job_id)"
+                  @keydown.space.prevent="openDetail(j.job_id)">
                 <td class="ops-ts">{{ formatTs(j.created_ts) }}</td>
                 <td class="ops-mono">{{ j.job_id }}</td>
                 <td><span :class="['pill', pillClass(j.status)]">{{ statusLabel(j.status) }}</span></td>

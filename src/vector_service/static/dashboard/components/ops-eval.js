@@ -384,7 +384,10 @@ export default defineComponent({
             <table class="data-table">
               <thead><tr><th>{{ $t('common.run_id') }}</th><th>{{ $t('common.params') }}</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
               <tbody>
-                <tr v-for="r in runs" :key="r.run_id" class="ops-job-row" @click="openRun(r.run_id, 'set')">
+                <tr v-for="r in runs" :key="r.run_id" class="ops-job-row" role="button" tabindex="0"
+                    @click="openRun(r.run_id, 'set')"
+                    @keydown.enter.prevent="openRun(r.run_id, 'set')"
+                    @keydown.space.prevent="openRun(r.run_id, 'set')">
                   <td class="ops-mono">{{ r.run_id }}</td>
                   <td class="ops-mono ops-params-cell">{{ r.params_json }}</td>
                   <td>{{ formatTs(r.created_ts) }}</td>
@@ -408,7 +411,10 @@ export default defineComponent({
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="s in sets" :key="s.set_id" class="ops-job-row" @click="openSet(s)">
+                <tr v-for="s in sets" :key="s.set_id" class="ops-job-row" role="button" tabindex="0"
+                    @click="openSet(s)"
+                    @keydown.enter.prevent="openSet(s)"
+                    @keydown.space.prevent="openSet(s)">
                   <td>{{ s.name }}</td>
                   <td class="ops-mono">{{ s.set_id }}</td>
                   <td class="ops-mono">{{ s.database }}/{{ s.collection }}</td>
@@ -469,8 +475,10 @@ export default defineComponent({
                 <tr><th>{{ $t('common.check_id') }}</th><th>{{ $t('ops.queue.status') }}</th><th>{{ $t('common.candidate_ref') }}</th><th>{{ $t('common.run_id') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
-                <tr v-for="c in gateChecks" :key="c.check_id" class="ops-job-row"
-                    @click="c.run_id ? openRun(c.run_id, 'gate') : null">
+                <tr v-for="c in gateChecks" :key="c.check_id" class="ops-job-row" role="button" tabindex="0"
+                    @click="c.run_id ? openRun(c.run_id, 'gate') : null"
+                    @keydown.enter.prevent="c.run_id ? openRun(c.run_id, 'gate') : null"
+                    @keydown.space.prevent="c.run_id ? openRun(c.run_id, 'gate') : null">
                   <td class="ops-mono">{{ c.check_id }}</td>
                   <td><span :class="['pill', pillClass(c.status)]">{{ statusLabel(c.status) }}</span></td>
                   <td class="ops-mono">{{ c.candidate_ref }}</td>
@@ -490,7 +498,10 @@ export default defineComponent({
                 <tr><th>{{ $t('common.gate_id') }}</th><th>{{ $t('common.scope') }}</th><th>{{ $t('common.set_id') }}</th><th>{{ $t('common.baseline') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
-                <tr v-for="g in gates" :key="g.gate_id" class="ops-job-row" @click="openGate(g)">
+                <tr v-for="g in gates" :key="g.gate_id" class="ops-job-row" role="button" tabindex="0"
+                    @click="openGate(g)"
+                    @keydown.enter.prevent="openGate(g)"
+                    @keydown.space.prevent="openGate(g)">
                   <td class="ops-mono">{{ g.gate_id }}</td>
                   <td class="ops-mono">{{ g.database }}/{{ g.collection }}</td>
                   <td class="ops-mono">{{ g.set_id }}</td>

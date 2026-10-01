@@ -142,17 +142,24 @@ export default defineComponent({
         <div class="list" id="dbs-list">
           <empty-state v-if="!list.length" state="idle" :text="$t('common.click_refresh')" />
           <template v-for="name in list" :key="name">
-            <div class="list-item" :data-db-name="name" @click="toggleDetail(name)">
+            <div class="list-item" :data-db-name="name" role="button" tabindex="0"
+                 :aria-expanded="expanded.has(name) ? 'true' : 'false'"
+                 @click="toggleDetail(name)"
+                 @keydown.enter.prevent="toggleDetail(name)"
+                 @keydown.space.prevent="toggleDetail(name)">
               <span class="name">{{ name }}</span>
               <!-- Two different numbers: collections and metadata
                    entries. This used to render the collection count on
                    both sides of the slash, so the row read
                    "3 collection count / 3" with no second source (B7). -->
               <span class="meta">
+                <!-- Nothing before the detail loads: the old "— / —"
+                     stack read like missing data rather than pending
+                     (S5). The expand caret is its own muted element,
+                     visually detached from the meta text. -->
                 <template v-if="details[name]">{{ details[name].total }} {{ $t('databases.coll_count') }} / {{ Object.keys(details[name].metadata || {}).length }} {{ $t('databases.meta_count') }}</template>
-                <template v-else>— / —</template>
               </span>
-              <span style="color:var(--text-muted);font-size:12px;">{{ expanded.has(name) ? '▾' : '▸' }}</span>
+              <span class="expand-caret" aria-hidden="true">{{ expanded.has(name) ? '▾' : '▸' }}</span>
               <busy-button class="sm" variant="danger" :busy="busyKey === 'drop:' + name"
                            :label="$t('common.delete')" :busy-label="$t('common.deleting')"
                            @click.stop="dropDb(name)" />

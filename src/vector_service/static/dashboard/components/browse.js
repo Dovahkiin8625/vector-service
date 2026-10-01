@@ -341,7 +341,7 @@ export default defineComponent({
           </div>
         </div>
         <div class="row"><label>{{ $t('browse.filter_expr') }}</label>
-          <textarea id="brw-filter" rows="2" v-model="filter" placeholder="category == 'mouse'"></textarea>
+          <textarea id="brw-filter" class="code-input" rows="2" v-model="filter" placeholder="category == 'mouse'"></textarea>
         </div>
         <div class="row" v-if="schema && schema.fields"><label>{{ $t('browse.output_fields') }} <span class="hint">{{ $t('browse.hint.readonly') }}</span></label>
           <div id="brw-output-tokens">

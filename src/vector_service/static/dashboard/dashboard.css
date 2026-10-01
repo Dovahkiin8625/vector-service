@@ -1,9 +1,26 @@
 /* ============ Tokens ============
    Light, minimalist theme. Surfaces stay near-white with subtle grey
    dividers; the teal accent is kept readable on a light background.
-   Typography is unified on Microsoft YaHei (微软雅黑) with system
-   fallbacks for non-CJK glyphs; a separate mono stack handles only
-   code panes and HTTP headers. */
+
+   Typography — two stacks with strict jobs (S5):
+   - Display face (--font, YaHei + fallbacks): everything the operator
+     READS — headings, form labels, buttons, status words, empty-state
+     guidance, table prose.
+   - Technical face (--mono): everything the operator COPIES or
+     COMPARES — code panes, endpoint pills, ids (job/run/doc), field
+     names, dtype/MIME literals, metric numerics.
+   Never put Chinese prose on the mono stack: mixed CJK/Latin sets in
+   monospace grey out unevenly and read as noise.
+
+   Size / weight scale (label → value → title hierarchy):
+     --fz-xs  11px  captions, hints, pill microcopy (weight 400–500)
+     --fz-sm  12px  form labels (600), secondary values
+     --fz-md  13px  body / table / input text (400)
+     --fz-lg  15px  section titles (700), result titles (600)
+     --fz-xl  17px  result titles, emphasized body (600)
+     --fz-2xl 20px  KPI numerics and hero values (600)
+   Rule of thumb: one role per step; a title must never share size AND
+   weight with the body it heads. */
 :root {
   --bg: #F7F8FA;
   --surface-1: #FFFFFF;
@@ -41,8 +58,9 @@
   --fz-xs: 11px;
   --fz-sm: 12px;
   --fz-md: 13px;
-  --fz-lg: 14px;
-  --fz-xl: 16px;
+  --fz-lg: 15px;
+  --fz-xl: 17px;
+  --fz-2xl: 20px;
 }
 
 /* ============ Reset ============ */
@@ -212,15 +230,16 @@ input, textarea, select { font-family: inherit; color: inherit; }
   overflow: hidden;
 }
 .kpi .label {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 600;
   color: var(--text-muted);
 }
 .kpi .value {
   font-family: var(--mono);
-  font-size: 22px;
+  font-size: var(--fz-2xl);
   font-weight: 600;
   color: var(--text);
   line-height: 1.1;
@@ -233,8 +252,8 @@ input, textarea, select { font-family: inherit; color: inherit; }
   margin-left: 4px;
 }
 .kpi .sub {
-  font-family: var(--mono);
-  font-size: 11px;
+  font-family: var(--font);
+  font-size: var(--fz-xs);
   color: var(--text-dim);
 }
 .kpi--ok .value { color: var(--success); }
@@ -341,7 +360,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 .info-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
 }
 .info-table th, .info-table td {
@@ -350,11 +369,15 @@ input, textarea, select { font-family: inherit; color: inherit; }
   border-bottom: 1px dashed var(--border);
 }
 .info-table th {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-muted);
-  width: 30%;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  /* Fixed label column: 30% wrapped "数据库/集合" one glyph per line in
+     narrow ops panels (S5). A floor keeps 3-char CJK labels on one line;
+     the value column absorbs the rest. */
+  width: auto;
+  min-width: 96px;
+  text-transform: none;
+  letter-spacing: 0.02em;
   font-size: 11px;
 }
 .info-table td { color: var(--text); }
@@ -414,7 +437,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 
 .topbar-actions { display: flex; gap: 6px; z-index: 1; }
 .lang-btn {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   min-width: 30px;
   height: 30px;
@@ -439,7 +462,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 }
 .sidebar-head {
   padding: 16px 18px 10px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -452,7 +475,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
   align-items: center;
   gap: 8px;
   padding: 12px 10px 8px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -526,7 +549,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
   align-items: center;
   gap: 8px;
   padding: 14px 28px 8px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.04em;
@@ -559,10 +582,10 @@ input, textarea, select { font-family: inherit; color: inherit; }
 }
 .section-title {
   margin: 0;
-  font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--font);
+  font-size: var(--fz-lg);
+  letter-spacing: 0;
+  text-transform: none;
   font-weight: 700;
   color: var(--text-dim);
   display: flex;
@@ -619,9 +642,10 @@ input, textarea, select { font-family: inherit; color: inherit; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
 }
 .model-title {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
@@ -629,11 +653,20 @@ input, textarea, select { font-family: inherit; color: inherit; }
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
 }
+/* Card titles get two lines before ellipsis. The old single-line
+   truncation ate the qualifier inside parentheses —
+   "标准版（版面+…" / "视觉大模型（V…" — which is exactly the part
+   that distinguishes the profiles (S5). */
 .model-title .id {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  word-break: break-word;
   min-width: 0;
 }
 .model-title .family-tag {
@@ -649,7 +682,9 @@ input, textarea, select { font-family: inherit; color: inherit; }
   flex-shrink: 0;
 }
 .status-pill {
-  font-family: var(--mono);
+  font-family: var(--font);
+  white-space: nowrap;
+  flex-shrink: 0;
   font-size: 10px;
   letter-spacing: 0.04em;
   padding: 2px 8px;
@@ -728,7 +763,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 }
 
 .model-current {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 13px;
   color: var(--text);
   padding: 4px 0 0;
@@ -740,7 +775,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 }
 .model-current .dim { color: var(--text-dim); font-size: 12px; margin-left: 6px; }
 .model-empty {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 13px;
   color: var(--text-muted);
   font-style: italic;
@@ -831,7 +866,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
 
 /* ============ Capability inventory (overview + parse pane) ============ */
 .cap-group-title {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
@@ -875,7 +910,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
   flex-shrink: 0;
 }
 .cap-comp-hidden {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 10px;
   color: var(--warn);
   flex-shrink: 0;
@@ -904,10 +939,10 @@ input, textarea, select { font-family: inherit; color: inherit; }
 .row.three > .row { margin-bottom: 0; }
 
 label {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--text-dim);
   font-weight: 600;
   display: flex;
@@ -929,8 +964,8 @@ input[type="text"], input[type="number"], select, textarea {
   border-radius: var(--r-sm);
   padding: 10px 12px;
   color: var(--text);
-  font-family: var(--mono);
-  font-size: 13px;
+  font-family: var(--font);
+  font-size: var(--fz-md);
   outline: none;
   transition: all var(--t-fast);
 }
@@ -940,6 +975,14 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 textarea { resize: vertical; min-height: 64px; line-height: 1.5; }
+/* Opt-in technical face for fields whose content is code-shaped: JSON
+   bodies, filter expressions, id lists, metadata blobs. Prose inputs
+   (queries, names) stay on the display face. */
+textarea.code-input, input.code-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
 input[type="checkbox"] {
   accent-color: var(--accent);
   width: 14px; height: 14px;
@@ -956,7 +999,7 @@ input[type="file"]::-webkit-file-upload-button {
   padding: 4px 10px;
   margin-right: 8px;
   cursor: pointer;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
 }
 input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accent); color: var(--accent); }
@@ -968,9 +1011,9 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   align-items: center;
   justify-content: center;
   gap: 6px;
-  font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: 0.04em;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  letter-spacing: 0.01em;
   background: var(--surface-2);
   color: var(--text);
   border: 1px solid var(--border-strong);
@@ -1021,7 +1064,7 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   align-items: center;
   gap: 8px;
   margin: 0 0 10px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -1111,7 +1154,7 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 .ingest-phase-label {
   flex: 1;
   min-width: 0;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
@@ -1127,7 +1170,7 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   align-items: center;
   gap: 6px;
   margin-top: 9px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   color: var(--text-dim);
 }
@@ -1225,7 +1268,8 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   border-color: var(--danger);
 }
 .stage-label {
-  font-family: var(--mono);
+  font-family: var(--font);
+  white-space: nowrap;
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
@@ -1282,7 +1326,7 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 .result-banner.warn .result-title { color: var(--warn); }
 .result-banner.err  .result-title { color: var(--danger); }
 .result-sub {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   color: var(--text-dim);
   margin-top: 2px;
@@ -1375,11 +1419,23 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 .list-item:hover { border-color: var(--accent); background: var(--surface-2); }
 .list-item .name { color: var(--text); flex: 1; font-weight: 500; }
 .list-item .meta { color: var(--text-dim); font-size: 12px; }
+/* Expand caret is a separate visual object — the S5 problem was the
+   caret sitting flush against placeholder meta, reading as one string
+   of punctuation ("— / — ▸"). Wide gap + its own muted tint. */
+.expand-caret {
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+}
 
 /* ============ Empty / error / loading ============ */
 .empty {
   color: var(--text-muted);
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 13px;
   padding: 22px;
   border: 1px dashed var(--border-strong);
@@ -1605,7 +1661,7 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 .preset-grid .btn {
   text-align: left;
   padding: 10px 14px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   display: flex;
   flex-direction: column;
@@ -1625,7 +1681,7 @@ details.collapsible {
 details.collapsible > summary {
   cursor: pointer;
   padding: 12px 16px;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   color: var(--text-dim);
   font-weight: 600;
@@ -1676,8 +1732,10 @@ details.collapsible > .body { padding: 0 14px 14px; }
 .seg-toggle .btn:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .seg-toggle .btn + .btn { margin-left: -1px; }
 
-/* Rendered-markdown preview pane (parse result "preview" tab). The
-   scroll height mirrors pre.code-pane so the two tabs feel identical. */
+/* Rendered-markdown preview pane (parse result "preview" tab). Like
+   pre.code-pane it stays a bounded pane — one result region scrolling
+   inside itself is fine; the nested-scroll problem was the per-chunk
+   cards, which now flow with the page (see pre.code-pane.chunk-text). */
 .md-preview {
   padding: 16px 20px;
   max-height: 380px;
@@ -1769,7 +1827,7 @@ details.collapsible > .body { padding: 0 14px 14px; }
   font-weight: 600;
   letter-spacing: 0.04em;
   border: 1px solid var(--border);
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
 }
 .status-chip.ok   { color: var(--success); border-color: var(--success); background: var(--success-soft); }
@@ -1787,6 +1845,21 @@ pre.code-pane {
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--code-bg);
+}
+/* Chunk-card bodies (分片测试 / 入库浏览) drop the pane clamp so the
+   text flows and the page is the only scroller. Super-long bodies
+   clamp again behind an expand toggle instead of a nested scrollbar. */
+pre.code-pane.chunk-text {
+  max-height: none;
+  overflow: visible;
+}
+pre.code-pane.chunk-text.clamped {
+  max-height: 320px;
+  overflow: hidden;
+}
+.chunk-expand {
+  align-self: flex-start;
+  margin-top: 8px;
 }
 
 /* ============ Status bar ============ */
@@ -1876,7 +1949,7 @@ pre.code-pane {
 table.data-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   table-layout: auto;
 }
@@ -1969,12 +2042,248 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
 .brw-delete-bar { align-items: center; }
 .brw-delete-bar .hint { flex: 1 1 220px; }
 .brw-del-status {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
   letter-spacing: 0.03em;
 }
 .brw-del-status.ok { color: var(--success); }
 .brw-del-status.error { color: var(--danger); }
+
+/* ============ Operations panels ============
+   queue / reindex / consistency / eval share one vocabulary. Scope
+   inputs use a label-above-control stack so 「数据库 / 集合」 never
+   wrap vertically in a narrow label column; ids and metric values
+   stay on the mono stack (.ops-mono), prose on the display face. */
+.ops-panel { display: flex; flex-direction: column; gap: 4px; }
+
+.ops-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+.ops-scope label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  flex: 0 1 260px;
+  color: var(--text-dim);
+}
+.ops-scope input { width: 100%; }
+
+.ops-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 16px;
+  margin-bottom: 14px;
+}
+.ops-form-grid .form-group { margin-bottom: 12px; }
+.form-label {
+  display: block;
+  margin: 0 0 6px;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.form-hint {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--font);
+  font-size: var(--fz-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.ops-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  word-break: break-all;
+}
+.ops-note {
+  margin: 0 0 12px;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.ops-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.ops-jobs-table tbody tr.ops-job-row { cursor: pointer; }
+.ops-jobs-table tbody tr.ops-job-row:hover td { background: var(--surface-2); }
+.ops-jobs-table tbody tr.ops-row-selected td { background: var(--accent-soft); }
+.ops-jobs-table td.ops-ts {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.ops-detail { border-top: 1px solid var(--border); padding-top: 4px; }
+.ops-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  gap: 16px;
+  align-items: start;
+}
+.ops-detail-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.ops-err-code {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  font-family: var(--mono);
+  font-size: 11px;
+  align-self: flex-start;
+}
+
+.ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.ops-kpi-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.ops-count {
+  font-family: var(--mono);
+  font-size: var(--fz-xl);
+  font-weight: 600;
+}
+.ops-count.bad { color: var(--danger); }
+.ops-count.good { color: var(--success); }
+
+.ops-index-card,
+.ops-check-card,
+.ops-rerank-card {
+  padding: 14px 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ops-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-family: var(--font);
+  font-size: var(--fz-md);
+  font-weight: 700;
+}
+.ops-sub-title {
+  margin: 14px 0 8px;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+.ops-ref {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+details.ops-id-details { margin-top: 4px; }
+details.ops-id-details > summary {
+  cursor: pointer;
+  width: fit-content;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  color: var(--accent-dim);
+}
+details.ops-id-details > summary:hover { color: var(--accent); }
+.ops-id-list {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+.ops-tabs { margin-bottom: 12px; }
+.ops-run-meta th { min-width: 110px; }
+.ops-results-table td { vertical-align: top; }
+.ops-q-cell {
+  max-width: 320px;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  line-height: 1.55;
+}
+.ops-params-cell {
+  max-width: 260px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ops-answer-details { margin-top: 4px; }
+.ops-answer-details > summary {
+  cursor: pointer;
+  width: fit-content;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  color: var(--accent-dim);
+}
+.ops-answer {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ops-set-desc {
+  margin: 0;
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+.ops-promoted {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--success-soft);
+  border: 1px solid var(--success);
+  border-radius: var(--r-sm);
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  color: var(--success);
+}
 
 /* ============ Pager ============
    The 「浏览数据」pagination strip — sits below the result table.
@@ -1991,7 +2300,8 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
   border: 1px solid var(--border);
   border-radius: var(--r-md);
 }
-.pager .info {
+.pager .info,
+.pager .pager-info {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text-dim);
@@ -2072,7 +2382,7 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
 }
 .modal-foot .modal-err {
   flex: 1;
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 12px;
   color: var(--danger);
   background: var(--danger-soft);
@@ -2099,7 +2409,7 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
   word-break: break-word;
 }
 .confirm-impact-label {
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
   letter-spacing: .04em;
   text-transform: uppercase;

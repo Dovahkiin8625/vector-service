@@ -182,11 +182,11 @@ export default defineComponent({
           <div class="row"><label>top_k</label><input type="number" id="srch-topk" v-model.number="topk" min="1" max="1000" /></div>
         </div>
         <div class="row" v-show="mode === 'text'"><label>{{ $t('search.query_text') }}</label><input type="text" id="srch-text" v-model="text" /></div>
-        <div class="row" v-show="mode === 'emb'"><label>{{ $t('search.query_vector') }}</label><textarea id="srch-emb" rows="2" v-model="emb"></textarea></div>
+        <div class="row" v-show="mode === 'emb'"><label>{{ $t('search.query_vector') }}</label><textarea id="srch-emb" class="code-input" rows="2" v-model="emb"></textarea></div>
         <details class="collapsible">
           <summary>{{ $t('search.filter_title') }}</summary>
           <div class="body">
-            <div class="row"><label>filter_expr</label><textarea id="srch-filter" rows="2" v-model="filter" placeholder="category == 'mouse'"></textarea></div>
+            <div class="row"><label>filter_expr</label><textarea id="srch-filter" class="code-input" rows="2" v-model="filter" placeholder="category == 'mouse'"></textarea></div>
           </div>
         </details>
         <details class="collapsible" v-if="schemaFields.length">

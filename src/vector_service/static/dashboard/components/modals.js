@@ -239,7 +239,7 @@ export const NewCollModal = defineComponent({
                       <select v-model="ix.index_type"><option v-for="t in INDEX_TYPES" :key="t" :value="t">{{ t }}</option></select>
                     </div>
                     <div class="field"><label>{{ $t('modals.params_json') }}</label>
-                      <input type="text" :value="JSON.stringify(ix.params)" @input="ix.params = $event.target.value" />
+                      <input type="text" class="code-input" :value="JSON.stringify(ix.params)" @input="ix.params = $event.target.value" />
                     </div>
                   </div>
                 </div>

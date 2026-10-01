@@ -224,6 +224,10 @@ export default defineComponent({
     // showing a raw 404.
     const viewNoColl = ref(false);
     const copiedChunkDoc = ref('');
+    // Per-card "show full text" toggles. Chunk bodies now flow with
+    // the page (no nested scrollbar); only super-long ones clamp at
+    // first with an expand button (keyed 'chunk:N' / 'ing:ID').
+    const textExpanded = ref({});
 
     function escapeEq(s) {
       return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -318,6 +322,19 @@ export default defineComponent({
       setTimeout(() => {
         if (copiedChunkDoc.value === id) copiedChunkDoc.value = '';
       }, 1600);
+    }
+
+    // Long enough to clamp initially: ~20 wrapped lines at the pane's
+    // 320px clamp height, or an early-fade guard by raw length.
+    function chunkTextLong(s) {
+      s = s || '';
+      return s.length > 900 || s.split('\n').length > 22;
+    }
+    function chunkTextClamped(key, s) {
+      return chunkTextLong(s) && !textExpanded.value[key];
+    }
+    function toggleChunkText(key) {
+      textExpanded.value = { ...textExpanded.value, [key]: !textExpanded.value[key] };
     }
 
     async function refreshDbs() {
@@ -849,6 +866,7 @@ export default defineComponent({
              viewChunks, viewTotal, viewOffset, viewPageSize,
              viewDocId, viewNameKw, viewBusy, viewError, viewNoColl,
              viewPage, viewPages, copiedChunkDoc,
+             textExpanded, chunkTextLong, chunkTextClamped, toggleChunkText,
              refreshDbs, refreshModels,
              loadChunks, chunksQuery, chunksReset,
              chunksFirst, chunksPrev, chunksNext, chunksLast, copyChunkDoc };
@@ -1020,7 +1038,13 @@ export default defineComponent({
             <div v-if="c.context" class="chunk-context">
               <span class="hint">{{ $t('chunk.context_prefix') }}</span>{{ c.context }}
             </div>
-            <pre class="code-pane">{{ c.text }}</pre>
+            <pre class="code-pane chunk-text"
+                 :class="{ clamped: chunkTextClamped('chunk:' + i, c.text) }">{{ c.text }}</pre>
+            <button v-if="chunkTextLong(c.text)" type="button" class="btn sm chunk-expand"
+                    :aria-expanded="!chunkTextClamped('chunk:' + i, c.text)"
+                    @click="toggleChunkText('chunk:' + i)">
+              {{ chunkTextClamped('chunk:' + i, c.text) ? $t('kb.expand_full') : $t('kb.collapse') }}
+            </button>
           </div>
         </div>
       </div>
@@ -1112,7 +1136,7 @@ export default defineComponent({
             </div>
           </div>
           <div class="row"><label>{{ $t('kb.metadata') }} <span class="hint">{{ $t('ingest.metadata_hint') }}</span></label>
-            <textarea id="ingest-metadata" rows="2" v-model="metadata" :disabled="ingestBusy">{}</textarea>
+            <textarea id="ingest-metadata" class="code-input" rows="2" v-model="metadata" :disabled="ingestBusy">{}</textarea>
           </div>
         </div>
         <div class="actions">
@@ -1307,7 +1331,15 @@ export default defineComponent({
                 <span v-if="it.fields && it.fields.page_number != null" class="hint">{{ $t('kb.page', { n: it.fields.page_number }) }}</span>
                 <span v-if="it.fields && it.fields.filename" class="hint">{{ it.fields.filename }}</span>
               </div>
-              <pre class="code-pane">{{ (it.fields && it.fields.text) || '' }}</pre>
+              <pre class="code-pane chunk-text"
+                   :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }">{{ (it.fields && it.fields.text) || '' }}</pre>
+              <button v-if="chunkTextLong((it.fields && it.fields.text) || '')" type="button"
+                      class="btn sm chunk-expand"
+                      :aria-expanded="!chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')"
+                      @click="toggleChunkText('ing:' + it.id)">
+                {{ chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')
+                   ? $t('kb.expand_full') : $t('kb.collapse') }}
+              </button>
               <div class="chunks-docid">
                 <span class="hint">doc_id</span>
                 <code :title="it.fields && it.fields.doc_id">{{ it.fields && it.fields.doc_id }}</code>

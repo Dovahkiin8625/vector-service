@@ -237,8 +237,8 @@ export default defineComponent({
           <label>{{ $t('retrieval.custom_json') }}
             <span class="hint">{{ $t('retrieval.custom_hint') }}</span>
           </label>
-          <textarea v-model="s.customJson" rows="14" spellcheck="false"
-                    class="ops-mono" :aria-label="$t('retrieval.custom_json')"></textarea>
+          <textarea v-model="s.customJson" rows="14" spellcheck="false" class="code-input"
+                    :aria-label="$t('retrieval.custom_json')"></textarea>
         </div>
         <div class="actions">
           <button class="btn sm" @click="regenCustom">{{ $t('retrieval.custom_regen') }}</button>
