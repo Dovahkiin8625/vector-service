@@ -25,8 +25,13 @@ def _collect(runs: list[ChannelRun]) -> tuple[
             cid = hit.chunk_id
             if cid not in scores:
                 scores[cid] = 0.0
-                fields[cid] = dict(hit.fields)
+                fields[cid] = {}
                 channels[cid] = []
+            # Merge provenance across legs — graph/summary-only keys
+            # (graph_entities ...) arrive on runs later than dense/bm25.
+            # First-seen values win for keys shared between channels.
+            for key, value in hit.fields.items():
+                fields[cid].setdefault(key, value)
             if run.channel not in channels[cid]:
                 channels[cid].append(run.channel)
     return scores, fields, channels

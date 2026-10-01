@@ -1989,12 +1989,6 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
 
 /* ---- retrieval panel ---- */
 .retrieval-modes { display: flex; gap: 6px; margin: 10px 0; }
-.retrieval-migrate-banner {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; padding: 8px 12px; margin: 10px 0;
-  border: 1px solid var(--warn-border, #d9a441);
-  background: var(--warn-bg, #fdf6e3); border-radius: 6px;
-}
 .retrieval-fieldset { border: none; padding: 0; margin: 0 0 10px; }
 .retrieval-fieldset[disabled] { opacity: .55; }
 .retrieval-progress { display: flex; flex-wrap: wrap; gap: 12px; }

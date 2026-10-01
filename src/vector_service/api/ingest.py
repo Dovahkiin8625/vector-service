@@ -130,11 +130,6 @@ _AUTHOR_FIELD = "author"
 _PAGE_COUNT_FIELD = "page_count"
 _FILENAME_FIELD = "filename"
 
-# Transitional v1->v2 collection migration (removed when the retrieval
-# rewrite lands; kept so the HEAD retrieval route still resolves).
-_TMP_COLLECTION = "ingest_migrate_tmp"
-_MIGRATE_BATCH = 200
-
 
 def _ingest_scalar_fields() -> list[FieldSpec]:
     """Scalar + sparse fields for the thin collection.
@@ -172,42 +167,6 @@ def _ingest_indexes() -> list[IndexSpec]:
             index_type="SPARSE_INVERTED_INDEX",
         ),
     ]
-
-
-# The thin schema *is* the former "v2" schema; aliases kept for the
-# migration routine below until the retrieval rewrite removes both.
-# The migration targets the plain v2 schema — no summary vector.
-_ingest_scalar_fields_v2 = _ingest_scalar_fields
-
-
-def _ingest_indexes_v2() -> list[IndexSpec]:
-    return [
-        IndexSpec(
-            field_name=_VECTOR_FIELD,
-            metric_type="cosine",
-            index_type="HNSW",
-            params={"M": 16, "efConstruction": 200},
-        ),
-        IndexSpec(
-            field_name=_SPARSE_FIELD,
-            metric_type="ip",
-            index_type="SPARSE_INVERTED_INDEX",
-        ),
-    ]
-
-
-def schema_version(info: Any) -> int:
-    """Return 2 for collections carrying the ``sparse`` field, else 1.
-
-    Field entries may be dicts (CollectionInfo from the store) or any
-    object exposing ``name``; retrieval capability detection must work
-    with both.
-    """
-    for f in getattr(info, "fields", []) or []:
-        name = f.get("name") if isinstance(f, dict) else getattr(f, "name", None)
-        if name == _SPARSE_FIELD:
-            return 2
-    return 1
 
 
 # ---- helpers ----------------------------------------------------------
@@ -1319,72 +1278,6 @@ def _ensure_collection(
         return
 
     create_thin_collection(store, database, collection, dim)
-
-
-def migrate_ingest_collection(store: Any, database: str, dim: int) -> dict:
-    """Copy an ingest v1 collection into a v2 collection and swap them.
-
-    Failure at any step drops the temporary collection and leaves the
-    original in place (except the narrow window after the old
-    collection is dropped and before rename completes).
-    """
-    adapter = store._adapter
-    tmp_created = False
-    try:
-        if adapter.has_collection(database, _TMP_COLLECTION):
-            adapter.drop_collection(database, _TMP_COLLECTION)
-        store.create_collection(
-            database,
-            _TMP_COLLECTION,
-            primary_field=_PRIMARY_FIELD,
-            vector_field=FieldSpec(name=_VECTOR_FIELD, dtype="float_vector",
-                                   dim=dim),
-            scalar_fields=_ingest_scalar_fields_v2(),
-            indexes=_ingest_indexes_v2(),
-        )
-        tmp_created = True
-
-        total = 0
-        while True:
-            rows = adapter.browse(
-                database, "ingest", _PRIMARY_FIELD,
-                limit=_MIGRATE_BATCH, offset=total,
-                include_vectors=True,
-            )
-            if not rows:
-                break
-            adapter.insert_rows(database, _TMP_COLLECTION, [
-                {"id": row["id"], **row["fields"]} for row in rows
-            ])
-            total += len(rows)
-            if len(rows) < _MIGRATE_BATCH:
-                break
-
-        migrated = adapter.count(database, _TMP_COLLECTION)
-        old_count = adapter.count(database, "ingest")
-        if migrated != old_count:
-            raise StoreError(
-                f"migration row count mismatch: {migrated} copied vs "
-                f"{old_count} original"
-            )
-
-        adapter.drop_collection(database, "ingest")
-        adapter.rename_collection(database, _TMP_COLLECTION, "ingest")
-    except Exception:
-        # Drop tmp based on our own create-tracking rather than
-        # has_collection(): a backend cache/visibility lag must not stop
-        # cleanup, and "any failure deletes the tmp collection" is the
-        # contract.
-        if tmp_created:
-            adapter.drop_collection(database, _TMP_COLLECTION)
-        raise
-
-    return {
-        "database": database,
-        "collection": "ingest",
-        "rows": total,
-        "schema_version": 2,
-    }
 
 
 def _delete_by_doc_id(

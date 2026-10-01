@@ -13,9 +13,6 @@ from vector_service.stores.base import CollectionInfo, Hit
 
 
 class FakeStore:
-    def __init__(self, v2=True):
-        self.v2 = v2
-
     def list_databases(self):
         return ["default"]
 
@@ -23,8 +20,7 @@ class FakeStore:
         return ["ingest"]
 
     def collection_info(self, db, coll):
-        fields = ([{"name": "id"}, {"name": "text"}, {"name": "sparse"}]
-                  if self.v2 else [{"name": "id"}, {"name": "text"}])
+        fields = [{"name": "id"}, {"name": "text"}, {"name": "sparse"}]
         return CollectionInfo(database=db, name=coll, dim=4, metric="cosine",
                               count=0, fields=fields)
 
@@ -174,28 +170,7 @@ def test_validation_error_422(client):
     assert resp.status_code == 422
 
 
-def test_capabilities_reports_v2(client):
+def test_capabilities_reports_llm_flag(client):
     resp = client.get("/v1/retrieval/capabilities?database=default")
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["schema_version"] == 2
-    assert data["migration_available"] is False
-    assert data["llm_configured"] is False
-
-
-@pytest.fixture
-def v1_client():
-    app = FastAPI()
-    app.include_router(retrieval_router)
-    app.add_exception_handler(HTTPException, _http_handler)
-    app.state.settings = FakeSettings()
-    app.state.store = FakeStore(v2=False)
-    app.state.embedder = FakeEmbedder()
-    app.state.reranker = FakeReranker()
-    return TestClient(app)
-
-
-def test_capabilities_reports_v1(v1_client):
-    data = v1_client.get("/v1/retrieval/capabilities").json()
-    assert data["schema_version"] == 1
-    assert data["migration_available"] is True
+    assert resp.json() == {"llm_configured": False}

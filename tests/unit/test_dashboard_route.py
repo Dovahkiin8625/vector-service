@@ -319,8 +319,8 @@ def test_dashboard_router_tag_is_dashboard():
 
 def test_dashboard_exposes_retrieval_panel():
     """Retrieval panel: NDJSON-streamed multi-channel retrieval with
-    mode presets, capabilities-driven disabled states, and the v1
-    migration banner."""
+    mode presets, intent routing, token budget and capabilities-driven
+    disabled states."""
     retrieval = (
         _ST / "static" / "dashboard" / "components" / "retrieval.js"
     ).read_text(encoding="utf-8")
@@ -341,13 +341,18 @@ def test_dashboard_exposes_retrieval_panel():
     # Endpoints consumed by the panel.
     assert "'/v1/retrieval/stream'" in retrieval
     assert "'/v1/retrieval/capabilities" in retrieval
-    assert "/collections/ingest/migrate" in retrieval
+    # No migrate residue in the panel.
+    assert "migrate" not in retrieval
     # Four mode presets.
     for m in ["'basic'", "'hybrid'", "'advanced'", "'custom'"]:
         assert m in retrieval
-    # Capabilities-driven disabled states: bm25 off on schema v1; the
-    # whole rewrite group off without an LLM.
-    assert ':disabled="s.caps.schema_version === 1"' in retrieval
+    # Four-channel weights, intent routing and token budget controls.
+    assert "s.wSummary" in retrieval
+    assert "s.wGraph" in retrieval
+    assert "s.routing" in retrieval
+    assert "s.maxTokens" in retrieval
+    # Capabilities-driven disabled states: LLM classifier off without
+    # an LLM; the whole rewrite group too.
     assert ':disabled="!s.caps.llm_configured"' in retrieval
     # NDJSON frame splitting (partial trailing line kept in buffer).
     assert "buffer.split('\\n')" in retrieval
@@ -355,8 +360,10 @@ def test_dashboard_exposes_retrieval_panel():
     # by NAV_LABELS and the nav-item's t() -> 4 occurrences).
     assert app_js.count("'nav.retrieval'") == 4
     assert app_js.count("'retrieval.trace'") == 2
-    assert app_js.count("'retrieval.v1_banner'") == 2
+    # Dead migrate i18n keys are gone from both locales.
+    assert "retrieval.v1_banner" not in app_js
+    assert "retrieval.migrate" not in app_js
     # Styles.
     assert ".retrieval-modes" in _CSS
-    assert ".retrieval-migrate-banner" in _CSS
+    assert ".retrieval-migrate-banner" not in _CSS
     assert ".retrieval-chunk" in _CSS

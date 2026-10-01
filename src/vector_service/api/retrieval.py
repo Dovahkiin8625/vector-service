@@ -16,11 +16,7 @@ from vector_service.core.errors import (
     StoreError,
 )
 from vector_service.retrieval.pipeline import RetrievalPipeline
-from vector_service.api.ingest import (
-    _store_http_error,
-    migrate_ingest_collection,
-    schema_version,
-)
+from vector_service.api.ingest import _store_http_error
 from vector_service.schemas.retrieval import (
     RetrievalRequest,
     RetrievalResponse,
@@ -37,6 +33,7 @@ def _pipeline(request: Request) -> RetrievalPipeline:
         store=state.store,
         embedder=getattr(state, "embedder", None),
         reranker=getattr(state, "reranker", None),
+        repo=getattr(state, "corpus", None),
     )
 
 
@@ -130,40 +127,10 @@ async def retrieve_stream(body: RetrievalRequest, request: Request):
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
-@router.post("/databases/{database}/collections/ingest/migrate")
-def migrate(database: str, request: Request) -> dict:
-    """One-click v1 → v2 migration of the ingest collection."""
-    store = request.app.state.store
-    if database not in store.list_databases():
-        raise HTTPException(status_code=404, detail={"error": {
-            "code": "database_not_found",
-            "message": f"database {database!r} does not exist",
-        }})
-    if "ingest" not in store.list_collections(database):
-        raise HTTPException(status_code=404, detail={"error": {
-            "code": "collection_not_found",
-            "message": "collection 'ingest' does not exist",
-        }})
-    info = store.collection_info(database, "ingest")
-    if schema_version(info) >= 2:
-        raise HTTPException(status_code=409, detail={"error": {
-            "code": "collection_exists",
-            "message": "ingest collection already uses schema v2",
-        }})
-    return migrate_ingest_collection(store, database, int(info.dim))
-
-
 @router.get("/retrieval/capabilities")
 def capabilities(request: Request, database: str = "default") -> dict:
-    """LLM availability + ingest schema version for the selected database."""
-    store = request.app.state.store
-    version = 1
-    if database in store.list_databases() and (
-        "ingest" in store.list_collections(database)
-    ):
-        version = schema_version(store.collection_info(database, "ingest"))
+    """LLM availability for the retrieval panel (database is informational)."""
+    _ = database
     return {
         "llm_configured": is_llm_configured(request.app.state.settings),
-        "schema_version": version,
-        "migration_available": version == 1,
     }

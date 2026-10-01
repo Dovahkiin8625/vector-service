@@ -61,8 +61,30 @@ def test_weights_must_have_one_positive():
     with pytest.raises(ValidationError):
         RetrievalRequest(query="q", fusion={
             "method": "weighted",
-            "weights": {"dense": 0, "bm25": 0},
+            "weights": {"dense": 0, "bm25": 0, "summary": 0, "graph": 0},
         })
+
+
+def test_weights_partial_inputs_keep_other_channel_defaults():
+    req = RetrievalRequest(query="q", fusion={
+        "method": "weighted",
+        "weights": {"dense": 0, "bm25": 0},
+    })
+    # summary/graph defaults keep the weight set valid.
+    assert req.fusion.weights.summary == 0.5
+    assert req.fusion.weights.graph == 0.5
+
+
+def test_routing_and_context_defaults():
+    req = RetrievalRequest(query="q")
+    assert req.routing.enabled is False
+    assert req.routing.use_llm is False
+    assert req.context.max_tokens is None
+
+
+def test_context_max_tokens_bounds():
+    with pytest.raises(ValidationError):
+        RetrievalRequest(query="q", context={"max_tokens": 0})
 
 
 def test_weights_non_negative():

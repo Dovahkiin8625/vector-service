@@ -24,19 +24,21 @@ def async_test(coro):
 _SPARSE_INFO_FIELDS = [
     {"name": "id"}, {"name": "text"}, {"name": "sparse"},
 ]
-_V1_INFO_FIELDS = [{"name": "id"}, {"name": "text"}]
 
 
 class FakeStore:
-    def __init__(self, v2=True):
-        self.v2 = v2
+    def __init__(self, collection_names=()):
+        self.collection_names = list(collection_names)
         self.search_calls = []
         self.text_calls = []
+
+    def list_collections(self, database):
+        return list(self.collection_names)
 
     def collection_info(self, db, coll):
         return CollectionInfo(
             database=db, name=coll, dim=4, metric="cosine", count=0,
-            fields=list(_SPARSE_INFO_FIELDS if self.v2 else _V1_INFO_FIELDS),
+            fields=list(_SPARSE_INFO_FIELDS),
         )
 
     @staticmethod
@@ -164,17 +166,6 @@ async def test_rerank_reorders_and_truncates():
 
 
 @async_test
-async def test_bm25_on_v1_collection_raises_with_migration_hint():
-    pipe = _pipe(store=FakeStore(v2=False))
-    with pytest.raises(Exception) as exc:
-        await pipe.retrieve(_req())
-    assert exc.value.status_code == 422
-    error = exc.value.detail["error"]
-    assert error["code"] == "retrieval_channel_unsupported"
-    assert error["migration_available"] is True
-
-
-@async_test
 async def test_missing_embedder_is_503():
     pipe = _pipe(embedder=None)
     with pytest.raises(Exception) as exc:
@@ -261,4 +252,5 @@ def test_build_filter_expr():
     expr = build_filter_expr(__import__(
         "vector_service.schemas.retrieval", fromlist=["FilterSpec"]
     ).FilterSpec(doc_id=" d1 ", filename="年 报"))
-    assert expr == 'doc_id == "d1" and filename like "%年 报%"'
+    # Document fields (filename) are resolved via SQLite, not the thin expr.
+    assert expr == 'doc_id == "d1"'

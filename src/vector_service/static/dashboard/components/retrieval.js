@@ -15,7 +15,7 @@ function defaultState() {
   return {
     databases: [],
     database: 'default',
-    caps: { llm_configured: false, schema_version: 2, migration_available: false },
+    caps: { llm_configured: false },
     query: '',
     topK: 10,
     mode: 'hybrid',
@@ -25,6 +25,10 @@ function defaultState() {
     rrfK: 60,
     wDense: 0.5,
     wBm25: 0.5,
+    wSummary: 0.5,
+    wGraph: 0.5,
+    routing: false,
+    routeLlm: false,
     rewrite: false,
     methods: { hyde: true, multi_query: true, step_back: true, decompose: true },
     hydeAlpha: 0.7,
@@ -33,6 +37,7 @@ function defaultState() {
     mmrLambda: 0.7,
     rerank: true,
     candidatePool: 25,
+    maxTokens: '',
     docId: '',
     filename: '',
     busy: false,
@@ -40,7 +45,6 @@ function defaultState() {
     error: '',
     result: null,
     showTrace: false,
-    migrating: false,
   };
 }
 
@@ -95,7 +99,12 @@ export default defineComponent({
         fusion: {
           method: s.fusionMethod,
           rrf_k: Number(s.rrfK),
-          weights: { dense: Number(s.wDense), bm25: Number(s.wBm25) },
+          weights: {
+            dense: Number(s.wDense),
+            bm25: Number(s.wBm25),
+            summary: Number(s.wSummary),
+            graph: Number(s.wGraph),
+          },
         },
         rewrite: {
           enabled: s.rewrite,
@@ -105,6 +114,10 @@ export default defineComponent({
         },
         mmr: { enabled: s.mmr, lambda_mult: Number(s.mmrLambda) },
         rerank: { enabled: s.rerank, candidate_pool: Number(s.candidatePool) },
+        routing: { enabled: s.routing, use_llm: s.routeLlm },
+        context: {
+          max_tokens: s.maxTokens === '' ? null : Number(s.maxTokens),
+        },
       };
     }
 
@@ -147,31 +160,12 @@ export default defineComponent({
       }
     }
 
-    async function migrate() {
-      s.migrating = true; s.error = '';
-      try {
-        const url = '/v1/databases/' + encodeURIComponent(s.database)
-          + '/collections/ingest/migrate';
-        const resp = await fetch(url, { method: 'POST' });
-        const body = await resp.json().catch(() => null);
-        if (!resp.ok) {
-          const info = body && body.error;
-          throw new Error(info ? info.message || info.code : `HTTP ${resp.status}`);
-        }
-        await loadCaps();
-      } catch (e) {
-        s.error = String(e.message || e);
-      } finally {
-        s.migrating = false;
-      }
-    }
-
     onMounted(async () => {
       await loadDatabases();
       await loadCaps();
     });
 
-    return { s, setMode, run, migrate };
+    return { s, setMode, run };
   },
   template: `
   <div class="retrieval-panel">
@@ -179,13 +173,6 @@ export default defineComponent({
       <div class="section-head">
         <h3 class="section-title">{{ s.database }} / ingest</h3>
         <span class="pill accent">POST /v1/retrieval/stream</span>
-      </div>
-
-      <div v-if="s.caps.schema_version === 1" class="retrieval-migrate-banner">
-        <span>⚠ schema v1：BM25 全文检索不可用</span>
-        <button class="btn sm" :disabled="s.migrating" @click="migrate">
-          {{ s.migrating ? 'migrating…' : '一键迁移到 v2' }}
-        </button>
       </div>
 
       <div class="retrieval-modes">
@@ -214,8 +201,7 @@ export default defineComponent({
       <div class="cap-group-title">channels &amp; fusion</div>
       <div class="row">
         <label><input type="checkbox" v-model="s.dense"> dense</label>
-        <label><input type="checkbox" v-model="s.bm25"
-          :disabled="s.caps.schema_version === 1"> bm25</label>
+        <label><input type="checkbox" v-model="s.bm25"> bm25</label>
       </div>
       <div class="row">
         <label>fusion</label>
@@ -232,7 +218,18 @@ export default defineComponent({
           <input type="number" min="0" step="0.1" v-model.number="s.wDense">
           <label>w bm25</label>
           <input type="number" min="0" step="0.1" v-model.number="s.wBm25">
+          <label>w summary</label>
+          <input type="number" min="0" step="0.1" v-model.number="s.wSummary">
+          <label>w graph</label>
+          <input type="number" min="0" step="0.1" v-model.number="s.wGraph">
         </template>
+      </div>
+
+      <div class="cap-group-title">intent routing</div>
+      <div class="row">
+        <label><input type="checkbox" v-model="s.routing"> auto-route channels</label>
+        <label><input type="checkbox" v-model="s.routeLlm"
+          :disabled="!s.caps.llm_configured"> use LLM classifier</label>
       </div>
 
       <div class="cap-group-title">query rewrite
@@ -267,12 +264,17 @@ export default defineComponent({
         <input type="number" min="1" max="64" v-model.number="s.candidatePool">
       </div>
 
-      <div class="cap-group-title">metadata filter</div>
+      <div class="cap-group-title">context budget &amp; metadata filter</div>
+      <div class="row">
+        <label>max tokens</label>
+        <input type="number" min="1" v-model.number="s.maxTokens"
+          placeholder="按 token 预算裁剪">
+      </div>
       <div class="row">
         <label>doc_id</label>
         <input v-model="s.docId" placeholder="精确匹配">
         <label>filename</label>
-        <input v-model="s.filename" placeholder="模糊匹配">
+        <input v-model="s.filename" placeholder="模糊匹配（SQLite 解析）">
       </div>
 
       <div class="actions">
@@ -313,6 +315,9 @@ export default defineComponent({
             doc_id {{ c.fields.doc_id }} · chunk #{{ c.fields.chunk_index }}
             <template v-if="c.fields.section_header"> · § {{ c.fields.section_header }}</template>
             <template v-if="c.fields.page_number"> · p.{{ c.fields.page_number }}</template>
+            <template v-if="c.fields.char_start !== null">
+              · chars {{ c.fields.char_start }}-{{ c.fields.char_end }}
+            </template>
             <template v-if="c.fields.filename"> · {{ c.fields.filename }}</template>
           </div>
         </div>

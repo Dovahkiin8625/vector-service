@@ -9,6 +9,7 @@ one vocabulary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -23,6 +24,15 @@ class RecallSpec:
     query: str
     vector: list[float] | None = None
     hypothetical: str | None = None
+
+
+@dataclass
+class MetaPredicate:
+    """One inline ``field op value`` condition pulled out of the query."""
+
+    field: str
+    op: str
+    value: str
 
 
 @dataclass
@@ -83,3 +93,4 @@ class RetrievalResult:
     plan: RetrievalPlan
     channel_runs: list[ChannelRun]
     traces: list[StageTrace]
+    route: Any = None

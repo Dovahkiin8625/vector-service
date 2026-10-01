@@ -30,6 +30,7 @@ from vector_service.api.multimodal_embeddings import (
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
+from vector_service.api.graph import router as graph_router
 from vector_service.api.parse import router as parse_router
 from vector_service.api.rebuild import router as rebuild_router
 from vector_service.api.rerank import router as rerank_router
@@ -208,6 +209,16 @@ OPENAPI_TAGS = [
             "canary; `.../reindex/promote` switches the binding and "
             "retires the old index; `.../consistency` compares corpus "
             "leaves with physical rows and can repair."
+        ),
+    },
+    {
+        "name": "graph",
+        "description": (
+            "GraphRAG build / status / delete. `POST .../graph/build` "
+            "submits a job that extracts entities, edges and claims from "
+            "the corpus leaf chunks, detects and summarizes communities, "
+            "and indexes entity/community vectors into independent thin "
+            "collections."
         ),
     },
     {
@@ -482,6 +493,7 @@ def create_app() -> FastAPI:
     app.include_router(retrieval_router)
     app.include_router(jobs_router)
     app.include_router(rebuild_router)
+    app.include_router(graph_router)
 
     return app
 

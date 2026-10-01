@@ -46,6 +46,15 @@ CONTENT_FIELDS = (
 )
 
 
+def _escape_like(value: str) -> str:
+    """Escape user input for use inside a LIKE ... ESCAPE '\\' pattern."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 class CorpusRepository:
     """System-of-record gateway for documents, chunks, jobs, index registry."""
 
@@ -1790,6 +1799,83 @@ class CorpusRepository:
             **{f"{k}_count": int(v) for k, v in counts.items()},
             "communities": [dict(row) for row in communities],
         }
+
+    def entity_mention_rows(
+        self, entity_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Provenance rows for entities: ``entity_id`` plus the joined
+        chunk identity (``chunk_id`` / ``doc_id`` / ``chunk_index``)."""
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" for _ in entity_ids)
+        with self._txn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.entity_id AS entity_id, m.chunk_id AS chunk_id,
+                       c.doc_id AS doc_id, c.chunk_index AS chunk_index
+                FROM entity_mentions m
+                JOIN chunks c ON c.chunk_id = m.chunk_id
+                WHERE m.entity_id IN ({placeholders})
+                """,
+                entity_ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    #: Document columns a predicate may address, by value kind.
+    _PREDICATE_TEXT_COLUMNS = ("filename", "title", "author", "status", "mime")
+    _PREDICATE_NUM_COLUMNS = ("page_count",)
+
+    def document_ids_for_predicates(
+        self,
+        database: str,
+        collection: str,
+        predicates: list[Any],
+    ) -> set[str] | None:
+        """Resolve document-field predicates into the matching doc_id set.
+
+        ``None`` when no predicates are supplied; an empty set means no
+        document matches. Column names are whitelisted and values are
+        parameterized, so predicate input cannot break out of the SQL.
+        """
+        if not predicates:
+            return None
+        clauses: list[str] = []
+        params: list[Any] = []
+        for predicate in predicates:
+            column = predicate.field
+            if column in self._PREDICATE_TEXT_COLUMNS:
+                if predicate.op == "like":
+                    clauses.append(f"{column} LIKE ? ESCAPE '\\'")
+                    params.append(f"%{_escape_like(predicate.value)}%")
+                elif predicate.op in ("==", "!="):
+                    clauses.append(f"{column} {predicate.op} ?")
+                    params.append(predicate.value)
+                else:
+                    raise ValueError(
+                        f"unsupported op {predicate.op!r} on text column"
+                    )
+            elif column in self._PREDICATE_NUM_COLUMNS:
+                if predicate.op not in ("==", "!=", ">", "<", ">=", "<="):
+                    raise ValueError(
+                        f"unsupported op {predicate.op!r} on numeric column"
+                    )
+                clauses.append(f"{column} {predicate.op} ?")
+                params.append(int(predicate.value))
+            else:
+                # Thin scalars / unknown fields are not resolved here.
+                continue
+
+        query = (
+            "SELECT doc_id FROM documents "
+            "WHERE database = ? AND collection = ?"
+        )
+        sql_params: tuple[Any, ...] = (database, collection)
+        if clauses:
+            query += " AND " + " AND ".join(clauses)
+            sql_params = (*sql_params, *params)
+        with self._txn() as conn:
+            rows = conn.execute(query, sql_params).fetchall()
+        return {row["doc_id"] for row in rows}
 
     def hydrate_entities(
         self, entity_ids: list[str]

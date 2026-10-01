@@ -20,17 +20,31 @@ from vector_service.chunking.llm_chunker import (
     is_llm_configured,
 )
 from vector_service.core.errors import CollectionNotFound
+from vector_service.graph.names import graph_collection_names
 from vector_service.retrieval import transforms as T
 from vector_service.retrieval.base import (
+    ChannelRun,
+    MetaPredicate,
     RecallSpec,
     RetrievalPlan,
     RetrievalResult,
     RetrievedChunk,
     StageTrace,
 )
-from vector_service.retrieval.channels import BM25Channel, DenseChannel
+from vector_service.retrieval.channels import (
+    BM25Channel,
+    DenseChannel,
+    GraphChannel,
+    SummaryChannel,
+)
 from vector_service.retrieval.diversity import mmr
 from vector_service.retrieval.fusion import rrf_fuse, weighted_fuse
+from vector_service.retrieval.routing import (
+    NUM_DOC_FIELDS,
+    TEXT_DOC_FIELDS,
+    heuristic_route,
+    llm_route,
+)
 from vector_service.schemas.retrieval import (
     FilterSpec,
     RetrievalRequest,
@@ -78,19 +92,62 @@ def _escape_like(value: str) -> str:
 
 
 def build_filter_expr(spec: FilterSpec) -> str | None:
-    """Convert filter.doc_id (eq) / filename (like) into a Milvus expression.
+    """Convert filter.doc_id (eq) into a thin-index Milvus expression.
 
-    Empty fields are omitted; LIKE wildcards and quotes in user input
-    are escaped so a filter value cannot break out of the expression.
+    Document-level fields (filename, title, ...) are not thin-index
+    scalars — the pipeline resolves those predicates against SQLite and
+    compiles them onto ``doc_id`` lists. Quotes in user input are
+    escaped so a value cannot break out of the expression.
     """
-    parts: list[str] = []
     doc_id = (spec.doc_id or "").strip()
-    filename = (spec.filename or "").strip()
-    if doc_id:
-        parts.append(f'doc_id == "{_escape_eq(doc_id)}"')
-    if filename:
-        parts.append(f'filename like "%{_escape_like(filename)}%"')
-    return " and ".join(parts) if parts else None
+    return f'doc_id == "{_escape_eq(doc_id)}"' if doc_id else None
+
+
+# Ops the thin index can apply directly per scalar kind.
+_NUMERIC_OPS = ("==", "!=", ">", "<", ">=", "<=")
+_TEXT_OPS = ("==", "!=", "like")
+
+
+def thin_predicate_expr(predicate: MetaPredicate) -> str | None:
+    """Compile one doc_id / chunk_index predicate onto the thin scalars.
+
+    Returns ``None`` for predicates that cannot be expressed directly
+    (document fields are resolved by SQLite instead).
+    """
+    if predicate.field == "chunk_index":
+        if predicate.op not in _NUMERIC_OPS:
+            return None
+        return f"chunk_index {predicate.op} {int(predicate.value)}"
+    if predicate.field == "doc_id":
+        if predicate.op not in _TEXT_OPS:
+            return None
+        if predicate.op == "like":
+            return f'doc_id like "%{_escape_like(predicate.value)}%"'
+        return f'doc_id {predicate.op} "{_escape_eq(predicate.value)}"'
+    return None
+
+
+def doc_id_in_expr(doc_ids: set[str]) -> str:
+    """Build a quoted ``doc_id in [...]`` expression from an id set."""
+    quoted = ", ".join(f'"{_escape_eq(doc_id)}"' for doc_id in sorted(doc_ids))
+    return f"doc_id in [{quoted}]"
+
+
+class _RecallFilter:
+    """Resolved constraints shared by every recall leg."""
+
+    def __init__(
+        self,
+        *,
+        expr: str | None,
+        doc_ids: set[str] | None,
+        index_predicates: list[MetaPredicate],
+        matches: bool,
+    ):
+        self.expr = expr
+        self.doc_ids = doc_ids
+        self.index_predicates = index_predicates
+        self.matches = matches
 
 
 class RetrievalPipeline:
@@ -103,6 +160,7 @@ class RetrievalPipeline:
         store: Any,
         embedder: Any,
         reranker: Any,
+        repo: Any = None,
         chat_getter: Callable = get_chat_client,
         chat_check: Callable = is_llm_configured,
     ):
@@ -110,6 +168,7 @@ class RetrievalPipeline:
         self._store = store
         self._embedder = embedder
         self._reranker = reranker
+        self._repo = repo
         self._chat_getter = chat_getter
         self._chat_check = chat_check
 
@@ -148,12 +207,24 @@ class RetrievalPipeline:
             name for name in schema_field_names
             if name and name not in (_VECTOR_FIELD, _SPARSE_FIELD)
         ]
-        if req.channels.bm25 and _SPARSE_FIELD not in field_names:
-            raise _http(
-                422, "retrieval_channel_unsupported",
-                "BM25 channel requires schema v2; migrate the ingest collection",
-                channels=["bm25"], migration_available=True,
+
+        # Summary leg needs the summary_vector field; graph legs need the
+        # two derived graph collections (plus graph rows when the repo is
+        # attached).
+        summary_available = "summary_vector" in field_names
+        entity_coll, community_coll = graph_collection_names(req.collection)
+        try:
+            coll_names = await loop.run_in_executor(
+                None, self._store.list_collections, req.database
             )
+        except CollectionNotFound:
+            coll_names = []
+        graph_available = entity_coll in coll_names and community_coll in coll_names
+        if graph_available and self._repo is not None:
+            stats = await loop.run_in_executor(
+                None, self._repo.graph_stats, req.database, req.collection
+            )
+            graph_available = int(stats["entities_count"]) > 0
 
         if req.rerank.enabled and (
             self._reranker is None or getattr(self._reranker, "_impl", None) is None
@@ -176,6 +247,8 @@ class RetrievalPipeline:
             "info": info,
             "rewrite_on": rewrite_on,
             "output_fields": output_fields,
+            "summary_available": summary_available,
+            "graph_available": graph_available,
         }
 
     async def retrieve(
@@ -190,6 +263,22 @@ class RetrievalPipeline:
         loop = asyncio.get_running_loop()
         traces: list[StageTrace] = []
 
+        # ---- route ----
+        decision = None
+        if req.routing.enabled:
+            await _send(emit, {"type": "stage", "stage": "route"})
+            timer = _Timer("route")
+            decision = await self._route(loop, req)
+            traces.append(timer.done({
+                "router": decision.router,
+                "intents": list(decision.intents),
+                "signals": list(decision.signals),
+            }))
+
+        effective_query = (
+            decision.query if decision is not None else req.query.strip()
+        )
+
         # ---- rewrite ----
         await _send(emit, {"type": "stage", "stage": "rewrite"})
         timer = _Timer("rewrite")
@@ -200,7 +289,7 @@ class RetrievalPipeline:
             )
             chat_fn = chat_client.as_chat_fn()
         plan = await loop.run_in_executor(
-            None, self._build_plan, req, chat_fn
+            None, self._build_plan, req, chat_fn, effective_query
         )
         traces.append(timer.done({
             "dense_queries": len(plan.dense_specs),
@@ -211,12 +300,17 @@ class RetrievalPipeline:
         want_pool = req.rerank.candidate_pool if req.rerank.enabled else 25
         recall_limit = min(64, max(req.top_k, want_pool))
 
+        # ---- resolve filters (predicates + corpus doc-id resolution) ----
+        ctx["decision"] = decision
+        recall_filter = await loop.run_in_executor(
+            None, self._resolve_filter, req, decision
+        )
+
         # ---- recall ----
         await _send(emit, {"type": "stage", "stage": "recall"})
         timer = _Timer("recall")
-        filter_expr = build_filter_expr(req.filter)
         runs = await self._recall(
-            loop, plan, req, recall_limit, filter_expr, ctx["output_fields"]
+            loop, plan, req, recall_limit, recall_filter, ctx
         )
         traces.append(timer.done({"legs": len(runs), "per_leg_top_k": recall_limit}))
 
@@ -227,12 +321,27 @@ class RetrievalPipeline:
             chunks = rrf_fuse(runs, rrf_k=req.fusion.rrf_k)
         else:
             chunks = weighted_fuse(runs, req.fusion.weights.model_dump())
+
+        # ---- hydrate content + citation fields from the corpus ----
+        hydrated = 0
+        if self._repo is not None and chunks:
+            rows = await loop.run_in_executor(
+                None, self._repo.hydrate, [c.chunk_id for c in chunks]
+            )
+            for chunk in chunks:
+                row = rows.get(chunk.chunk_id)
+                if row is not None:
+                    chunk.fields.update(row)
+            hydrated = len(rows)
         traces.append(timer.done({
             "method": req.fusion.method, "chunks": len(chunks),
+            "hydrated": hydrated,
         }))
 
         if not chunks:
-            return RetrievalResult(req.query, [], plan, runs, traces)
+            return RetrievalResult(
+                req.query, [], plan, runs, traces, route=decision
+            )
 
         # ---- mmr ----
         if req.mmr.enabled:
@@ -279,14 +388,95 @@ class RetrievalPipeline:
         else:
             chunks = chunks[: req.top_k]
 
-        return RetrievalResult(req.query, chunks, plan, runs, traces)
+        # ---- compress to token budget ----
+        if req.context.max_tokens is not None:
+            await _send(emit, {"type": "stage", "stage": "compress"})
+            timer = _Timer("compress")
+            before = len(chunks)
+            chunks = _compress_to_budget(chunks, req.context.max_tokens)
+            traces.append(timer.done({
+                "budget": req.context.max_tokens,
+                "kept": len(chunks), "dropped": before - len(chunks),
+            }))
+
+        return RetrievalResult(
+            req.query, chunks, plan, runs, traces, route=decision
+        )
 
     # ---- internal ----
 
-    def _build_plan(
-        self, req: RetrievalRequest, chat_fn: Any
-    ) -> RetrievalPlan:
+    async def _route(
+        self, loop: asyncio.AbstractEventLoop, req: RetrievalRequest
+    ):
+        """Classify intent; LLM classification degrades to heuristic."""
         query = req.query.strip()
+        if req.routing.use_llm and self._chat_check(self._settings):
+            chat_client = await loop.run_in_executor(
+                None, self._chat_getter, self._settings
+            )
+            decision = await loop.run_in_executor(
+                None, llm_route, chat_client.as_chat_fn(), query
+            )
+            if decision is not None:
+                return decision
+        return await loop.run_in_executor(None, heuristic_route, query)
+
+    def _resolve_filter(
+        self, req: RetrievalRequest, decision: Any
+    ) -> _RecallFilter:
+        """Compile explicit filters + routed predicates into recall constraints."""
+        predicates = list(decision.predicates) if decision else []
+        expr_parts: list[str] = []
+        base_expr = build_filter_expr(req.filter)
+        if base_expr:
+            expr_parts.append(base_expr)
+        index_predicates: list[MetaPredicate] = []
+        for predicate in predicates:
+            fragment = thin_predicate_expr(predicate)
+            if fragment is not None:
+                expr_parts.append(fragment)
+            if predicate.field == "chunk_index":
+                index_predicates.append(predicate)
+
+        # Document-field predicates are resolved against SQLite (the thin
+        # Milvus index has no document columns), incl. the explicit
+        # filename filter, then compiled onto a doc_id list.
+        doc_predicates = [
+            p for p in predicates
+            if p.field in (*TEXT_DOC_FIELDS, *NUM_DOC_FIELDS)
+        ]
+        filename = (req.filter.filename or "").strip()
+        if filename:
+            doc_predicates.append(MetaPredicate(
+                field="filename", op="like", value=filename,
+            ))
+
+        doc_ids: set[str] | None = None
+        matches = True
+        if self._repo is not None:
+            doc_ids = self._repo.document_ids_for_predicates(
+                req.database, req.collection, doc_predicates
+            )
+            if doc_ids is not None:
+                if not doc_ids:
+                    matches = False
+                else:
+                    expr_parts.append(doc_id_in_expr(doc_ids))
+
+        expr = " and ".join(expr_parts) if expr_parts else None
+        return _RecallFilter(
+            expr=expr,
+            doc_ids=doc_ids,
+            index_predicates=index_predicates,
+            matches=matches,
+        )
+
+    def _build_plan(
+        self,
+        req: RetrievalRequest,
+        chat_fn: Any,
+        query: str,
+    ) -> RetrievalPlan:
         dense = [RecallSpec(query=query)]
         lexical: list[str] = [query]
         sub_queries: list[str] = []
@@ -329,30 +519,116 @@ class RetrievalPipeline:
         plan: RetrievalPlan,
         req: RetrievalRequest,
         top_k: int,
-        filter_expr: str | None,
-        output_fields: list[str],
-    ) -> list:
+        recall_filter: _RecallFilter,
+        ctx: dict,
+    ) -> list[ChannelRun]:
+        # Routing (when on) drives the channel set; otherwise the
+        # explicit channels spec applies.
+        use_dense = req.channels.dense
+        use_bm25 = req.channels.bm25
+        use_summary = False
+        use_graph = False
+        if req.routing.enabled:
+            decision = ctx["decision"]
+            use_dense = bool(decision.dense)
+            use_bm25 = bool(decision.bm25)
+            use_summary = bool(decision.summary and ctx["summary_available"])
+            use_graph = bool(decision.graph and ctx["graph_available"])
+
+        output_fields = ctx["output_fields"]
+
+        if not recall_filter.matches:
+            # A resolved predicate set matched no document: keep the
+            # planned legs visible in the trace as empty runs.
+            return self._empty_runs(
+                plan,
+                use_dense=use_dense,
+                use_bm25=use_bm25,
+                use_summary=use_summary,
+                use_graph=use_graph,
+            )
+
         dense_ch = DenseChannel(self._store, req.database, req.collection,
                                 self._embedder, _VECTOR_FIELD)
         bm25_ch = BM25Channel(self._store, req.database, req.collection,
                               _SPARSE_FIELD)
+        summary_ch = SummaryChannel(self._store, req.database, req.collection,
+                                    self._embedder)
         tasks: list[Awaitable] = []
-        if req.channels.dense:
+        if use_dense:
             for spec in plan.dense_specs:
                 tasks.append(loop.run_in_executor(
                     None,
                     functools.partial(dense_ch.recall, spec, top_k,
-                                      filter_expr, output_fields),
+                                      recall_filter.expr, output_fields),
                 ))
-        if req.channels.bm25:
+        if use_summary:
+            for spec in plan.dense_specs:
+                tasks.append(loop.run_in_executor(
+                    None,
+                    functools.partial(summary_ch.recall, spec, top_k,
+                                      recall_filter.expr, output_fields),
+                ))
+        if use_bm25:
             for query_text in plan.lexical_queries:
                 spec = RecallSpec(query=query_text)
                 tasks.append(loop.run_in_executor(
                     None,
                     functools.partial(bm25_ch.recall, spec, top_k,
-                                      filter_expr, output_fields),
+                                      recall_filter.expr, output_fields),
                 ))
+        if use_graph:
+            entity_coll, community_coll = graph_collection_names(req.collection)
+            graph_ch = GraphChannel(
+                store=self._store,
+                repo=self._repo,
+                database=req.database,
+                entity_collection=entity_coll,
+                community_collection=community_coll,
+                embedder=self._embedder,
+            )
+            tasks.append(loop.run_in_executor(
+                None,
+                functools.partial(
+                    graph_ch.recall,
+                    RecallSpec(query=plan.original_query),
+                    top_k,
+                    doc_ids=recall_filter.doc_ids,
+                    index_predicates=recall_filter.index_predicates,
+                ),
+            ))
         return list(await asyncio.gather(*tasks))
+
+    @staticmethod
+    def _empty_runs(
+        plan: RetrievalPlan,
+        *,
+        use_dense: bool,
+        use_bm25: bool,
+        use_summary: bool,
+        use_graph: bool,
+    ) -> list[ChannelRun]:
+        runs: list[ChannelRun] = []
+        if use_dense:
+            runs.extend(
+                ChannelRun(channel="dense", query=spec.query)
+                for spec in plan.dense_specs
+            )
+        if use_summary:
+            runs.extend(
+                ChannelRun(channel="summary", query=spec.query)
+                for spec in plan.dense_specs
+            )
+        if use_bm25:
+            runs.extend(
+                ChannelRun(channel="bm25", query=query)
+                for query in plan.lexical_queries
+            )
+        if use_graph:
+            runs.append(ChannelRun(
+                channel="graph", query=plan.original_query,
+            ))
+        return runs
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -375,3 +651,34 @@ def _dedupe_specs(specs: list[RecallSpec]) -> list[RecallSpec]:
             seen.add(spec.query)
             out.append(spec)
     return out
+
+
+def _chunk_tokens(chunk: RetrievedChunk) -> int:
+    raw = chunk.fields.get("token_count")
+    return int(raw) if raw is not None else 0
+
+
+def _compress_to_budget(
+    chunks: list[RetrievedChunk], max_tokens: int
+) -> list[RetrievedChunk]:
+    """Greedy token-budget cut over the ranked chunks.
+
+    The top-ranked chunk is always kept even if it alone exceeds the
+    budget; in that case its overflow is forgiven and the following
+    chunks pack against the full budget. Otherwise packing is
+    cumulative. Zero-token chunks (missing ``token_count``) are never
+    dropped; the first positive-token chunk that would reach the budget
+    is where the cut happens — it and everything after it are dropped.
+    """
+    if not chunks:
+        return []
+    kept: list[RetrievedChunk] = [chunks[0]]
+    first_tokens = _chunk_tokens(chunks[0])
+    used = 0 if first_tokens > max_tokens else first_tokens
+    for chunk in chunks[1:]:
+        tokens = _chunk_tokens(chunk)
+        if tokens > 0 and used + tokens >= max_tokens:
+            break
+        kept.append(chunk)
+        used += tokens
+    return kept

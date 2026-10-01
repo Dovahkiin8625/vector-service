@@ -25,6 +25,8 @@ class FilterSpec(BaseModel):
 class ChannelWeights(BaseModel):
     dense: float = 0.5
     bm25: float = 0.5
+    summary: float = 0.5
+    graph: float = 0.5
 
 
 class ChannelsSpec(BaseModel):
@@ -52,9 +54,11 @@ class FusionSpec(BaseModel):
 
     @model_validator(mode="after")
     def _weights_valid(self):
-        if self.weights.dense < 0 or self.weights.bm25 < 0:
+        values = (self.weights.dense, self.weights.bm25,
+                  self.weights.summary, self.weights.graph)
+        if any(w < 0 for w in values):
             raise ValueError("fusion weights must be >= 0")
-        if self.weights.dense == 0 and self.weights.bm25 == 0:
+        if all(w == 0 for w in values):
             raise ValueError("at least one fusion weight must be > 0")
         return self
 
@@ -86,6 +90,20 @@ class RerankSpec(BaseModel):
     candidate_pool: int = Field(25, ge=1, le=64)
 
 
+class RoutingSpec(BaseModel):
+    #: Auto-select channels/predicates from query intent; when off the
+    #: explicit ``channels`` spec drives recall.
+    enabled: bool = False
+    #: Let the LLM classify; silently degrades to the heuristic router.
+    use_llm: bool = False
+
+
+class ContextSpec(BaseModel):
+    #: Trim the ranked answer so cumulative chunk tokens stay within this
+    #: budget; the top-ranked chunk is always kept even if it exceeds it.
+    max_tokens: int | None = Field(None, ge=1, le=100_000)
+
+
 class RetrievalRequest(BaseModel):
     database: str = Field("default", min_length=1)
     collection: str = Field("ingest", min_length=1)
@@ -97,6 +115,8 @@ class RetrievalRequest(BaseModel):
     rewrite: RewriteSpec = Field(default_factory=RewriteSpec)
     mmr: MMRSpec = Field(default_factory=MMRSpec)
     rerank: RerankSpec = Field(default_factory=RerankSpec)
+    routing: RoutingSpec = Field(default_factory=RoutingSpec)
+    context: ContextSpec = Field(default_factory=ContextSpec)
 
     @model_validator(mode="after")
     def _pool_covers_top_k(self):
@@ -150,12 +170,31 @@ class RetrievedChunkOut(BaseModel):
     rerank_score: float | None = None
 
 
+class PredicateOut(BaseModel):
+    field: str
+    op: str
+    value: str
+
+
+class RouteOut(BaseModel):
+    router: str
+    intents: list[str]
+    signals: list[str]
+    dense: bool
+    bm25: bool
+    summary: bool
+    graph: bool
+    predicates: list[PredicateOut]
+    query: str
+
+
 class RetrievalResponse(BaseModel):
     query: str
     chunks: list[RetrievedChunkOut]
     plan: PlanOut
     channel_runs: list[ChannelRunOut]
     traces: list[StageTraceOut]
+    route: RouteOut | None = None
 
 
 def to_result(result: RetrievalResult) -> RetrievalResponse:
@@ -200,4 +239,24 @@ def to_result(result: RetrievalResult) -> RetrievalResponse:
                           detail=tr.detail)
             for tr in result.traces
         ],
+        route=(
+            RouteOut(
+                router=result.route.router,
+                intents=list(result.route.intents),
+                signals=list(result.route.signals),
+                dense=result.route.dense,
+                bm25=result.route.bm25,
+                summary=result.route.summary,
+                graph=result.route.graph,
+                predicates=[
+                    PredicateOut(
+                        field=p.field, op=p.op, value=p.value
+                    )
+                    for p in result.route.predicates
+                ],
+                query=result.route.query,
+            )
+            if result.route is not None
+            else None
+        ),
     )
