@@ -84,8 +84,18 @@ export default defineComponent({
         errMsg.value = '';
         canRetry.value = false;
         if (props.kind === 'text') {
-          const input = safeParse(listInput.value);
-          const arr = Array.isArray(input) ? input : [textInput.value];
+          let arr;
+          if (modeText.value === 'list') {
+            // In list mode the single-text box is hidden, but a parse
+            // failure used to fall back to it anyway — so a typo'd array
+            // silently embedded the stale 'hello world' default instead
+            // of the text the operator could see (B10).
+            const input = safeParse(listInput.value);
+            if (!Array.isArray(input)) { fail('embeddings.err.bad_list'); return; }
+            arr = input;
+          } else {
+            arr = [textInput.value];
+          }
           const { payload } = await api('POST', '/v1/embeddings', { model: model.value, input: arr });
           result.value = payload;
         } else if (props.kind === 'image') {

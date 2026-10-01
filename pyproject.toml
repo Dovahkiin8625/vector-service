@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vector-service"
-version = "0.1.0"
+# Version lives in src/vector_service/__init__.py (see [tool.setuptools.dynamic]
+# below) so the packaged metadata and the runtime constant cannot drift.
+dynamic = ["version"]
 description = "Production-grade vector service: OpenAI-compatible embeddings + extensible vector store"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -75,6 +77,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "vector_service.__version__"}
 
 [tool.pytest.ini_options]
 minversion = "8.0"

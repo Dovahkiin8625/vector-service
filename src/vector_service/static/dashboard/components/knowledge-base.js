@@ -26,6 +26,11 @@ const CHUNK_FIELDS = [
 // MIME itself — accept="" only filters the file picker.
 const INGEST_ACCEPT = '.pdf,.docx,.pptx,.html,.htm,.xhtml,.jpg,.jpeg,.png,.tif,.tiff,.webp,.bmp,.md,.markdown,.txt';
 
+// A parse/ingest stream that produces no bytes and no events for this
+// long is treated as dead and aborted (see the watchdog in streamPost).
+// Generous: a big document can sit in one server-side stage for a while.
+const STREAM_IDLE_MS = 120000;
+
 // Values match the profile form field validated by api/parse.py
 // (PARSE_PROFILES); labels come from i18n profile.* keys.
 const PROFILES = [
@@ -160,6 +165,10 @@ export default defineComponent({
     const parseProgress = ref(null);
     const parseError = ref(null);            // { code, message }
     let parseTimer = null;
+    // Live socket of the in-flight run, so "cancel" can abort it. The
+    // two views can't run at once, but each keeps its own handle.
+    let parseXhr = null;
+    let ingestXhr = null;
     const chunkSize = ref(800);
     const chunkOverlap = ref(80);
     const chunkStrategy = ref('recursive');
@@ -395,8 +404,15 @@ export default defineComponent({
               parseProgress.value = { page: ev.page, total: ev.total };
             }
           },
+          (x) => { parseXhr = x; },
         );
-        if (!res.ok) {
+        if (res.aborted) {
+          // Cancelled or timed out: not a parse failure, so it reports
+          // through the panel banner instead of the error pane.
+          parseError.value = null;
+          status.value = 'ok';
+          statusMsg.value = res.payload.error.message;
+        } else if (!res.ok) {
           const err = (res.payload && res.payload.error) || {};
           parseError.value = {
             code: err.code || ('HTTP ' + res.status),
@@ -413,10 +429,20 @@ export default defineComponent({
           message: extractApiError(e, t('parse.err.network')),
         };
       } finally {
+        parseXhr = null;
         if (parseTimer) { clearInterval(parseTimer); parseTimer = null; }
         parseElapsed.value = (performance.now() - startedAt) / 1000;
         parseBusy.value = false;
       }
+    }
+
+    // Abort button next to the in-flight progress bar. The server sees a
+    // dropped connection and stops; the panel unwinds through onabort.
+    function cancelParse() {
+      if (parseXhr) parseXhr.abort();
+    }
+    function cancelIngest() {
+      if (ingestXhr) ingestXhr.abort();
     }
     // Strategy-specific option bag; keys mirror what
     // build_chunker() consumes in chunking/factory.py.
@@ -472,19 +498,41 @@ export default defineComponent({
     // the caller exactly like the shared api() helper. A pre-flight
     // JSON envelope (stream never started) lands via the onload
     // fallback below.
-    function streamPost(url, form, onPct, onEvent) {
+    function streamPost(url, form, onPct, onEvent, onStart) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', url);
         let pos = 0;
         let buf = '';
         let settled = false;
+        // Watchdog: a stream that stops emitting events (server wedged,
+        // proxy holding the socket open) left the panel spinning
+        // forever with no way out (B12). Re-armed on every sign of life
+        // — upload bytes, response bytes, a parsed event.
+        let idleTimer = null;
+        let timedOut = false;
+
+        function disarmIdle() {
+          if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        }
+        function armIdle() {
+          disarmIdle();
+          idleTimer = setTimeout(() => {
+            timedOut = true;
+            xhr.abort();
+          }, STREAM_IDLE_MS);
+        }
 
         function finish(result) {
           if (settled) return;
           settled = true;
+          disarmIdle();
           resolve(result);
         }
+
+        // Hand the socket back so the caller can abort it from a
+        // "cancel" button; the promise then settles through onabort.
+        if (onStart) onStart(xhr);
 
         function handleEvent(ev) {
           if (ev.type === 'stage' || ev.type === 'progress') {
@@ -504,6 +552,7 @@ export default defineComponent({
           const full = xhr.responseText || '';
           buf += full.slice(pos);
           pos = full.length;
+          if (full.length) armIdle();
           let nl;
           while ((nl = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, nl).trim();
@@ -515,13 +564,14 @@ export default defineComponent({
 
         if (xhr.upload) {
           xhr.upload.onprogress = (e) => {
+            armIdle();
             if (e.lengthComputable) {
               // Hold at 99% until upload.onload — the last progress
               // event can precede the request being fully sent.
               onPct(Math.min(99, Math.round((e.loaded / e.total) * 100)));
             }
           };
-          xhr.upload.onload = () => onPct(100);
+          xhr.upload.onload = () => { armIdle(); onPct(100); };
         }
         xhr.onprogress = () => {
           try { drain(false); }
@@ -531,6 +581,7 @@ export default defineComponent({
           }
         };
         xhr.onload = () => {
+          disarmIdle();
           try { drain(true); }
           catch (e) {
             finish({ ok: false, status: 0,
@@ -548,9 +599,28 @@ export default defineComponent({
             payload,
           });
         };
+        // abort() lands here, whether it came from the cancel button or
+        // from the watchdog. Resolving (rather than leaving the promise
+        // pending) is what lets the caller's `await` unwind and clear
+        // its busy flag.
+        xhr.onabort = () => {
+          finish({
+            ok: false,
+            status: 0,
+            aborted: true,
+            payload: { error: {
+              code: timedOut ? 'stream_timeout' : 'cancelled',
+              message: timedOut
+                ? t('kb.err.timeout', { seconds: Math.round(STREAM_IDLE_MS / 1000) })
+                : t('kb.cancelled'),
+            } },
+          });
+        };
         xhr.onerror = () => {
+          disarmIdle();
           if (!settled) { settled = true; reject(new Error(t('ingest.err.network'))); }
         };
+        armIdle();
         xhr.send(form);
       });
     }
@@ -719,9 +789,15 @@ export default defineComponent({
               ingestParsePages.value = { page: ev.page, total: ev.total };
             }
           },
+          (x) => { ingestXhr = x; },
         );
         const durationMs = performance.now() - startedAt;
-        if (!res.ok) {
+        if (res.aborted) {
+          ingestFailedStage.value = null;
+          ingestError.value = null;
+          status.value = 'ok';
+          statusMsg.value = res.payload.error.message;
+        } else if (!res.ok) {
           const err = (res.payload && res.payload.error) || {};
           ingestFailedStage.value = ingestStage.value;
           ingestError.value = {
@@ -746,6 +822,7 @@ export default defineComponent({
           message: extractApiError(e, t('ingest.err.network')),
         };
       } finally {
+        ingestXhr = null;
         if (ingestTimer) { clearInterval(ingestTimer); ingestTimer = null; }
         ingestElapsed.value = (performance.now() - startedAt) / 1000;
         ingestBusy.value = false;
@@ -763,6 +840,7 @@ export default defineComponent({
              parseBusy, parseStage, parseUploadPct, parseElapsed, parseProgress, parseError,
              ingestProfile,
              doParse, doChunk, doIngest, onIngestFile, copyDocId,
+             cancelParse, cancelIngest,
              onParseFile,
              copyParseMarkdown, downloadParseMarkdown,
              stageState, stageLabelKey, stageHintKey,
@@ -824,6 +902,7 @@ export default defineComponent({
             <span class="spinner"></span>
             <span class="ingest-phase-label">{{ parseStage === 'uploading' ? $t('parse.uploading') : $t('parse.parsing') }}</span>
             <span class="ingest-elapsed">{{ parseElapsed.toFixed(1) }} {{ $t('common.seconds') }}</span>
+            <button class="btn sm" id="btn-parse-cancel" @click="cancelParse">{{ $t('common.cancel') }}</button>
           </div>
           <div class="bar">
             <span v-if="parseStage === 'uploading'" :style="{ width: parseUploadPct + '%' }"></span>
@@ -935,7 +1014,10 @@ export default defineComponent({
               <span v-if="c.section_header" class="hint">{{ c.section_header }}</span>
               <span v-if="c.page_number != null" class="hint">{{ $t('kb.page', { n: c.page_number }) }}</span>
             </div>
-            <div v-if="c.context" class="chunk-context" id="chunk-context-text">
+            <!-- No id here: this sits inside a v-for, so a fixed id
+                 repeated once per chunk and made the document invalid
+                 (B12). The .chunk-context class is what styles it. -->
+            <div v-if="c.context" class="chunk-context">
               <span class="hint">{{ $t('chunk.context_prefix') }}</span>{{ c.context }}
             </div>
             <pre class="code-pane">{{ c.text }}</pre>
@@ -1052,6 +1134,7 @@ export default defineComponent({
             <span class="spinner"></span>
             <span class="ingest-phase-label">{{ $t(stageLabelKey(ingestStage)) }}</span>
             <span class="ingest-elapsed">{{ ingestElapsed.toFixed(1) }} {{ $t('common.seconds') }}</span>
+            <button class="btn sm" id="btn-ingest-cancel" @click="cancelIngest">{{ $t('common.cancel') }}</button>
           </div>
           <ol class="ingest-stages">
             <li v-for="(s, i) in STAGES" :key="s.key"

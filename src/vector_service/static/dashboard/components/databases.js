@@ -1,5 +1,5 @@
 // Databases panel: list + expandable detail (metadata + collection list).
-import { defineComponent, ref, computed, onMounted } from '../vue.esm-browser.prod.js';
+import { defineComponent, ref, computed, onMounted, onUnmounted } from '../vue.esm-browser.prod.js';
 import { store, api, enc, extractApiError, t } from './app.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 
@@ -114,6 +114,9 @@ export default defineComponent({
       refresh();
       window.addEventListener('refresh-dbs', refresh);
     });
+    // Without this the handler outlived the component: every remount
+    // added another one, so one dispatched event fired N refreshes (B14).
+    onUnmounted(() => window.removeEventListener('refresh-dbs', refresh));
 
     const opKind = computed(() => (opStatus.value === 'error' ? 'error' : 'success'));
 
@@ -141,8 +144,12 @@ export default defineComponent({
           <template v-for="name in list" :key="name">
             <div class="list-item" :data-db-name="name" @click="toggleDetail(name)">
               <span class="name">{{ name }}</span>
+              <!-- Two different numbers: collections and metadata
+                   entries. This used to render the collection count on
+                   both sides of the slash, so the row read
+                   "3 collection count / 3" with no second source (B7). -->
               <span class="meta">
-                <template v-if="details[name]">{{ details[name].total }} {{ $t('databases.coll_count') }} / {{ details[name].total }}</template>
+                <template v-if="details[name]">{{ details[name].total }} {{ $t('databases.coll_count') }} / {{ Object.keys(details[name].metadata || {}).length }} {{ $t('databases.meta_count') }}</template>
                 <template v-else>— / —</template>
               </span>
               <span style="color:var(--text-muted);font-size:12px;">{{ expanded.has(name) ? '▾' : '▸' }}</span>

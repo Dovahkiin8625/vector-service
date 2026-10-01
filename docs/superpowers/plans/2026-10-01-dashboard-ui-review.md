@@ -8,7 +8,9 @@
 > |---|---|
 > | S1 i18n 体系 | **已实施**（2026-10-01，见 §1 S1 实施记录） |
 > | S2 操作反馈 | **已实施**（2026-10-01，见 §1 S2 实施记录） |
-> | S3–S7、阶段一/三 | 未开始 |
+> | S3 功能 Bug 清单（B1–B14） | **已实施**（2026-10-01，见 §1 S3 实施记录） |
+> | S4 版本号单一来源 | **已实施**（2026-10-01，见 §1 S4 实施记录） |
+> | S5–S7、阶段一剩余项、阶段三 | 未开始 |
 
 ---
 
@@ -121,6 +123,34 @@
 | B13 | `ops-eval.js` | runDetail 打开后切换 tab 被静默吞掉（内容仍显示 run 详情）；`runBack`、`parseParams` 为死状态/死代码 |
 | B14 | 多处 | window 事件监听（`refresh-dbs` 等）无 `onUnmounted` 移除，组件重挂载重复绑定 |
 
+**实施记录（2026-10-01）**：B1–B14 全部处理完毕（B2 已随 S2 落地，本次无改动）。
+
+| # | 结论 | 落地方式 |
+|---|---|---|
+| B1 | 已修 | `modals.js` NewDbModal 的 `setup()` 返回对象补回 `store`，模板读 `store.modalErr.newDb` 不再抛错，模态可正常打开 |
+| B2 | 已修（S2） | 见 §1 S2 实施记录，本次未改动 |
+| B3 | 已修 | 跳页框改为独立可写 `jumpPage`，`currentPage` 变更时用 watch 同步回去；`jumpTo()` 夹取到 `[1, totalPages]` 后换算 offset |
+| B4 | 已修 | 新增 `resetSelectionState()`，在切库 / 切集合 / 改主键字段时清空 `selected`；`runQuery` 记录 `appliedFilter`，filter 表达式变化即清选择；`pageSize` 变更重置 offset；全选框补 `indeterminate`（`somePageSelected`） |
+| B5 | 已修 | `watch(coll)` 清空 `outputFields` 并重取 schema；`metric` 从集合详情读取，结果区标题显示「metric · 越大/越小越接近」；分数改为 `formatScore()` 原始值 4 位小数，非有限值渲染 `—` |
+| B6 | 已修 | 新增 `fmtScore()` 覆盖 fusion/rerank/trace 三处；`content-type` 取不到时按空串处理，不再 `.includes()` 抛错；`stages` 改为去重 push |
+| B7 | 已修 | `databases.js` 行内 meta 右侧改为 metadata 条目数（`Object.keys(...).length`），不再是集合数渲染两次 |
+| B8 | 已修 | 提升按钮从 `v-else-if="gates.length"` 分支内移出，无门禁分支同样可见；`promote` 失败改写入新 `promoteErr` 槽（不再污染 gateErr 的「重试=重跑门禁列表」语义）；按钮 `:disabled="!canPromote"` 并给出禁用原因 |
+| B9 | 已修 | `setMode('custom')` 落地为真正的原始 JSON 请求体编辑器：进入时按当前控件生成 body，运行前 `JSON.parse` 并校验为对象，失败写 `retrieval.err.bad_json` |
+| B10 | 已修 | list 模式下解析失败不再回退隐藏的 `textInput`（其 `'hello world'` 默认值曾被静默发出），改为报 `embeddings.err.bad_list` |
+| B11 | 已修 | 新索引表单改为按集合键控的响应式状态（`newIndex`），在 `loadDetail` 时以 `payload.metric` 播种；params 除 JSON 可解析外还校验为**对象**（排除 `[]`/`5`/`null`） |
+| B12 | 已修 | 删掉 `v-for` 内重复的 `id="chunk-context-text"`；`streamPost` 增加 120s 空闲看门狗与 `onabort` 处理，解析/入库进度条各加「取消」按钮 |
+| B13 | 已修 | `switchTab` 清空 `runDetail`（此前被 `v-if` 静默吞掉）；`closeRun` 读取 `runBack` 回到来源 tab；删除死代码 `parseParams` |
+| B14 | 已修 | `databases.js`、`collections.js` 补 `onUnmounted` 注销 `refresh-dbs` / `refresh-colls` 监听 |
+
+**偏离计划的两处**（均为核实后主动收窄/扩展）：
+
+- **B8「多 gate/check 时加选择器」未采纳**。核实后端契约后确认该建议不成立：`corpus/schema.py` 的 `regression_gates` 有 `UNIQUE(database, collection)`，一个 scope 至多一条门禁；`api/rebuild.py` 的 `promote_reindex_job` 自身通过 `get_gate_for_collection` + `get_latest_gate_check` 解析门禁，不接受客户端传入 gate/check。即客户端的 `gates[0]`/`checks[0]` 与服务端将读取的行**必然一致**，加选择器会暗示客户端能对另一条门禁提升。改为用 `scopeGate`/`latestCheck`/`canPromote`/`promoteBlockReason` 把这层语义写显式，并在界面注明「门禁按数据库+集合唯一」。
+- **顺带修掉两处计划外缺陷**：① `collections.js` 的 `refreshColls` 用 `db::coll` 全键去比对只含集合名的 `live` 集合，导致每次刷新清空全部详情缓存——改为比对 `::` 之后的集合名（否则 B11 的表单状态也会被一并清掉）；② `ops-eval.js` 的 `runDetail.summary.*` 在 summary 缺失/不完整时渲染即崩，抽出 `summary` computed 兜底为 `{}`（`fixed()`/`pct()` 已把缺失值渲染为 `—`）。第 ② 条对应 §2 第 21 条笔记中的「KPI summary 缺失会崩」，其余同条笔记项（gates 分页、子表空态/局部 loading、无 run_id 行的可点击样式）仍留待阶段三。
+
+- 新增 i18n key（两侧同步、placeholder 一致）：`search.score`、`search.metric_higher`、`search.metric_lower`、`retrieval.custom_json`、`retrieval.custom_hint`、`retrieval.custom_regen`、`retrieval.err.bad_json`、`embeddings.err.bad_list`、`ops.reindex.block_no_check`、`ops.reindex.block_check_failed`（`{status}`）、`ops.reindex.gate_scope_note`、`kb.cancelled`、`kb.err.timeout`（`{seconds}`）。「取消」按钮复用既有 `common.cancel`。
+- 测试：`tests/` 全量 **958 passed / 2 skipped / 0 failed**（2 例按既有条件跳过）。`test_dashboard_route.py` / `test_dashboard_i18n.py` / `test_dashboard_feedback.py` 无改动即通过；`browse.js` 内一处注释因含 `test_no_hardcoded_panel_prose_survives` 的字面量黑名单词而改写。
+- 未纳入本次：阶段一第 3 项（版本号单一来源，S4）、第 4 项（records 预填示例 ID）仍未开始；§2 各视图的「改进」类条目按计划留待阶段三/四。（第 3 项已于同日随 S4 落地，见本节 S4 实施记录；第 4 项仍待办。）
+
 ### S4. 【P1】版本号三处不一致
 
 - 总览 KPI 显示 **0.1.0**：`GET /v1/system/status` → `api/system.py` → `vector_service/__init__.py: __version__ = "0.1.0"`；
@@ -128,6 +158,20 @@
 - Prometheus `VS_INFO{version=...}` 也硬编码 **0.2.0**：`core/lifespan.py:94-95`。
 
 **措施**：确定单一真实版本（建议以 `__init__.py.__version__` 为准，先定版到正确号），状态栏改为从 `/v1/system/status` 读取（store 中已有 health 轮询，可合并），`VS_INFO` 引用 `__version__`，消灭全部硬编码版本字面量。
+
+**实施记录（2026-10-01）**：四处版本号收敛为单一来源。
+
+- **定版到 `0.2.0`**（而非把界面降回 0.1.0）。核实 git 历史后确认 0.2.0 才是真实进度：`685c5eb`（观测性：OTel tracing + Prometheus metrics + ops 面板）把 0.2.0 写进 `lifespan.py` 的 `VS_INFO`，`f782db7`（dashboard 拆分为模板 + 静态 Vue app）把 0.2.0 写进状态栏；而 0.1.0 停留在 `1165955`（脚手架）之后再未跟进，`pyproject.toml` 与 `__init__.py` 才是陈旧副本。
+- **`__init__.py.__version__` 成为唯一字面量**：
+  - `pyproject.toml` 改为 `dynamic = ["version"]` + `[tool.setuptools.dynamic] version = {attr = "vector_service.__version__"}`，打包元数据不再自存一份（setuptools 走 AST 静态读取，不触发导入）；
+  - `core/lifespan.py` 的 `VS_INFO.labels(version=__version__, ...)` 改为引用该常量；
+  - `uv.lock` 中 editable self 条目的 `version = "0.1.0"` 随之消失（`uv run` 自动重写）。
+- **状态栏改从接口取值**：`app.js` 新增 `store.service = { version, embeddingBackend, storeBackend }`，由既有的 5s health 轮询（`pollHealth`，与 `#led-healthz` / `#led-readyz` 同一 tick）多拉一次 `GET /v1/system/status` 填充；状态栏三段由 `0.2.0` / `bge-m3` / `milvus` 三个字面量改为 `store.service.*` 绑定，未取到时渲染 `—`。顺带修掉计划外同类缺陷：`EMB` / `STORE` 两段此前也硬编码（恰好等于 `config.py` 的默认值，配置一改即说谎）。
+- **失败语义**：该请求失败时保留上次成功的值、不弹提示——它与同 tick 的两个探针打的是同一个进程，服务不可达时两个 LED 已经变红，再叠一条需要手动关闭的提示只是同一信号的第二份副本（`catch` 处有注释说明）。
+- **校验**：新增 `tests/unit/test_version_single_source.py`（6 例）——① 全树扫描（`src/**/*.py` + `components/*.js` + `templates/*.html`，排除 `__init__.py` 与 vendored 的 Vue 包）断言三段式版本字面量**有且仅有** `__init__.py` 一处，正则用 `(?<![\d.])\d+\.\d+\.\d+(?![\d.])` 以免把 `config.py` 的 `host = "0.0.0.0"` 误判；② `pyproject.toml` 不得有静态 `version`，`dynamic` 必须列出它且 `attr` 指向包属性；③ `__version__` 形如版本号（状态栏原样渲染）；④ 路由 `service.version == __version__`；⑤ 实跑 lifespan 后读 Prometheus registry，`vs_info` 的 version 标签集合恰为 `{__version__}`；⑥ 状态栏绑定 `store.service.*` 且 `app.js` 确实拉取该端点。
+- **测试**：`tests/` 全量 **966 例 / 0 failed / 0 error / 2 skipped**（2 例按既有条件跳过）。
+- **冒烟**：用**改前启动**的 dev server（仍在跑 0.1.0 的旧代码）配上热更新的静态 `app.js`——状态栏 VER 显示 **0.1.0**（旧字面量 0.2.0 已消失），EMB/STORE 显示 `bge-m3` / `milvus`，即状态栏确实取自接口而非字面量；控制台 0 error / 0 warning。另 `uv run python -c` 复核 `vector_service.__version__` 与 `importlib.metadata.version("vector-service")` 均为 `0.2.0`，attr 与打包元数据同源。
+- **未纳入本次**：状态栏 `SVC` 段的 `vector-service` 仍是字面量（进程名常量，非配置项）；`app.js` 的 health 轮询与 overview 面板各自拉一次 `/v1/system/status`（每 5s 两次），合并为共享轮询属 §S6「模型数据收敛」的同类工作，留给阶段二。
 
 ### S5. 【P1】排版与字体系统：层级含混、截断频发
 
@@ -279,6 +323,7 @@
 2. **反馈链路补齐**：status/error 渲染归位（rerank、embeddings、similarity、browse、collections 详情）；提交按钮统一 busy/disabled；空 catch 全部落 error 态。
    → **已于 2026-10-01 完成**（提前落地，见 §1 S2 实施记录）；本阶段剩余条目为第 1、3、4 项。
 3. **版本号单一来源**（S4）：定版、页脚与 VS_INFO 统一。
+   → **已于 2026-10-01 完成**（见 §1 S4 实施记录）；本阶段剩余条目为第 4 项。
 4. 删除 records 预填示例 ID 的危险默认值；删除按钮加使能条件。
 
 验收：21 视图中/英双语点击走查无 console error；每个提交动作都有 loading/成功/失败三态可见。

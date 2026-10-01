@@ -20,6 +20,10 @@ export default defineComponent({
     const filter = ref('');
     const outputFields = ref(new Set());
     const schemaFields = ref([]);
+    // The collection's distance metric, read from its detail payload. It
+    // decides how a hit score may be read at all: cosine/ip are
+    // similarities (bigger is closer), l2 is a distance (smaller is).
+    const metric = ref('');
     const result = ref(null);
     // Outcome of the last search. Drives the results area, so "no hits",
     // "still running" and "the request failed" stop looking identical.
@@ -56,17 +60,22 @@ export default defineComponent({
     }
     async function refreshSchema() {
       schemaFields.value = [];
+      metric.value = '';
       if (!db.value || !coll.value) return;
       try {
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll.value));
         schemaFields.value = (payload && payload.fields || []).map(f => f.name);
+        metric.value = (payload && payload.metric) || '';
       } catch (e) {
         schemaFields.value = [];
         loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
       }
     }
     watch(db, refreshColls);
-    watch(coll, refreshSchema);
+    // Output fields are field names of the collection that was selected
+    // when they were ticked; carrying them across a switch would submit
+    // the previous collection's field names to the new one (B5).
+    watch(coll, () => { outputFields.value = new Set(); refreshSchema(); });
     onMounted(refreshDbs);
 
     function safeParse(s) { try { return JSON.parse(s); } catch (_e) { return null; } }
@@ -119,6 +128,20 @@ export default defineComponent({
     });
     const showResultList = computed(() => status.value === 'ok' && hitCount.value > 0);
 
+    // Hit scores are metric-dependent and unbounded: an l2 distance can
+    // exceed 1 and a negative inner product is normal. Rendering
+    // `score * 100` as a percentage was therefore meaningless outside
+    // cosine — and produced "NaN" for a missing score. Show the raw
+    // value, and say which direction means "closer" for this collection.
+    function formatScore(v) {
+      const n = Number(v);
+      return (v === null || v === undefined || !Number.isFinite(n)) ? '—' : n.toFixed(4);
+    }
+    const metricNote = computed(() => {
+      if (!metric.value) return '';
+      return metric.value === 'l2' ? t('search.metric_lower') : t('search.metric_higher');
+    });
+
     function toggleOutput(name) {
       if (outputFields.value.has(name)) outputFields.value.delete(name);
       else outputFields.value.add(name);
@@ -127,7 +150,8 @@ export default defineComponent({
 
     return { dbs, colls, db, coll, primary, vecfield, mode, topk, text, emb, filter,
              schemaFields, outputFields, result, doSearch, toggleOutput,
-             status, formErr, loadErr, refreshDbs, resultState, resultText, showResultList };
+             status, formErr, loadErr, refreshDbs, resultState, resultText, showResultList,
+             metric, metricNote, formatScore };
   },
   components: { StatusBanner, BusyButton, EmptyState },
   template: `
@@ -185,14 +209,17 @@ export default defineComponent({
         <status-banner kind="error" :text="formErr" />
       </div>
       <div class="section">
-        <div class="section-head"><h3 class="section-title">{{ $t('common.results') }}</h3></div>
+        <div class="section-head">
+          <h3 class="section-title">{{ $t('common.results') }}</h3>
+          <span class="section-sub" v-if="metricNote">{{ metric }} · {{ metricNote }}</span>
+        </div>
         <status-banner kind="error" :text="loadErr" :retry="loadErr ? refreshDbs : null" />
         <empty-state v-if="!showResultList" :state="resultState" :text="resultText"
                      :retry="resultState === 'error' ? doSearch : null" />
         <template v-else>
           <div v-for="(hit, i) in result.hits" :key="i" class="result-row">
             <span class="result-rank">#{{ i + 1 }}</span>
-            <span class="result-score">{{ (hit.score * 100).toFixed(2) }}</span>
+            <span class="result-score" :title="$t('search.score')">{{ formatScore(hit.score) }}</span>
             <span class="result-doc">{{ hit.id }}</span>
             <pre class="code-pane" v-if="hit.fields && Object.keys(hit.fields).length" style="margin:0;">{{ JSON.stringify(hit.fields, null, 2) }}</pre>
           </div>

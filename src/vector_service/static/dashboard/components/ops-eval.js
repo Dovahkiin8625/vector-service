@@ -5,7 +5,7 @@
 //   GET  /v1/evaluation/runs/{id}                     run detail
 //   GET  /v1/evaluation/gates?... | /gates/{id} | /gates/{id}/checks
 // =====================================================================
-import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
+import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api } from './app.js';
 import {
   enc, formatTs, fixed, pct, pillClass, statusLabel, DEFAULT_SCOPE,
@@ -90,7 +90,13 @@ export default defineComponent({
         runDetail.value = payload;
       } catch (e) { errMsg.value = e.message; }
     }
-    function closeRun() { runDetail.value = null; }
+    // Returns to the view the run was opened from. runBack was written
+    // on every openRun but never read, so the back button just dropped
+    // the detail and revealed whatever tab happened to be active.
+    function closeRun() {
+      runDetail.value = null;
+      tab.value = runBack.value === 'gate' ? 'gates' : 'sets';
+    }
 
     async function loadGates() {
       resetErr();
@@ -120,6 +126,10 @@ export default defineComponent({
 
     function switchTab(name) {
       tab.value = name;
+      // The run detail renders from a v-if that outranks the tab
+      // branches, so switching tabs with one open left the run on screen
+      // and the click looked like it did nothing (B13).
+      runDetail.value = null;
       resetErr();
       if (name === 'sets') loadSets();
       else loadGates();
@@ -133,19 +143,20 @@ export default defineComponent({
     });
     if (store.view === 'eval') loadSets();
 
-    function parseParams(s) {
-      if (!s) return null;
-      try { return JSON.parse(s); } catch (_e) { return null; }
-    }
+    // KPI grid and the two breakdown tables read runDetail.summary.*; a
+    // run payload without (or with a partial) summary block threw during
+    // render and took the whole panel down. fixed()/pct() already render
+    // a missing value as '—'.
+    const summary = computed(() => (runDetail.value && runDetail.value.summary) || {});
 
     return {
       tab, db, coll, errMsg,
       sets, setsTotal, setsOffset, setsPrev, setsNext,
       setDetail, questions, versions, runs,
       loadSets, openSet, backToList,
-      runDetail, runBack, openRun, closeRun,
+      runDetail, runBack, openRun, closeRun, summary,
       gates, gateDetail, gateChecks, loadGates, openGate, backToGates,
-      switchTab, parseParams,
+      switchTab,
       formatTs, fixed, pct, pillClass, statusLabel,
     };
   },
@@ -213,51 +224,51 @@ export default defineComponent({
         <div class="ops-grid ops-kpi-grid">
           <div class="kpi kpi--accent">
             <span class="label">{{ $t('ops.eval.questions_kpi') }}</span>
-            <span class="value">{{ runDetail.summary.questions }}</span>
+            <span class="value">{{ summary.questions || '—' }}</span>
           </div>
           <div class="kpi">
             <span class="label">{{ $t('ops.eval.mean_recall') }}</span>
-            <span class="value">{{ fixed(runDetail.summary.mean_recall) }}</span>
+            <span class="value">{{ fixed(summary.mean_recall) }}</span>
           </div>
           <div class="kpi">
             <span class="label">{{ $t('ops.eval.mean_mrr') }}</span>
-            <span class="value">{{ fixed(runDetail.summary.mean_mrr) }}</span>
+            <span class="value">{{ fixed(summary.mean_mrr) }}</span>
           </div>
           <div class="kpi">
             <span class="label">{{ $t('ops.eval.mean_ndcg') }}</span>
-            <span class="value">{{ fixed(runDetail.summary.mean_ndcg) }}</span>
+            <span class="value">{{ fixed(summary.mean_ndcg) }}</span>
           </div>
           <div class="kpi">
             <span class="label">{{ $t('ops.eval.doc_hit_rate') }}</span>
-            <span class="value">{{ pct(runDetail.summary.doc_hit_rate) }}</span>
+            <span class="value">{{ pct(summary.doc_hit_rate) }}</span>
           </div>
         </div>
 
-        <div v-if="runDetail.summary.rerank && runDetail.summary.rerank.questions" class="ops-rerank-card">
-          <h4 class="ops-sub-title">{{ $t('ops.eval.rerank_compare') }} · {{ runDetail.summary.rerank.questions }} q</h4>
+        <div v-if="summary.rerank && summary.rerank.questions" class="ops-rerank-card">
+          <h4 class="ops-sub-title">{{ $t('ops.eval.rerank_compare') }} · {{ summary.rerank.questions }} q</h4>
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr><th></th><th>{{ $t('ops.eval.pre') }}</th><th>{{ $t('ops.eval.post') }}</th></tr>
               </thead>
               <tbody>
-                <tr><th>recall</th><td>{{ fixed(runDetail.summary.rerank.mean_recall_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_recall_post) }}</td></tr>
-                <tr><th>MRR</th><td>{{ fixed(runDetail.summary.rerank.mean_mrr_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_mrr_post) }}</td></tr>
-                <tr><th>nDCG</th><td>{{ fixed(runDetail.summary.rerank.mean_ndcg_pre) }}</td><td>{{ fixed(runDetail.summary.rerank.mean_ndcg_post) }}</td></tr>
+                <tr><th>recall</th><td>{{ fixed(summary.rerank.mean_recall_pre) }}</td><td>{{ fixed(summary.rerank.mean_recall_post) }}</td></tr>
+                <tr><th>MRR</th><td>{{ fixed(summary.rerank.mean_mrr_pre) }}</td><td>{{ fixed(summary.rerank.mean_mrr_post) }}</td></tr>
+                <tr><th>nDCG</th><td>{{ fixed(summary.rerank.mean_ndcg_pre) }}</td><td>{{ fixed(summary.rerank.mean_ndcg_post) }}</td></tr>
               </tbody>
             </table>
           </div>
         </div>
 
-        <div v-if="runDetail.summary.channel_attribution && runDetail.summary.channel_attribution.questions" class="section">
-          <h4 class="ops-sub-title">{{ $t('ops.eval.channel_attribution') }} · {{ runDetail.summary.channel_attribution.questions }} q</h4>
+        <div v-if="summary.channel_attribution && summary.channel_attribution.questions" class="section">
+          <h4 class="ops-sub-title">{{ $t('ops.eval.channel_attribution') }} · {{ summary.channel_attribution.questions }} q</h4>
           <div class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr><th>{{ $t('ops.eval.channel') }}</th><th>{{ $t('ops.eval.hit_share') }}</th><th>{{ $t('ops.eval.raw_recall') }}</th></tr>
               </thead>
               <tbody>
-                <tr v-for="(c, name) in runDetail.summary.channel_attribution.channels" :key="name">
+                <tr v-for="(c, name) in summary.channel_attribution.channels" :key="name">
                   <td class="ops-mono">{{ name }}</td>
                   <td>{{ pct(c.hit_share) }}</td>
                   <td>{{ fixed(c.raw_recall) }}</td>

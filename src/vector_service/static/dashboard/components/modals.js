@@ -19,7 +19,10 @@ export const NewDbModal = defineComponent({
         store.modalErr.newDb = extractApiError(e, t('modals.err.create_failed'));
       }
     }
-    return { name, close, submit };
+    // `store` must be returned: the template reads store.modalErr.newDb
+    // to render the inline error, and a missing binding makes the render
+    // throw before the modal can paint (NewCollModal returns it below).
+    return { store, name, close, submit };
   },
   template: `
     <div class="modal-overlay" id="modal-new-db" @click.self="close">

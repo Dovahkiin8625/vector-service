@@ -34,6 +34,16 @@ export default defineComponent({
     const delBusy = ref(false);
     const delStatus = ref('');
     const delStatusKind = ref('');
+    // The jump-to-page box needs a writable model of its own. It used to
+    // be bound to `currentPage`, which is a read-only computed — typing a
+    // page number assigned to a computed with no setter, so the jump
+    // silently did nothing (B3).
+    const jumpPage = ref(1);
+    // The filter the rows on screen were fetched with. Tick-marks are
+    // primary keys of rows the operator could see; once the filter
+    // changes those rows may not match any more, so the selection is
+    // dropped rather than carried into the bulk-delete action (B4).
+    const appliedFilter = ref('');
 
     async function refreshDbs() {
       loadErr.value = '';
@@ -68,15 +78,30 @@ export default defineComponent({
         loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
       }
     }
-    watch(db, () => { offset.value = 0; refreshColls(); });
-    watch(coll, () => {
-      offset.value = 0;
+    // Every one of these switches invalidates the tick-set: the rows the
+    // operator selected either belong to another collection (cross-
+    // database delete) or are keyed by a field that no longer means the
+    // same thing. Dropping the selection first is what keeps "delete
+    // selected" from submitting primary keys the operator can no longer
+    // see (B4).
+    function resetSelectionState() {
       selected.value = new Set();
       delStatus.value = '';
       delStatusKind.value = '';
+    }
+    watch(db, () => { offset.value = 0; resetSelectionState(); refreshColls(); });
+    watch(coll, () => {
+      offset.value = 0;
+      resetSelectionState();
       refreshSchema();
       runQuery();
     });
+    // A different page size re-slices the result set, so offset has to go
+    // back to the top; leaving it put would land past the end of the new
+    // pagination.
+    watch(pageSize, () => { offset.value = 0; runQuery(); });
+    // The ticked ids are values of the old primary field.
+    watch(primary, () => { resetSelectionState(); });
     onMounted(refreshDbs);
 
     const columns = computed(() => {
@@ -91,6 +116,11 @@ export default defineComponent({
     const pageIds = computed(() => items.value.map(r => r.id));
     const allPageSelected = computed(
       () => pageIds.value.length > 0 && pageIds.value.every(id => selected.value.has(id))
+    );
+    // Half-ticked header checkbox: some (not all) rows of this page are
+    // selected — usually because the rest were ticked on another page.
+    const somePageSelected = computed(
+      () => !allPageSelected.value && pageIds.value.some(id => selected.value.has(id))
     );
     const selectedCount = computed(() => selected.value.size);
     // The count rides on the button label itself: it is the only place
@@ -208,10 +238,17 @@ export default defineComponent({
         delStatus.value = '';
         delStatusKind.value = '';
       }
+      // A new filter re-scopes the whole result set; the previous ticks
+      // were made against the old one and must not survive into it.
+      const expr = filter.value.trim();
+      if (expr !== appliedFilter.value) {
+        appliedFilter.value = expr;
+        selected.value = new Set();
+      }
       status.value = 'loading';
       queryErr.value = '';
       const body = { primary_field: primary.value, limit: pageSize.value, offset: offset.value };
-      if (filter.value.trim()) body.filter_expr = filter.value.trim();
+      if (expr) body.filter_expr = expr;
       try {
         const { payload } = await api('POST',
           '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll.value) + '/rows', body);
@@ -251,15 +288,24 @@ export default defineComponent({
       runQuery();
     }
     function jumpTo(page) {
-      if (isNaN(page) || page < 1) return;
-      offset.value = Math.min((page - 1) * pageSize.value, Math.max(0, (totalPages.value - 1) * pageSize.value));
+      const n = Number(page);
+      if (!Number.isFinite(n) || n < 1) return;
+      const target = Math.min(Math.floor(n), totalPages.value);
+      offset.value = (target - 1) * pageSize.value;
+      // Echo back where the jump actually landed, so an out-of-range
+      // entry (page 999) visibly corrects itself to the last page.
+      jumpPage.value = target;
       runQuery();
     }
+    // Keep the box in step with page turns made by the other buttons; a
+    // half-typed number never changes currentPage, so the two do not
+    // fight over the field.
+    watch(currentPage, (v) => { jumpPage.value = v; });
 
     return { dbs, colls, db, coll, primary, pageSize, filter, offset, total, items, schema,
-             columns, totalPages, currentPage, status, queryErr, loadErr, formErr,
+             columns, totalPages, currentPage, jumpPage, status, queryErr, loadErr, formErr,
              tableState, tableText, pageErrText, retryQuery, refreshDbs, runQuery, jump, jumpTo,
-             selected, allPageSelected, selectedCount, deleteSelectedLabel,
+             selected, allPageSelected, somePageSelected, selectedCount, deleteSelectedLabel,
              delBusy, delStatus, delStatusKind,
              toggleOne, togglePage, clearSelection, deleteSelected, deleteByFilter };
   },
@@ -361,7 +407,7 @@ export default defineComponent({
             <table class="data-table">
               <thead><tr>
                 <th class="row-select"><input type="checkbox" id="brw-select-all"
-                  :checked="allPageSelected" :disabled="delBusy"
+                  :checked="allPageSelected" :indeterminate="somePageSelected" :disabled="delBusy"
                   @change="togglePage($event.target.checked)"
                   :title="$t('browse.select_all')" /></th>
                 <th v-for="c in columns" :key="c">{{ c }}<span v-if="c === primary" class="pk">PK</span></th>
@@ -389,8 +435,9 @@ export default defineComponent({
           <button class="btn sm" id="btn-brw-next" :disabled="currentPage >= totalPages || status === 'loading'" @click="jump(pageSize)">{{ $t('common.next') }} ›</button>
           <button class="btn sm" id="btn-brw-last" :disabled="currentPage >= totalPages || status === 'loading'" @click="jumpTo(totalPages)">{{ $t('common.last') }} »</button>
           <span class="info">{{ $t('browse.jump_to') }}</span>
-          <input type="number" id="brw-jump" :min="1" :max="totalPages" v-model.number="currentPage" style="width:72px;" />
-          <button class="btn sm" id="btn-brw-jump" :disabled="status === 'loading'" @click="jumpTo(currentPage)">{{ $t('browse.go') }}</button>
+          <input type="number" id="brw-jump" :min="1" :max="totalPages" v-model.number="jumpPage"
+                 :aria-label="$t('browse.stat_page')" style="width:72px;" />
+          <button class="btn sm" id="btn-brw-jump" :disabled="status === 'loading'" @click="jumpTo(jumpPage)">{{ $t('browse.go') }}</button>
         </div>
       </div>
       <div class="empty hint">{{ $t('browse.footer_hint') }}</div>

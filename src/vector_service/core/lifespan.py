@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import time
 from typing import TYPE_CHECKING
 
+from vector_service import __version__
 from vector_service.core.config import Settings, get_settings
 from vector_service.core.instance_lock import InstanceLock
 from vector_service.core.errors import (
@@ -92,7 +93,7 @@ async def lifespan(app: "FastAPI"):
     settings = get_settings()
     setup_logging(settings.log_format, settings.log_level)
     VS_INFO.labels(
-        version="0.2.0",
+        version=__version__,
         embedding_backend=settings.embedding_backend,
         vector_store_backend=settings.vector_store_backend,
     ).set(1)

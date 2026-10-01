@@ -1,5 +1,5 @@
 // Collections panel: list + create (modal) + expandable detail (schema + indexes + index management).
-import { defineComponent, ref, computed, watch, onMounted } from '../vue.esm-browser.prod.js';
+import { defineComponent, ref, computed, watch, onMounted, onUnmounted } from '../vue.esm-browser.prod.js';
 import { t, store, api, enc, extractApiError } from './app.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 
@@ -14,6 +14,13 @@ export default defineComponent({
     // expansion kept rendering "loading…" forever: the failure was
     // swallowed and nothing was ever written to the cache.
     const detailErr = ref(Object.create(null));
+    // Per-collection state for the "new index" form, keyed like
+    // detailCache and seeded in loadDetail from the collection's own
+    // metric. The form used to hard-code `selected` on cosine/HNSW, so
+    // on a collection built with l2 or ip the pre-selected metric
+    // disagreed with the collection and the index it created did not
+    // match the data already in it (B11).
+    const newIndex = ref(Object.create(null));
     const expanded = ref(new Set());
     // List-level load failure (databases or collections).
     const loadErr = ref('');
@@ -51,13 +58,21 @@ export default defineComponent({
         colls.value = (payload && payload.collections) || [];
         store.collections.list = colls.value;
         const live = new Set(colls.value);
+        // detailCache/detailErr/newIndex are keyed "db::coll" while
+        // `live` holds bare collection names, so the prune has to compare
+        // the coll half. Comparing the whole key never matched and threw
+        // away every cached detail on each refresh.
+        const collOf = (k) => k.slice(k.indexOf('::') + 2);
         Object.keys(detailCache.value).forEach(k => {
-          if (!live.has(k)) delete detailCache.value[k];
+          if (!live.has(collOf(k))) delete detailCache.value[k];
         });
         Object.keys(detailErr.value).forEach(k => {
-          if (!live.has(k)) delete detailErr.value[k];
+          if (!live.has(collOf(k))) delete detailErr.value[k];
         });
-        expanded.value.forEach(k => { if (!live.has(k)) expanded.value.delete(k); });
+        Object.keys(newIndex.value).forEach(k => {
+          if (!live.has(collOf(k))) delete newIndex.value[k];
+        });
+        expanded.value.forEach(k => { if (!live.has(collOf(k))) expanded.value.delete(k); });
       } catch (e) {
         colls.value = [];
         loadErr.value = t('collections.list_failed') + extractApiError(e, t('common.unknown'));
@@ -71,6 +86,15 @@ export default defineComponent({
       try {
         const { payload } = await api('GET', '/v1/databases/' + enc(db.value) + '/collections/' + enc(name));
         detailCache.value[key] = payload;
+        // Seed the new-index form from this collection rather than from
+        // constants: metric follows the collection, index type keeps its
+        // own sensible default.
+        newIndex.value[key] = {
+          field: (payload && payload.vector_field) || '',
+          metric: (payload && payload.metric) || 'cosine',
+          type: 'HNSW',
+          params: '{}',
+        };
         return payload;
       } catch (e) {
         // Recorded, not swallowed: the expansion below renders the
@@ -117,6 +141,7 @@ export default defineComponent({
       const key = db.value + '::' + name;
       delete detailCache.value[key];
       delete detailErr.value[key];
+      delete newIndex.value[key];
       expanded.value.delete(key);
       opOk(t('collections.dropped', { name }));
       await refreshColls();
@@ -159,21 +184,32 @@ export default defineComponent({
       finally { busyKey.value = ''; }
     }
 
-    function submitNewIndex(coll, ev) {
-      const card = ev.target.closest('.field-card');
-      const field = card.querySelector('[data-new-index-field]').value;
-      const metric = card.querySelector('[data-new-index-metric]').value;
-      const type = card.querySelector('[data-new-index-type]').value;
-      const raw = card.querySelector('[data-new-index-params]').value.trim();
+    function opErr(key) {
+      opStatus.value = 'error';
+      opMsg.value = t(key);
+    }
+
+    function submitNewIndex(coll) {
+      const form = newIndex.value[db.value + '::' + coll];
+      if (!form) return;
+      const raw = form.params.trim();
       let params = {};
       if (raw) {
-        try { params = JSON.parse(raw); } catch (_e) {
-          opStatus.value = 'error';
-          opMsg.value = t('collections.err.bad_params');
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch (_e) { parsed = undefined; }
+        // JSON.parse('[]') / ('5') / ('null') all succeed but are not the
+        // mapping the endpoint expects, so "it parses" is not enough.
+        if (parsed === undefined || parsed === null
+            || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          opErr('collections.err.bad_params');
           return;
         }
+        params = parsed;
       }
-      createIndex(coll, { field_name: field, metric_type: metric, index_type: type, params: params });
+      createIndex(coll, {
+        field_name: form.field, metric_type: form.metric,
+        index_type: form.type, params: params,
+      });
     }
 
     // Busy wrappers for the two reload buttons, which had no in-flight
@@ -195,10 +231,16 @@ export default defineComponent({
       window.addEventListener('refresh-colls', refreshColls);
       window.addEventListener('refresh-dbs', refreshDbs);
     });
+    // Listeners registered here used to survive unmount, so a remount
+    // stacked a second pair and one event triggered two refreshes (B14).
+    onUnmounted(() => {
+      window.removeEventListener('refresh-colls', refreshColls);
+      window.removeEventListener('refresh-dbs', refreshDbs);
+    });
 
     return {
       store,
-      db, dbs, colls, detailCache, detailErr, expanded, loadErr,
+      db, dbs, colls, detailCache, detailErr, newIndex, expanded, loadErr,
       opKind, opMsg, busyKey, refreshDbs, reloadDbs, refreshColls, reloadColls,
              toggleDetail, reloadDetail, dropColl, dropIndex, createIndex, submitNewIndex };
   },
@@ -320,26 +362,27 @@ export default defineComponent({
                       </div>
                     </div>
                   </div>
-                  <details class="collapsible" style="margin-top:10px;">
+                  <details class="collapsible" style="margin-top:10px;"
+                           v-if="newIndex[db + '::' + name]">
                     <summary>{{ $t('collections.new_index') }}</summary>
                     <div class="body">
                       <div class="row">
                         <label>{{ $t('collections.target_field') }}</label>
-                        <select :data-new-index-field="detailCache[db + '::' + name].vector_field">
-                          <option :value="detailCache[db + '::' + name].vector_field">{{ detailCache[db + '::' + name].vector_field }} {{ $t('collections.vector_field_suffix') }}</option>
+                        <select data-new-index-field v-model="newIndex[db + '::' + name].field">
+                          <option :value="newIndex[db + '::' + name].field">{{ newIndex[db + '::' + name].field }} {{ $t('collections.vector_field_suffix') }}</option>
                         </select>
                       </div>
                       <div class="row split">
                         <div class="row"><label>{{ $t('common.metric') }}</label>
-                          <select data-new-index-metric>
-                            <option value="cosine" selected>cosine</option>
+                          <select data-new-index-metric v-model="newIndex[db + '::' + name].metric">
+                            <option value="cosine">cosine</option>
                             <option value="ip">ip</option>
                             <option value="l2">l2</option>
                           </select>
                         </div>
                         <div class="row"><label>{{ $t('collections.index_type') }}</label>
-                          <select data-new-index-type>
-                            <option value="HNSW" selected>HNSW</option>
+                          <select data-new-index-type v-model="newIndex[db + '::' + name].type">
+                            <option value="HNSW">HNSW</option>
                             <option value="IVF_FLAT">IVF_FLAT</option>
                             <option value="IVF_SQ8">IVF_SQ8</option>
                             <option value="DISKANN">DISKANN</option>
@@ -349,13 +392,14 @@ export default defineComponent({
                       </div>
                       <div class="row">
                         <label>params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
-                        <textarea data-new-index-params rows="2">{}</textarea>
+                        <textarea data-new-index-params rows="2"
+                                  v-model="newIndex[db + '::' + name].params"></textarea>
                       </div>
                       <div class="actions">
                         <busy-button data-new-index-submit :busy="busyKey === 'newindex:' + name"
                                      :label="$t('collections.create_rebuild')"
                                      :busy-label="$t('collections.creating')"
-                                     @click="submitNewIndex(name, $event)" />
+                                     @click="submitNewIndex(name)" />
                       </div>
                     </div>
                   </details>

@@ -347,6 +347,12 @@ const I18N = {
     'ops.reindex.promote_confirm': '确定将金丝雀索引提升为正式索引吗？',
     'ops.reindex.promote_title': '提升金丝雀索引',
     'ops.reindex.promote_hint': '提升在单事务内完成：金丝雀引用切换为正式引用，旧物理索引随后由维护任务清理。',
+    // Why the promote button is disabled. The server resolves the gate
+    // for a scope itself (regression_gates is UNIQUE per scope), so the
+    // client can state the exact rule it is about to be held to.
+    'ops.reindex.block_no_check': '该门禁尚无评测记录，请先跑一次评测再提升。',
+    'ops.reindex.block_check_failed': '最近一次门禁校验为「{status}」，通过后才能提升。',
+    'ops.reindex.gate_scope_note': '门禁按「数据库 + 集合」唯一，提升时服务端读取的就是这一条。',
     'ops.reindex.submit': '提交重建',
     'ops.reindex.submitting': '提交中…',
     'ops.reindex.promoting': '提升中…',
@@ -512,6 +518,7 @@ const I18N = {
     'embeddings.hint.each_item': '每项：data / mime',
     'embeddings.err.no_input': '请选择文件或粘贴 JSON 数组。',
     'embeddings.err.no_items': '请至少添加一项文本或图片。',
+    'embeddings.err.bad_list': '批量输入的 JSON 不是数组，请修正后重试。',
     'embeddings.running': '运行中…',
 
     // Rerank panel
@@ -569,6 +576,12 @@ const I18N = {
     'search.no_hits': '没有命中任何记录。',
     'search.running': '检索中…',
     'search.idle_hint': '设置查询条件后点击「检索」。',
+    // Hit scores are metric-dependent: cosine/ip are similarities
+    // (larger is closer), l2 is a distance (smaller is closer). Shown
+    // next to the raw value so it is not read as a percentage.
+    'search.score': '原始分数',
+    'search.metric_higher': '越大越接近',
+    'search.metric_lower': '越小越接近',
 
     // Browse panel
     'browse.title': '选择数据库 / 集合',
@@ -665,6 +678,14 @@ const I18N = {
     'records.upsert': '写入（PUT）',
     'records.fetch': '按主键获取（POST）',
     'records.delete': '按条件删除（POST）',
+    // Format hints for the now-empty inputs. Placeholders are not
+    // submitted, so they cannot repeat the pre-filled-example bug.
+    'records.ph.ids': '["id-1", "id-2"]',
+    'records.ph.texts': '["第一段文本", "第二段文本"]',
+    'records.ph.vectors': '[[0.1, 0.2, 0.3]]',
+    'records.ph.fields': '[{"category": "mouse"}]',
+    'records.ph.del_ids': '["id-1", "id-2"]',
+    'records.ph.del_filter': 'category == \'mouse\'',
     'records.err.ids_json': 'ids 必须是 JSON 数组。',
     'records.err.texts_json': 'texts 必须是 JSON 数组。',
     'records.err.vectors_json': 'vectors 必须是 JSON 数组。',
@@ -708,6 +729,12 @@ const I18N = {
     // Retrieval panel
     'retrieval.query': '检索问题',
     'retrieval.query_placeholder': '输入检索问题',
+    // 'custom' mode posts the textarea verbatim instead of the
+    // control-driven body, so it gets its own copy.
+    'retrieval.custom_json': '请求体 (JSON)',
+    'retrieval.custom_hint': '按原文发送，忽略上方控件',
+    'retrieval.custom_regen': '按当前控件重新生成',
+    'retrieval.err.bad_json': '请求体必须是 JSON 对象：',
     'retrieval.group.channels': '通道与融合',
     'retrieval.fusion': '融合方式',
     'retrieval.group.routing': '意图路由',
@@ -770,6 +797,9 @@ const I18N = {
     'kb.dbs_failed': '加载数据库列表失败：',
     'kb.models_failed': '加载模型列表失败：',
     'kb.parser_failed': '加载解析引擎状态失败：',
+    // Stream cancel / watchdog outcome, shown in the panel banner.
+    'kb.cancelled': '已取消。',
+    'kb.err.timeout': '流已连续 {seconds} 秒无响应，已中止。',
     'models.poll_failed': '模型列表刷新失败：',
   },
   en: {
@@ -1078,6 +1108,9 @@ const I18N = {
     'ops.reindex.promote_confirm': 'Promote the canary index to active?',
     'ops.reindex.promote_title': 'Promote canary index',
     'ops.reindex.promote_hint': 'Promotion runs in one transaction: the canary ref becomes active; the old physical index is later cleaned up by maintenance.',
+    'ops.reindex.block_no_check': 'this gate has no evaluation check yet; run one before promoting.',
+    'ops.reindex.block_check_failed': 'the latest gate check is "{status}"; it must pass before promotion.',
+    'ops.reindex.gate_scope_note': 'a gate is unique per database + collection; the server reads exactly this row when promoting.',
     'ops.reindex.submit': 'Submit rebuild',
     'ops.reindex.submitting': 'submitting…',
     'ops.reindex.promoting': 'promoting…',
@@ -1238,6 +1271,7 @@ const I18N = {
     'embeddings.hint.each_item': 'each item: data / mime',
     'embeddings.err.no_input': 'select files or paste a JSON array.',
     'embeddings.err.no_items': 'add at least one text or image item.',
+    'embeddings.err.bad_list': 'the batch JSON is not an array; fix it and retry.',
     'embeddings.running': 'running…',
 
     'rerank.title': 'cross-encoder rerank',
@@ -1292,6 +1326,9 @@ const I18N = {
     'search.no_hits': 'no matching rows.',
     'search.running': 'searching…',
     'search.idle_hint': 'set the query and hit search.',
+    'search.score': 'raw score',
+    'search.metric_higher': 'higher is closer',
+    'search.metric_lower': 'lower is closer',
 
     'browse.title': 'Select database / collection',
     'browse.sub': 'paginated browse of collection rows',
@@ -1385,6 +1422,12 @@ const I18N = {
     'records.upsert': 'write (PUT)',
     'records.fetch': 'fetch by id (POST)',
     'records.delete': 'delete by filter (POST)',
+    'records.ph.ids': '["id-1", "id-2"]',
+    'records.ph.texts': '["first text", "second text"]',
+    'records.ph.vectors': '[[0.1, 0.2, 0.3]]',
+    'records.ph.fields': '[{"category": "mouse"}]',
+    'records.ph.del_ids': '["id-1", "id-2"]',
+    'records.ph.del_filter': 'category == \'mouse\'',
     'records.err.ids_json': 'ids must be a JSON array.',
     'records.err.texts_json': 'texts must be a JSON array.',
     'records.err.vectors_json': 'vectors must be a JSON array.',
@@ -1426,6 +1469,10 @@ const I18N = {
 
     'retrieval.query': 'query',
     'retrieval.query_placeholder': 'Enter your query',
+    'retrieval.custom_json': 'request body (JSON)',
+    'retrieval.custom_hint': 'sent verbatim; the controls above are ignored',
+    'retrieval.custom_regen': 'rebuild from current controls',
+    'retrieval.err.bad_json': 'request body must be a JSON object: ',
     'retrieval.group.channels': 'Channels & fusion',
     'retrieval.fusion': 'fusion',
     'retrieval.group.routing': 'Intent routing',
@@ -1486,6 +1533,8 @@ const I18N = {
     'kb.dbs_failed': 'failed to load the database list: ',
     'kb.models_failed': 'failed to load the model list: ',
     'kb.parser_failed': 'failed to load parser engine status: ',
+    'kb.cancelled': 'cancelled.',
+    'kb.err.timeout': 'the stream sent nothing for {seconds}s; aborted.',
     'models.poll_failed': 'failed to refresh the model list: ',
   },
 };
@@ -1612,6 +1661,11 @@ export const store = reactive({
   view: 'overview',
   locale: 'zh',                                 // current UI language: 'zh' | 'en'
   health: { healthz: 'unknown', readyz: 'unknown' },
+  // Service identity for the statusbar, filled by the same 5s tick as the
+  // health LEDs. Empty until the first successful GET /v1/system/status;
+  // the statusbar renders '—' instead of a hardcoded literal so a version
+  // bump (or a reconfigured backend) shows up with no code edit.
+  service: { version: '', embeddingBackend: '', storeBackend: '' },
   embedderDim: 0,
   models: { data: [], busy: Object.create(null), autoRefresh: true },
   databases: { list: [], detailCache: Object.create(null), expanded: new Set() },
@@ -1630,6 +1684,19 @@ async function pollHealth() {
     const r = await fetch('/readyz');
     store.health.readyz = r.ok ? 'ok' : 'err';
   } catch (_e) { store.health.readyz = 'err'; }
+  // The statusbar's service identity (version + configured backends) comes
+  // from the API rather than literals baked into the template. Fail-open:
+  // keep the last good values. No banner on failure by design — this hits
+  // the same app as the two probes above, so an unreachable service has
+  // already turned both LEDs red, and a notice here would just be a second
+  // copy of that signal on a strip the operator has to dismiss.
+  try {
+    const { payload } = await api('GET', '/v1/system/status');
+    const svc = (payload && payload.service) || {};
+    if (svc.version) store.service.version = svc.version;
+    if (svc.embedding_backend) store.service.embeddingBackend = svc.embedding_backend;
+    if (svc.vector_store_backend) store.service.storeBackend = svc.vector_store_backend;
+  } catch (_e) { /* see above: the LEDs carry this poll's reachability signal */ }
 }
 function startHealthPolling() {
   if (healthTimer) return;
@@ -1869,9 +1936,9 @@ const App = defineComponent({
 
       <footer class="statusbar">
         <span class="seg"><span class="key">{{ t('status.SVC') }}</span><span class="val">vector-service</span></span>
-        <span class="seg"><span class="key">{{ t('status.VER') }}</span><span class="val accent">0.2.0</span></span>
-        <span class="seg"><span class="key">{{ t('status.EMB') }}</span><span class="val">bge-m3</span></span>
-        <span class="seg"><span class="key">{{ t('status.STORE') }}</span><span class="val">milvus</span></span>
+        <span class="seg"><span class="key">{{ t('status.VER') }}</span><span class="val accent">{{ store.service.version || '—' }}</span></span>
+        <span class="seg"><span class="key">{{ t('status.EMB') }}</span><span class="val">{{ store.service.embeddingBackend || '—' }}</span></span>
+        <span class="seg"><span class="key">{{ t('status.STORE') }}</span><span class="val">{{ store.service.storeBackend || '—' }}</span></span>
         <span class="right">
           <span class="seg"><span class="key">{{ t('status.LOADED') }}</span><span class="val">{{ loadedCount }}/{{ store.models.data.length }}</span></span>
         </span>

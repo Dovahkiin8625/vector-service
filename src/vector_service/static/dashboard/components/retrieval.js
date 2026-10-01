@@ -45,6 +45,9 @@ function defaultState() {
     error: '',
     result: null,
     showTrace: false,
+    // Raw request body for the 'custom' preset. Filled from the current
+    // controls when the mode is entered, then editable verbatim.
+    customJson: '',
   };
 }
 
@@ -69,7 +72,18 @@ export default defineComponent({
     }
 
     function setMode(mode) {
+      const previous = s.mode;
       s.mode = mode;
+      // 'custom' had no branch here, so clicking it only changed the
+      // highlighted button: the request kept being built from the
+      // controls, i.e. the mode was dead (B9). It now seeds a raw-JSON
+      // body from whatever the controls currently say.
+      if (mode === 'custom') {
+        if (previous !== 'custom' || !s.customJson.trim()) {
+          s.customJson = JSON.stringify(buildBody(), null, 2);
+        }
+        return;
+      }
       if (mode === 'basic') {
         s.dense = true; s.bm25 = false;
         s.fusionMethod = 'rrf';
@@ -121,15 +135,39 @@ export default defineComponent({
       };
     }
 
+    // The request body: the raw editor in 'custom' mode, otherwise the
+    // one assembled from the controls. Returns null after writing the
+    // parse failure to s.error.
+    function requestBody() {
+      if (s.mode !== 'custom') return buildBody();
+      try {
+        const parsed = JSON.parse(s.customJson);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          s.error = t('retrieval.err.bad_json');
+          return null;
+        }
+        return parsed;
+      } catch (e) {
+        s.error = t('retrieval.err.bad_json') + String(e.message || e);
+        return null;
+      }
+    }
+
     async function run() {
       s.busy = true; s.error = ''; s.result = null; s.stages = [];
       try {
+        const body = requestBody();
+        if (!body) return;
         const resp = await fetch('/v1/retrieval/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildBody()),
+          body: JSON.stringify(body),
         });
-        if (!resp.ok || !resp.headers.get('content-type').includes('ndjson')) {
+        // A response with no content-type at all (an error page, a proxy
+        // reset) made this `.includes` throw a TypeError that was then
+        // reported as the request failure (B6).
+        const contentType = resp.headers.get('content-type') || '';
+        if (!resp.ok || !contentType.includes('ndjson')) {
           const err = await resp.json().catch(() => null);
           const info = err && (err.error || (err.payload && err.payload.error));
           throw new Error(info ? info.message || info.code : `HTTP ${resp.status}`);
@@ -146,7 +184,11 @@ export default defineComponent({
           for (const line of lines) {
             if (!line.trim()) continue;
             const event = JSON.parse(line);
-            if (event.type === 'stage') s.stages.push(event.stage);
+            // Stages arrive once per pass, but a retried/duplicated frame
+            // would render the same chip twice (B6).
+            if (event.type === 'stage') {
+              if (!s.stages.includes(event.stage)) s.stages.push(event.stage);
+            }
             else if (event.type === 'result') s.result = event;
             else if (event.type === 'error') {
               throw new Error(event.error.message || event.error.code);
@@ -165,7 +207,7 @@ export default defineComponent({
       await loadCaps();
     });
 
-    return { s, setMode, run };
+    return { s, setMode, run, regenCustom: () => { s.customJson = JSON.stringify(buildBody(), null, 2); } };
   },
   template: `
   <div class="retrieval-panel">
@@ -188,6 +230,22 @@ export default defineComponent({
         </select>
       </div>
 
+      <!-- 'custom' sends the textarea verbatim, so the control-driven
+           body below would only contradict it. -->
+      <template v-if="s.mode === 'custom'">
+        <div class="row">
+          <label>{{ $t('retrieval.custom_json') }}
+            <span class="hint">{{ $t('retrieval.custom_hint') }}</span>
+          </label>
+          <textarea v-model="s.customJson" rows="14" spellcheck="false"
+                    class="ops-mono" :aria-label="$t('retrieval.custom_json')"></textarea>
+        </div>
+        <div class="actions">
+          <button class="btn sm" @click="regenCustom">{{ $t('retrieval.custom_regen') }}</button>
+        </div>
+      </template>
+
+      <template v-else>
       <div class="row">
         <label>{{ $t('retrieval.query') }}</label>
         <textarea v-model="s.query" rows="2" :placeholder="$t('retrieval.query_placeholder')"></textarea>
@@ -276,9 +334,12 @@ export default defineComponent({
         <label>filename</label>
         <input v-model="s.filename" :placeholder="$t('retrieval.filename_ph')">
       </div>
+      </template>
 
       <div class="actions">
-        <button class="btn primary" :disabled="s.busy || !s.query.trim()" @click="run">
+        <!-- In custom mode the query lives in the JSON body, so the
+             empty-query guard only applies to the control-driven modes. -->
+        <button class="btn primary" :disabled="s.busy || (s.mode !== 'custom' && !s.query.trim())" @click="run">
           <span v-if="s.busy" class="btn-spinner"></span>
           {{ s.busy ? $t('retrieval.running') : $t('retrieval.run') }}
         </button>
@@ -304,9 +365,12 @@ export default defineComponent({
             <strong>#{{ i + 1 }}</strong>
             <span v-for="ch in c.matched_channels" :key="ch" class="pill accent">{{ ch }}</span>
             <span class="retrieval-scores">
-              {{ $t('retrieval.stage.fuse') }} {{ c.fusion_score.toFixed(4) }}
-              <template v-if="c.rerank_score !== null">
-                · {{ $t('retrieval.stage.rerank') }} {{ c.rerank_score.toFixed(4) }}
+              {{ $t('retrieval.stage.fuse') }} {{ fmtScore(c.fusion_score) }}
+              <!-- Loose null check: an absent rerank_score arrives as
+                   undefined, which a strict not-equals-null test let
+                   through into .toFixed(). -->
+              <template v-if="c.rerank_score != null">
+                · {{ $t('retrieval.stage.rerank') }} {{ fmtScore(c.rerank_score) }}
               </template>
             </span>
           </div>
@@ -335,7 +399,7 @@ export default defineComponent({
             <span class="val">
               {{ $t('retrieval.top') }}:
               <template v-for="h in run.hits.slice(0, 3)" :key="h.chunk_id">
-                {{ h.chunk_id }}({{ h.score.toFixed(2) }})
+                {{ h.chunk_id }}({{ fmtScore(h.score, 2) }})
               </template>
             </span>
           </div>
@@ -355,6 +419,15 @@ export default defineComponent({
       const key = 'retrieval.stage.' + stage;
       const label = this.$t(key);
       return label === key ? stage : label;
+    },
+    // Fusion and rerank scores are optional on a chunk (a dense-only run
+    // has no rerank score) and the trace's raw hits carry whatever the
+    // channel produced. Calling .toFixed() on a missing one crashed the
+    // whole result render (B6).
+    fmtScore(v, digits = 4) {
+      const n = Number(v);
+      return (v === null || v === undefined || !Number.isFinite(n))
+        ? '—' : n.toFixed(digits);
     },
   },
 });

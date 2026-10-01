@@ -36,14 +36,43 @@ export default defineComponent({
 
     const gates = ref([]);
     const checks = ref([]);
+    // Gate-list load failure. Promotion failures get their own channel
+    // below: a 409 from promote used to land here, where the banner's
+    // retry button re-runs the gate LIST, which is not the failed call.
     const gateErr = ref('');
+    const promoteErr = ref('');
 
     let timer = null;
     let started = false;
 
     const scopePath = () =>
       `/v1/databases/${enc(db.value)}/collections/${enc(coll.value)}`;
+    // Both of these mirror what the promote endpoint itself resolves —
+    // they are not a client-side "first item wins" guess.
+    //   * regression_gates is UNIQUE(database, collection), so a scope
+    //     has at most one gate; the list is already filtered by scope
+    //     and the server reads that same row via get_gate_for_collection.
+    //   * list_gate_checks orders newest first, and the server reads
+    //     get_latest_gate_check — the newest row.
+    // There is therefore nothing to choose between, and a selector here
+    // would imply the client could promote against a gate the server
+    // would not consult.
+    const scopeGate = computed(() => gates.value[0] || null);
     const latestCheck = computed(() => checks.value[0] || null);
+    // The endpoint's own gate rule: with a gate registered, promotion is
+    // allowed only when the latest check passed. With no gate the canary
+    // can be promoted directly (a 409 still comes back if none is parked).
+    const canPromote = computed(() => {
+      if (!gates.value.length) return true;
+      return !!latestCheck.value && latestCheck.value.status === 'passed';
+    });
+    const promoteBlockReason = computed(() => {
+      if (canPromote.value) return '';
+      if (!latestCheck.value) return t('ops.reindex.block_no_check');
+      return t('ops.reindex.block_check_failed', {
+        status: statusLabel(latestCheck.value.status),
+      });
+    });
 
     async function loadJob(jobId) {
       try {
@@ -91,6 +120,7 @@ export default defineComponent({
       if (!confirmed) return;
       submitting.value = true;
       formErr.value = '';
+      promoteErr.value = '';
       promoted.value = null;
       try {
         const { payload } = await api('POST', `${scopePath()}/reindex`, body);
@@ -122,8 +152,8 @@ export default defineComponent({
     }
 
     async function promote() {
-      if (promoting.value) return;
-      const gate = gates.value[0] || null;
+      if (promoting.value || !canPromote.value) return;
+      const gate = scopeGate.value;
       // Promotion retires the currently active index and makes the
       // candidate live, so the modal names both the gate being cleared
       // and the run that produced the candidate.
@@ -141,13 +171,17 @@ export default defineComponent({
       });
       if (!confirmed) return;
       promoting.value = true;
-      gateErr.value = '';
+      // Not gateErr: that banner belongs to the gate LIST load, and its
+      // retry button re-runs loadGates() — the wrong call for a failed
+      // promote. A 409 gate_blocked / reindex_no_canary is reported next
+      // to the button that produced it.
+      promoteErr.value = '';
       try {
         const { payload } = await api('POST', `${scopePath()}/reindex/promote`);
         promoted.value = payload;
         stopTimer();
         await loadGates();
-      } catch (e) { gateErr.value = e.message; }
+      } catch (e) { promoteErr.value = e.message; }
       finally { promoting.value = false; }
     }
 
@@ -168,7 +202,8 @@ export default defineComponent({
       db, coll, embedModel, canaryPercent, batchSize,
       submitting, formErr, job, indexRef, promoted,
       promoting, refreshing,
-      gates, checks, gateErr, latestCheck,
+      gates, checks, gateErr, promoteErr, scopeGate, latestCheck,
+      canPromote, promoteBlockReason,
       submit, loadGates, promote,
       formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
@@ -254,9 +289,9 @@ export default defineComponent({
 
         <template v-else-if="gates.length">
           <table class="info-table ops-gate-meta">
-            <tr><th>{{ $t('common.gate_id') }}</th><td class="ops-mono">{{ gates[0].gate_id }}</td></tr>
-            <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ gates[0].set_id }}</td></tr>
-            <tr><th>{{ $t('common.baseline_run_id') }}</th><td class="ops-mono">{{ gates[0].baseline_run_id || '—' }}</td></tr>
+            <tr><th>{{ $t('common.gate_id') }}</th><td class="ops-mono">{{ scopeGate.gate_id }}</td></tr>
+            <tr><th>{{ $t('common.set_id') }}</th><td class="ops-mono">{{ scopeGate.set_id }}</td></tr>
+            <tr><th>{{ $t('common.baseline_run_id') }}</th><td class="ops-mono">{{ scopeGate.baseline_run_id || '—' }}</td></tr>
           </table>
 
           <empty-state v-if="!latestCheck" state="empty" :text="$t('ops.reindex.no_check')" />
@@ -271,13 +306,20 @@ export default defineComponent({
               <tr><th>{{ $t('common.run_id') }}</th><td class="ops-mono">{{ latestCheck.run_id || '—' }}</td></tr>
             </table>
           </div>
-
-          <div class="actions">
-            <busy-button :busy="promoting" :label="$t('ops.reindex.promote')"
-                         :busy-label="$t('ops.reindex.promoting')" @click="promote" />
-          </div>
-          <p class="ops-note">{{ $t('ops.reindex.promote_hint') }}</p>
+          <p class="ops-note">{{ $t('ops.reindex.gate_scope_note') }}</p>
         </template>
+
+        <!-- Promotion sits outside both branches above. It used to live
+             inside the gates branch, so a scope with no gate — the very
+             case whose empty state says the canary can be promoted
+             directly — had no button at all (B8). -->
+        <status-banner kind="error" :text="promoteErr" />
+        <div class="actions">
+          <busy-button :busy="promoting" :disabled="!canPromote"
+                       :label="$t('ops.reindex.promote')"
+                       :busy-label="$t('ops.reindex.promoting')" @click="promote" />
+        </div>
+        <p class="ops-note">{{ promoteBlockReason || $t('ops.reindex.promote_hint') }}</p>
 
         <div v-if="promoted" class="ops-promoted">
           <span class="pill success">{{ $t('common.promoted') }}</span>
