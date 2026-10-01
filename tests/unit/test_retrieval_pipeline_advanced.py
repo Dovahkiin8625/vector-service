@@ -176,6 +176,10 @@ async def test_graph_intent_without_graph_index_skips_graph_leg():
 class FakeGraphRepo:
     """Just enough repo surface for one graph leg."""
 
+    def get_binding(self, db, coll):
+        # Unbound: physical == logical.
+        return None
+
     def graph_stats(self, db, coll):
         return {"entities_count": 1}
 

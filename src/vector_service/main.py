@@ -30,6 +30,8 @@ from vector_service.api.multimodal_embeddings import (
 from vector_service.api.management import router as management_router
 from vector_service.api.models import router as models_router
 from vector_service.api.dashboard import router as dashboard_router
+from vector_service.api.evaluation import router as evaluation_router
+from vector_service.api.feedback import router as feedback_router
 from vector_service.api.graph import router as graph_router
 from vector_service.api.parse import router as parse_router
 from vector_service.api.rebuild import router as rebuild_router
@@ -219,6 +221,26 @@ OPENAPI_TAGS = [
             "the corpus leaf chunks, detects and summarizes communities, "
             "and indexes entity/community vectors into independent thin "
             "collections."
+        ),
+    },
+    {
+        "name": "feedback",
+        "description": (
+            "Retrieval feedback under `/v1/feedback`. `POST /v1/feedback` "
+            "records a 👍/👎/click/adopt event for a query or chunk with a "
+            "snapshot of the pipeline it reacts to; `GET /v1/feedback` "
+            "lists events filtered by database/collection/kind."
+        ),
+    },
+    {
+        "name": "evaluation",
+        "description": (
+            "Evaluation sets and regression gates under `/v1/evaluation`. "
+            "Manage question sets with expected chunks/docs/answers, freeze "
+            "immutable versions, batch-run the retrieval pipeline with "
+            "Recall/MRR/nDCG/channel-attribution summaries, and configure "
+            "gates whose checks must pass against the parked canary before "
+            "promotion."
         ),
     },
     {
@@ -494,6 +516,8 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(rebuild_router)
     app.include_router(graph_router)
+    app.include_router(feedback_router)
+    app.include_router(evaluation_router)
 
     return app
 

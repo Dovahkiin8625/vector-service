@@ -94,3 +94,6 @@ class RetrievalResult:
     channel_runs: list[ChannelRun]
     traces: list[StageTrace]
     route: Any = None
+    #: Pre-rerank order (candidate pool) when reranking ran; lets eval
+    #: score the fused order against the final, reranked order.
+    rerank_input_ids: list[str] | None = None

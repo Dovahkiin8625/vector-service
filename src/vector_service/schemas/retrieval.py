@@ -11,6 +11,7 @@ from vector_service.retrieval.base import (
     RetrievedChunk,
     StageTrace,
 )
+from vector_service.retrieval.expand import CONTEXT_LEVELS
 
 REWRITE_METHODS = ("hyde", "multi_query", "step_back", "decompose")
 
@@ -107,6 +108,9 @@ class ContextSpec(BaseModel):
 class RetrievalRequest(BaseModel):
     database: str = Field("default", min_length=1)
     collection: str = Field("ingest", min_length=1)
+    #: Pin recall to one physical index (canary/active ref); defaults to
+    #: the binding's active_ref (or the logical name when unbound).
+    index_ref: str | None = None
     query: str = Field(..., min_length=1)
     top_k: int = Field(10, ge=1, le=100)
     filter: FilterSpec = Field(default_factory=FilterSpec)
@@ -117,6 +121,18 @@ class RetrievalRequest(BaseModel):
     rerank: RerankSpec = Field(default_factory=RerankSpec)
     routing: RoutingSpec = Field(default_factory=RoutingSpec)
     context: ContextSpec = Field(default_factory=ContextSpec)
+    #: Expand recalled leaves up to section/document after reranking;
+    #: "chunk" keeps the leaf vocabulary.
+    context_level: str = "chunk"
+
+    @field_validator("context_level")
+    @classmethod
+    def _context_level_known(cls, value):
+        if value not in CONTEXT_LEVELS:
+            raise ValueError(
+                f"context_level must be one of {CONTEXT_LEVELS}"
+            )
+        return value
 
     @model_validator(mode="after")
     def _pool_covers_top_k(self):

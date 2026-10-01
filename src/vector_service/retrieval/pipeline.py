@@ -38,6 +38,7 @@ from vector_service.retrieval.channels import (
     SummaryChannel,
 )
 from vector_service.retrieval.diversity import mmr
+from vector_service.retrieval.expand import expand_to_level
 from vector_service.retrieval.fusion import rrf_fuse, weighted_fuse
 from vector_service.retrieval.routing import (
     NUM_DOC_FIELDS,
@@ -172,6 +173,21 @@ class RetrievalPipeline:
         self._chat_getter = chat_getter
         self._chat_check = chat_check
 
+    def _resolve_physical(self, req: RetrievalRequest) -> str:
+        """Resolve the physical collection recall runs against.
+
+        An explicit ``index_ref`` wins (gate checks pin the canary);
+        otherwise the binding's ``active_ref`` applies; an unbound
+        logical collection is its own physical name.
+        """
+        if req.index_ref:
+            return req.index_ref
+        if self._repo is not None:
+            binding = self._repo.get_binding(req.database, req.collection)
+            if binding is not None:
+                return str(binding["active_ref"])
+        return req.collection
+
     async def validate(self, req: RetrievalRequest) -> dict:
         """Pre-flight checks + schema probe. Shared by JSON/stream routes."""
         if not req.query or not req.query.strip():
@@ -183,14 +199,17 @@ class RetrievalPipeline:
             )
 
         loop = asyncio.get_running_loop()
+        physical = await loop.run_in_executor(
+            None, self._resolve_physical, req
+        )
         try:
             info = await loop.run_in_executor(
-                None, self._store.collection_info, req.database, req.collection
+                None, self._store.collection_info, req.database, physical
             )
         except CollectionNotFound:
             raise _http(
                 404, "collection_not_found",
-                f"collection {req.collection!r} does not exist in database "
+                f"collection {physical!r} does not exist in database "
                 f"{req.database!r}",
             ) from None
 
@@ -249,6 +268,7 @@ class RetrievalPipeline:
             "output_fields": output_fields,
             "summary_available": summary_available,
             "graph_available": graph_available,
+            "physical": physical,
         }
 
     async def retrieve(
@@ -368,10 +388,14 @@ class RetrievalPipeline:
             }))
 
         # ---- rerank ----
+        rerank_input_ids = None
         if req.rerank.enabled:
             await _send(emit, {"type": "stage", "stage": "rerank"})
             timer = _Timer("rerank")
             pool = chunks[: req.rerank.candidate_pool]
+            # Snapshot the fused order before reranking for pre/post
+            # comparison (eval metrics consume this on the result).
+            rerank_input_ids = [c.chunk_id for c in pool]
             documents = [str(c.fields.get("text", "")) for c in pool]
             scored = await loop.run_in_executor(
                 None,
@@ -388,6 +412,24 @@ class RetrievalPipeline:
         else:
             chunks = chunks[: req.top_k]
 
+        # ---- expand leaves up to the requested context level ----
+        if req.context_level != "chunk" and self._repo is not None:
+            await _send(emit, {"type": "stage", "stage": "expand"})
+            timer = _Timer("expand")
+            leaf_count = len(chunks)
+            chunks = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    expand_to_level,
+                    repo=self._repo, level=req.context_level,
+                ),
+                chunks,
+            )
+            traces.append(timer.done({
+                "level": req.context_level,
+                "leaves": leaf_count, "outputs": len(chunks),
+            }))
+
         # ---- compress to token budget ----
         if req.context.max_tokens is not None:
             await _send(emit, {"type": "stage", "stage": "compress"})
@@ -400,7 +442,8 @@ class RetrievalPipeline:
             }))
 
         return RetrievalResult(
-            req.query, chunks, plan, runs, traces, route=decision
+            req.query, chunks, plan, runs, traces, route=decision,
+            rerank_input_ids=rerank_input_ids,
         )
 
     # ---- internal ----
@@ -536,6 +579,7 @@ class RetrievalPipeline:
             use_graph = bool(decision.graph and ctx["graph_available"])
 
         output_fields = ctx["output_fields"]
+        physical = ctx["physical"]
 
         if not recall_filter.matches:
             # A resolved predicate set matched no document: keep the
@@ -548,11 +592,11 @@ class RetrievalPipeline:
                 use_graph=use_graph,
             )
 
-        dense_ch = DenseChannel(self._store, req.database, req.collection,
+        dense_ch = DenseChannel(self._store, req.database, physical,
                                 self._embedder, _VECTOR_FIELD)
-        bm25_ch = BM25Channel(self._store, req.database, req.collection,
+        bm25_ch = BM25Channel(self._store, req.database, physical,
                               _SPARSE_FIELD)
-        summary_ch = SummaryChannel(self._store, req.database, req.collection,
+        summary_ch = SummaryChannel(self._store, req.database, physical,
                                     self._embedder)
         tasks: list[Awaitable] = []
         if use_dense:

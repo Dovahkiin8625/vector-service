@@ -29,6 +29,10 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
+from vector_service.api.evaluation import (
+    run_eval_pipeline,
+    run_gate_check,
+)
 from vector_service.api.graph import run_graph_build_pipeline
 from vector_service.api.ingest import (
     JobCancelled,
@@ -40,6 +44,8 @@ from vector_service.core.logging import get_logger
 from vector_service.core.threadpools import run_in_sqlite
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from fastapi import FastAPI
 
 log = get_logger(__name__)
@@ -135,11 +141,15 @@ class IngestWorker:
         # Dispatch on the row's job_type: ``ingest`` rebuilds the
         # validated upload from the spool, ``rebuild`` derives a new
         # physical index from the corpus, ``graph_build`` rederives the
-        # knowledge graph. Later sections add eval / gate-check dispatch.
+        # knowledge graph, ``eval_run`` / ``gate_check`` run evaluation.
         if row.get("job_type") == "rebuild":
             await self._execute_rebuild(row)
         elif row.get("job_type") == "graph_build":
             await self._execute_graph_build(row)
+        elif row.get("job_type") == "eval_run":
+            await self._execute_eval_run(row)
+        elif row.get("job_type") == "gate_check":
+            await self._execute_gate_check(row)
         else:
             await self._execute_ingest(row)
 
@@ -449,6 +459,103 @@ class IngestWorker:
             await self._handle_failure(row, exc)
             return
         self._publish(job_id, "done")
+
+    async def _execute_eval_run(self, row: dict) -> None:
+        """Run an ``eval_run`` job: batch the set's questions through retrieval."""
+        state = self._app.state
+        corpus = state.corpus
+        job_id = row["job_id"]
+
+        try:
+            params = json.loads(row["params_json"])
+            run_id = params["run_id"]
+        except Exception as e:  # noqa: BLE001 — self-written row; treat unreadable state as corrupted
+            log.warning("job_corrupted", job_id=job_id, error=str(e))
+            await run_in_sqlite(
+                corpus.fail_job,
+                job_id,
+                error_code="job_corrupted",
+                error_message=str(e),
+            )
+            self._publish(job_id, "failed")
+            return
+
+        await self._run_eval_or_gate(
+            row,
+            run_eval_pipeline(
+                state=state, run_id=run_id,
+                emit=self._eval_emit(job_id),
+                job_id=job_id,
+                should_cancel=self._eval_should_cancel(job_id),
+            ),
+        )
+
+    async def _execute_gate_check(self, row: dict) -> None:
+        """Run a ``gate_check`` job: frozen questions vs the parked canary."""
+        state = self._app.state
+        corpus = state.corpus
+        job_id = row["job_id"]
+
+        try:
+            params = json.loads(row["params_json"])
+            gate_id = params["gate_id"]
+            check_id = params["check_id"]
+            run_id = params["run_id"]
+        except Exception as e:  # noqa: BLE001 — self-written row; treat unreadable state as corrupted
+            log.warning("job_corrupted", job_id=job_id, error=str(e))
+            await run_in_sqlite(
+                corpus.fail_job,
+                job_id,
+                error_code="job_corrupted",
+                error_message=str(e),
+            )
+            self._publish(job_id, "failed")
+            return
+
+        await self._run_eval_or_gate(
+            row,
+            run_gate_check(
+                state=state, gate_id=gate_id, check_id=check_id, run_id=run_id,
+                emit=self._eval_emit(job_id),
+                job_id=job_id,
+                should_cancel=self._eval_should_cancel(job_id),
+            ),
+        )
+
+    async def _run_eval_or_gate(self, row: dict, coro: Any) -> None:
+        """Shared terminal handling for eval/gate jobs."""
+        job_id = row["job_id"]
+        try:
+            await coro
+        except JobCancelled:
+            # Eval/gate pipelines write their cancelled state themselves.
+            self._publish(job_id, "cancelled")
+            return
+        except HTTPException as exc:
+            await self._handle_failure(row, exc)
+            return
+        self._publish(job_id, "done")
+
+    def _eval_emit(self, job_id: str) -> Any:
+        """Async sink that turns eval stage/progress frames into bus nudges."""
+
+        async def emit(event: dict) -> None:
+            event_type = event.get("type")
+            if event_type == "progress":
+                self._publish(job_id, "progress")
+            elif event_type == "stage":
+                self._publish(job_id, "stage")
+
+        return emit
+
+    def _eval_should_cancel(self, job_id: str) -> Any:
+        """Async cancellation probe over the job row."""
+
+        async def should_cancel() -> bool:
+            fresh = await run_in_sqlite(self._app.state.corpus.get_job, job_id)
+            return fresh is not None and bool(fresh["cancel_requested"])
+
+        return should_cancel
 
     async def _handle_failure(self, row: dict, exc: HTTPException) -> None:
         """Requeue a retryable failure; otherwise mark the job failed."""
