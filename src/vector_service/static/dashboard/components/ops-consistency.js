@@ -81,7 +81,7 @@ export default defineComponent({
         </div>
 
         <div class="actions">
-          <busy-button :busy="scanningKind === 'scan'" :label="$t('ops.consistency.scan')"
+          <busy-button variant="primary" :busy="scanningKind === 'scan'" :label="$t('ops.consistency.scan')"
                        :busy-label="$t('ops.consistency.scanning')" :disabled="scanning"
                        @click="scan(false)" />
           <busy-button variant="danger" :busy="scanningKind === 'repair'"

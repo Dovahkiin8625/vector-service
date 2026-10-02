@@ -73,7 +73,7 @@ export const BusyButton = defineComponent({
     busy: { type: Boolean, default: false },
     label: { type: String, default: '' },
     busyLabel: { type: String, default: '' },
-    variant: { type: String, default: 'primary' },   // primary | danger | ghost | ''
+    variant: { type: String, default: '' },   // primary | danger | ghost | '' (secondary)
     disabled: { type: Boolean, default: false },
   },
   emits: ['click'],
@@ -110,6 +110,9 @@ export const EmptyState = defineComponent({
   template: `
     <div :class="['empty', state]" :role="ariaRole">
       <span v-if="state === 'loading'" class="spinner" aria-hidden="true"></span>
+      <!-- Decorative placeholder ring for the no-data states; the
+           text/hint carry the actual message (stage 4). -->
+      <span v-else-if="state === 'empty' || state === 'idle'" class="empty-glyph" aria-hidden="true"></span>
       <span class="empty-text">{{ label }}</span>
       <span v-if="hint" class="hint">{{ hint }}</span>
       <button v-if="retry && state === 'error'" class="btn sm empty-retry"

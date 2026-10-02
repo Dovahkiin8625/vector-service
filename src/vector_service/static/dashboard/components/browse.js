@@ -361,7 +361,7 @@ export default defineComponent({
           </div>
         </div>
         <div class="actions">
-          <busy-button id="btn-brw-query" :busy="status === 'loading'" :label="$t('common.query')"
+          <busy-button id="btn-brw-query" variant="primary" :busy="status === 'loading'" :label="$t('common.query')"
                        :busy-label="$t('browse.running')" @click="runQuery()" />
           <button class="btn" id="btn-brw-reset" :disabled="status === 'loading'"
                   @click="filter = ''; offset = 0; clearSelection(); runQuery()">{{ $t('common.reset') }}</button>

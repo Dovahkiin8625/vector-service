@@ -4,6 +4,10 @@ import { store, api, extractApiError, refreshModels as loadModels, t } from './a
 import { formatParams, formatBytes, dtypeText as fmtDtype } from './util.js';
 import { notify, StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
+// Registry of the four model-family types (pinned by tests/unit). The
+// tag shows the raw technical name — a code-level name, like the
+// endpoint pills; the localized gloss lives in the tooltip
+// (`models.family.*` in app.js).
 const FAMILY_LABELS = {
   embedder: 'embedder', image_embedder: 'image_embedder',
   multimodal_embedder: 'multimodal_embedder', reranker: 'reranker',
@@ -76,7 +80,7 @@ export default defineComponent({
           <span class="section-sub">{{ $t('common.model_id_ops') }}</span>
         </div>
         <div class="actions">
-          <busy-button :busy="refreshing" :label="$t('common.refresh')"
+          <busy-button variant="ghost" :busy="refreshing" :label="$t('common.refresh')"
                        :busy-label="$t('models.refreshing')" @click="refresh" />
           <button class="btn sm" @click="store.models.autoRefresh = !store.models.autoRefresh">
             {{ $t('models.auto_refresh_label') }} {{ $t(store.models.autoRefresh ? 'common.on' : 'common.off') }}
@@ -93,7 +97,7 @@ export default defineComponent({
             <div class="model-card-head">
               <div class="model-title">
                 <span class="id" :title="m.id">{{ m.id }}</span>
-                <span class="family-tag">{{ familyLabel(m.type) }}</span>
+                <span class="family-tag" :title="familyTitle(m.type)">{{ familyLabel(m.type) }}</span>
               </div>
               <span :class="['status-pill', m.loaded ? 'loaded' : '',
                              isLoading(m) ? 'loading' : '',
@@ -152,6 +156,11 @@ export default defineComponent({
   `,
   methods: {
     familyLabel(type) { return FAMILY_LABELS[type] || type || this.$t('common.unknown'); },
+    // Known families get the localized gloss; anything else falls back
+    // to the raw type so an unknown one never renders as a missing key.
+    familyTitle(type) {
+      return FAMILY_LABELS[type] ? this.$t('models.family.' + type) : this.familyLabel(type);
+    },
     formatParams,
     formatBytes,
     formatDuration,

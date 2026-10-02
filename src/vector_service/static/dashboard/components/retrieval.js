@@ -271,7 +271,7 @@ export default defineComponent({
       <div class="retrieval-modes" role="tablist" :aria-label="$t('nav.retrieval')">
         <button v-for="m in ['basic','hybrid','advanced','custom']" :key="m"
           role="tab" :aria-selected="s.mode === m ? 'true' : 'false'"
-          :class="['btn','sm', s.mode === m ? 'primary' : '']"
+          :class="['btn','sm', s.mode === m ? 'on' : '']"
           @click="setMode(m)">{{ $t('retrieval.modes.' + m) }}</button>
       </div>
 

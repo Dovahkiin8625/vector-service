@@ -281,7 +281,7 @@ export default defineComponent({
           </div>
           <div class="row">
             <label>&nbsp;</label>
-            <busy-button id="btn-colls-refresh-db" variant="" :busy="busyKey === 'dbs'"
+            <busy-button id="btn-colls-refresh-db" variant="ghost" :busy="busyKey === 'dbs'"
                          :label="'↻ ' + $t('collections.reload_dbs')" @click="reloadDbs" />
           </div>
         </div>
@@ -292,7 +292,7 @@ export default defineComponent({
           <h3 class="section-title">{{ $t('collections.list_title') }} <span class="pill accent">GET /v1/databases/{db}/collections</span></h3>
         </div>
         <div class="actions">
-          <busy-button id="btn-refresh-colls" :busy="busyKey === 'colls'" :label="$t('common.refresh')"
+          <busy-button id="btn-refresh-colls" variant="ghost" :busy="busyKey === 'colls'" :label="$t('common.refresh')"
                        :disabled="!db" @click="reloadColls" />
           <button id="btn-open-new-coll" class="btn" :disabled="!db" @click="store.modals.newColl = true">{{ $t('collections.new') }}</button>
         </div>
@@ -432,7 +432,7 @@ export default defineComponent({
                                   v-model="newIndex[db + '::' + name].params"></textarea>
                       </div>
                       <div class="actions">
-                        <busy-button data-new-index-submit :busy="busyKey === 'newindex:' + name"
+                        <busy-button data-new-index-submit variant="primary" :busy="busyKey === 'newindex:' + name"
                                      :label="$t('collections.create_rebuild')"
                                      :busy-label="$t('collections.creating')"
                                      @click="submitNewIndex(name)" />

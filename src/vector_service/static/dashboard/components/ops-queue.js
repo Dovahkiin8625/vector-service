@@ -179,7 +179,7 @@ export default defineComponent({
 
         <div class="ops-filters">
           <button v-for="s in STATUS_FILTERS" :key="s || '__all'"
-                  :class="['btn', 'sm', statusFilter === s ? 'primary' : 'ghost']"
+                  :class="['btn', 'sm', statusFilter === s ? 'on' : 'ghost']"
                   @click="setFilter(s)">
             {{ s === '' ? $t('ops.queue.all') : statusLabel(s) }}
           </button>

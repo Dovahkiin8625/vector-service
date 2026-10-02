@@ -25,7 +25,15 @@
   --bg: #F7F8FA;
   --surface-1: #FFFFFF;
   --surface-2: #F2F4F7;
+  /* Even-row tint for dense data tables; between surface-1 and -2 so
+     hover can still lift above the zebra. */
+  --surface-zebra: #F8FAFC;
   --surface-3: #EAECF0;
+  /* Border hierarchy (stage 4): --border is the resting edge of every
+     card/panel/section chrome; --border-strong is reserved for
+     interactive controls and structural callouts; state borders
+     (accent-dim loaded / warn / danger failed) override both on the
+     card itself. */
   --border: #E5E7EB;
   --border-strong: #D1D5DB;
   --text: #1F2329;
@@ -184,15 +192,17 @@ input, textarea, select { font-family: inherit; color: inherit; }
   transition: background var(--t-base), transform var(--t-base);
   flex-shrink: 0;
 }
+/* Decorative dots (stage 4): no standing glow — the accent dot is flat
+   colour only. The single intentional glow moment is the 600ms pulse on
+   activity, softened from the old 12px bloom. */
 .dim-dot--accent {
   background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
 }
 .dim-dot--pulse {
   animation: dot-pulse 600ms ease-out;
 }
 @keyframes dot-pulse {
-  0% { transform: scale(1.6); box-shadow: 0 0 12px var(--accent-glow); }
+  0% { transform: scale(1.4); box-shadow: 0 0 6px var(--accent-glow); }
   100% { transform: scale(1); box-shadow: none; }
 }
 .dim-dots-label {
@@ -213,11 +223,17 @@ input, textarea, select { font-family: inherit; color: inherit; }
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  margin-bottom: 22px;
+  margin-bottom: 18px;
 }
 @media (max-width: 1280px) {
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* Card chrome (stage 4): every card family (kpi / model-card / gpu-card /
+   field-card / ops-*-card) shares surface-1 + 1px --border + r-md. Three
+   padding steps only — compact 12x14 (nested chips: field/gpu), standard
+   14x16 (KPI, ops cards), roomy 16x18 (model/form cards). Card grids
+   share one rhythm: gap 14px, margin-bottom 18px. State borders override
+   the resting edge (see the --border hierarchy note in :root). */
 .kpi {
   background: var(--surface-1);
   border: 1px solid var(--border);
@@ -623,13 +639,13 @@ input, textarea, select { font-family: inherit; color: inherit; }
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 14px;
-  margin-bottom: 28px;
+  margin-bottom: 18px;
 }
 .model-card {
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  padding: 18px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -805,7 +821,6 @@ input, textarea, select { font-family: inherit; color: inherit; }
   border-color: var(--accent-dim);
   background: rgba(34, 211, 238, 0.08);
 }
-.device-chip.gpu .device-ic { filter: drop-shadow(0 0 3px var(--accent-glow)); }
 /* Loaded-instance resource stats: params / VRAM / load duration. */
 .model-meta {
   display: grid;
@@ -855,7 +870,7 @@ input, textarea, select { font-family: inherit; color: inherit; }
   background: var(--border-strong);
   border-radius: 1px;
 }
-.model-dots .mini-dot.accent { background: var(--accent); box-shadow: 0 0 3px var(--accent-glow); }
+.model-dots .mini-dot.accent { background: var(--accent); }
 .model-actions {
   display: flex;
   gap: 8px;
@@ -1005,7 +1020,17 @@ input[type="file"]::-webkit-file-upload-button {
 input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accent); color: var(--accent); }
 .check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 
-/* ============ Buttons ============ */
+/* ============ Buttons ============
+   Hierarchy (stage-4 规约 — keep call sites honest to these roles):
+   - primary: the pane's ONE main verb (query / run / submit / promote).
+     Filled accent; never a selection toggle.
+   - .btn (plain): ordinary secondary actions (reset, back, close,
+     fetch, apply). This is BusyButton's default variant.
+   - ghost: tertiary utilities in section heads (refresh, fold, copy).
+   - danger: destructive only (drop / delete / cancel job) — always
+     behind the confirm modal.
+   - on: selected state for chips/tabs/filters. Soft accent fill so a
+     chosen option never competes with the primary verb. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -1037,6 +1062,12 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   border-color: var(--accent-dim);
   color: var(--text);
   box-shadow: var(--shadow-accent);
+}
+.btn.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 600;
 }
 .btn.ghost {
   background: transparent;
@@ -1517,6 +1548,29 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 .empty.loading .spinner { margin-bottom: 10px; }
 .empty.idle { border-style: dashed; }
 .empty .empty-retry { margin-top: 12px; }
+/* Empty-state illustration (stage 4): a dashed placeholder ring with a
+   soft centre dot — decorative only (aria-hidden), the text/hint carry
+   the message. Deliberately no letter/emoji: it must not read as data. */
+.empty-glyph {
+  display: block;
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 10px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 50%;
+  position: relative;
+  opacity: 0.7;
+}
+.empty-glyph::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
 
 /* ============ Inline status banner ============ */
 /* The replacement for alert(): same three outcomes, but it stays on the
@@ -2081,9 +2135,19 @@ table.data-table tbody td {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: default;
 }
+/* Row chrome strategy (stage 4): zebra tints every other row so long
+   lists track across columns; hover lifts rows that respond to a
+   click; selection (accent-soft) overrides both. Rows with no action
+   behind them (.ops-row-static) keep their zebra and never lift. */
+table.data-table tbody tr:nth-child(even) td { background: var(--surface-zebra); }
+table.data-table tbody tr.ops-job-row td { cursor: pointer; }
 table.data-table tbody tr:hover td { background: var(--surface-2); }
+table.data-table tbody tr.ops-row-static:hover td { background: transparent; }
+table.data-table tbody tr.ops-row-static:nth-child(even):hover td {
+  background: var(--surface-zebra);
+}
 table.data-table tbody td.pk {
   color: var(--accent);
   font-weight: 600;
@@ -2096,28 +2160,8 @@ table.data-table tbody td.json {
   font-family: var(--mono);
   color: var(--text-dim);
 }
-table.data-table tbody tr.expanded td {
-  white-space: normal;
-  word-break: break-all;
-}
-table.data-table tbody tr.expanded td:first-child {
-  white-space: nowrap;
-}
-table.data-table tbody tr .row-json {
-  display: none;
-  margin-top: 6px;
-  padding: 8px 10px;
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  font-size: 11px;
-  color: var(--text);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 200px;
-  overflow: auto;
-}
-table.data-table tbody tr.expanded .row-json { display: block; }
+/* (Row-expand chrome removed: no table expands rows any more — the
+   card expanders live on databases/collections.) */
 
 /* ---- browse: row-selection checkboxes + delete toolbar ---- */
 table.data-table th.row-select,
@@ -2257,10 +2301,13 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
 /* Clickable rows are used by several ops tables (queue jobs, eval
    sets/runs/gates/checks), so the affordance is not scoped to one
    table. ops-row-static is a row with no action behind it (a gate check
-   with no run_id): no pointer, no hover lift. */
+   with no run_id): no pointer, no hover lift. Selection beats hover,
+   matching the data-table row strategy above. */
 tr.ops-job-row { cursor: pointer; }
 tr.ops-job-row:hover td { background: var(--surface-2); }
-tr.ops-row-selected td { background: var(--accent-soft); }
+tr.ops-row-selected td,
+table.data-table tbody tr.ops-row-selected td,
+table.data-table tbody tr.ops-row-selected:hover td { background: var(--accent-soft); }
 tr.ops-row-static { cursor: default; }
 tr.ops-row-static:hover td { background: transparent; }
 .ops-jobs-table td.ops-ts {
@@ -2301,8 +2348,8 @@ tr.ops-row-static:hover td { background: transparent; }
 .ops-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 14px;
+  margin-bottom: 18px;
 }
 .ops-kpi-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .ops-count {

@@ -26,5 +26,5 @@
 
 | 文件 | 内容 |
 |------|------|
-| [dashboard-overview.png](dashboard-overview.png) | Dashboard 默认落地页（KPI 总览 + 模型注册表 + 向量库状态 + 机器指标 + GPU 卡） |
-| [dashboard-text-similarity.png](dashboard-text-similarity.png) | 文本相似度调试面板（侧栏 模型 → 文本相似度） |
+| [dashboard-overview.png](dashboard-overview.png) | Dashboard 默认落地页（KPI 总览 + 已加载能力与资源占用 + 文档解析引擎 + 向量库连接状态） |
+| [dashboard-text-similarity.png](dashboard-text-similarity.png) | 文本相似度调试面板（侧栏 模型 → 相似度 · 文本 模式） |

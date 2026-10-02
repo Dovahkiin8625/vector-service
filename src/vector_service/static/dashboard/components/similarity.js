@@ -172,9 +172,9 @@ export default defineComponent({
         <div class="section-head"><h3 class="section-title">{{ $t('similarity.title.' + mode) }} <span class="pill accent">POST {{ endpoint(mode) }}</span></h3></div>
         <div class="actions">
           <span class="seg-toggle">
-            <button v-for="m in modes" :key="m.key" :class="['btn', mode === m.key ? 'primary' : '']" @click="mode = m.key">{{ $t('similarity.mode.' + m.key) }}</button>
+            <button v-for="m in modes" :key="m.key" :class="['btn', mode === m.key ? 'on' : '']" @click="mode = m.key">{{ $t('similarity.mode.' + m.key) }}</button>
           </span>
-          <busy-button :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
+          <busy-button variant="ghost" :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
                        @click="refreshModels" />
         </div>
         <div class="row split">
@@ -226,7 +226,7 @@ export default defineComponent({
         <div class="actions">
           <!-- An empty model list left model: '' submittable; the button
                now carries that state (S6). -->
-          <busy-button :busy="busy" :disabled="!model" :label="$t('common.run')"
+          <busy-button variant="primary" :busy="busy" :disabled="!model" :label="$t('common.run')"
                        :busy-label="$t('similarity.running')" @click="run" />
         </div>
         <!-- Outside v-if="result": validation complaints and a failed

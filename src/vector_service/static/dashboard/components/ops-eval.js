@@ -221,13 +221,13 @@ export default defineComponent({
         <div class="seg-toggle ops-tabs" role="tablist" :aria-label="$t('nav.eval')">
           <button type="button" class="btn sm" role="tab"
                   :aria-selected="tab === 'sets' ? 'true' : 'false'"
-                  :class="{ primary: tab === 'sets' }"
+                  :class="{ on: tab === 'sets' }"
                   @click="switchTab('sets')">
             {{ $t('ops.eval.tab_sets') }}
           </button>
           <button type="button" class="btn sm" role="tab"
                   :aria-selected="tab === 'gates' ? 'true' : 'false'"
-                  :class="{ primary: tab === 'gates' }"
+                  :class="{ on: tab === 'gates' }"
                   @click="switchTab('gates')">
             {{ $t('ops.eval.tab_gates') }}
           </button>

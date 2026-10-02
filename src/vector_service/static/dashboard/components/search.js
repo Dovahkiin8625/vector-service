@@ -211,7 +211,7 @@ export default defineComponent({
           </div>
         </details>
         <div class="actions">
-          <busy-button id="btn-search" :busy="status === 'loading'" :disabled="!!topkErr" :label="$t('search.run')"
+          <busy-button id="btn-search" variant="primary" :busy="status === 'loading'" :disabled="!!topkErr" :label="$t('search.run')"
                        :busy-label="$t('search.running')" @click="doSearch" />
         </div>
         <status-banner kind="error" :text="formErr" />

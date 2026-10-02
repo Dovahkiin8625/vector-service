@@ -108,7 +108,7 @@ export default defineComponent({
           <h3 class="section-title">{{ $t('rerank.registered') }} <span class="pill accent">GET /v1/models - type=reranker</span></h3>
         </div>
         <div class="actions">
-          <busy-button id="btn-rerank-refresh-models" :busy="modelsStatus === 'loading'"
+          <busy-button id="btn-rerank-refresh-models" variant="ghost" :busy="modelsStatus === 'loading'"
                        :label="$t('common.refresh')" @click="refreshModels" />
         </div>
         <!-- The non-operable model list that used to sit here duplicated
@@ -139,7 +139,7 @@ export default defineComponent({
         </div>
         <div class="row"><label>{{ $t('rerank.documents') }}</label><textarea id="rerank-docs" rows="4" v-model="docs"></textarea></div>
         <div class="actions">
-          <busy-button id="btn-rerank" :busy="busy" :disabled="!canRun" :label="$t('rerank.run')"
+          <busy-button id="btn-rerank" variant="primary" :busy="busy" :disabled="!canRun" :label="$t('rerank.run')"
                        :busy-label="$t('rerank.running')" @click="doRerank" />
         </div>
         <!-- Was previously rendered only inside v-if="result" (and only

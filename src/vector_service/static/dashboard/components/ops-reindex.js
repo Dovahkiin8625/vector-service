@@ -342,7 +342,7 @@ export default defineComponent({
         <status-banner kind="error" :text="formErr" />
 
         <div class="actions">
-          <busy-button :busy="submitting" :disabled="!!canaryErr || !!batchErr" :label="$t('ops.reindex.submit')"
+          <busy-button variant="primary" :busy="submitting" :disabled="!!canaryErr || !!batchErr" :label="$t('ops.reindex.submit')"
                        :busy-label="$t('ops.reindex.submitting')" @click="submit" />
         </div>
       </div>
@@ -416,7 +416,7 @@ export default defineComponent({
              directly — had no button at all (B8). -->
         <status-banner kind="error" :text="promoteErr" />
         <div class="actions">
-          <busy-button :busy="promoting" :disabled="!canPromote"
+          <busy-button variant="primary" :busy="promoting" :disabled="!canPromote"
                        :label="$t('ops.reindex.promote')"
                        :busy-label="$t('ops.reindex.promoting')" @click="promote" />
         </div>

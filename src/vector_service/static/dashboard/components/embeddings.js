@@ -187,7 +187,7 @@ export default defineComponent({
           <h3 class="section-title">{{ $t('embeddings.title.' + kind) }} <span class="pill accent">{{ pill(kind) }}</span></h3>
         </div>
         <div class="actions">
-          <busy-button :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
+          <busy-button variant="ghost" :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
                        @click="refreshModels" />
         </div>
         <!-- The non-operable model list that used to sit here duplicated
@@ -259,7 +259,7 @@ export default defineComponent({
         <div class="actions">
           <!-- An empty model list left model: '' submittable; the button
                now carries that state (S6). -->
-          <busy-button :busy="busy" :disabled="!model" :label="$t('common.run')"
+          <busy-button variant="primary" :busy="busy" :disabled="!model" :label="$t('common.run')"
                        :busy-label="$t('embeddings.running')" @click="run" />
         </div>
         <!-- Outside v-if="result": the first request's error has no

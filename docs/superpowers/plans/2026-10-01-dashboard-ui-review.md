@@ -13,8 +13,8 @@
 > | S5 排版与字体 | **已实施**（2026-10-01，见 §1 S5 实施记录） |
 > | S6 表单/数据加载规范 | **已实施**（2026-10-01，见 §1 S6 实施记录） |
 > | 阶段三（P2 信息架构） | **已实施**（2026-10-02，见 §3 阶段三实施记录） |
-> | S7 a11y | 随各阶段顺手实施（阶段一至三触及元素已修，余下随阶段四） |
-> | 阶段四（P3 视觉提升） | 未开始 |
+> | S7 a11y | 随各阶段顺手实施（阶段一至四触及元素已修，未触及面板的扫尾未纳入） |
+> | 阶段四（P3 视觉提升） | **已实施**（2026-10-02，见 §3 阶段四实施记录） |
 | 阶段一第 4 项（records 危险默认值） | **已实施**（2026-10-01，见 §3 阶段一实施记录） |
 
 ---
@@ -409,6 +409,22 @@
 ### 阶段四（P3 视觉提升）： polish
 
 在不动结构的前提下统一视觉节奏：KPI/卡片间距与边框层级、空态插画/引导、按钮层级（primary/secondary/danger/ghost 使用规约）、表格行 hover/斑马纹策略、装饰元素（dim-dots、model-dots）收敛或弱化；同步更新 README 中的面板截图。
+
+**实施记录（2026-10-02）**：全部落地，验收通过（结构零改动，视觉节奏统一，原有功能零回归）。
+
+1. **按钮层级规约**：四级规约写入 `dashboard.css` 注释——`primary` = 面板唯一主动作（实心强调）、默认 `.btn` = 普通次要、`ghost` = 三级工具（刷新/复制/折叠）、`danger` = 破坏性（后置确认）、`.btn.on` = 选态芯片（软强调底，永与 primary 竞争）；根因修复：`BusyButton` 默认 `variant` 从 `primary` 改为 `''`（此前每个忙碌按钮默认实心，主按钮被系统性稀释）；全组件调用点按规约重标——主动作显式 `variant="primary"`（search/browse/embeddings/similarity/collections/records/kb/ops-consistency/reindex 提交与提升等），工具类 `variant="ghost"`（各刷新/模型刷新/重载按钮），选中与过滤芯片由 `primary` 改 `on`（similarity/retrieval 模式、records tab 与视图切换、queue 状态过滤、eval tab、kb 视图切换等）。
+2. **表格行 hover/斑马纹策略**：新增 `--surface-zebra: #F8FAFC`；斑马 `tr:nth-child(even) td` 打底、hover 抬升 surface-2、选中态（accent-soft）以更高优先级盖过二者（注释固化顺序依赖）；`td` 默认 `cursor: default`，仅 `tr.ops-job-row` 保留 pointer；`tr.ops-row-static` 行 hover 不抬升（保留斑马底）；清掉死代码 `tr.expanded`/`.row-json` 规则（原位留注释说明替换物）。
+3. **空态插画/引导**：EmptyState 的 empty/idle 两态加装饰性虚线圆环 glyph（`.empty-glyph`，纯 CSS、`aria-hidden`、不写字母/emoji，避免被误读为数据）；loading 保留 spinner、error 保留原因+重试；文案仍全部来自 i18n（`_DEAD_LITERALS` 约束不受影响）。
+4. **KPI/卡片间距与边框层级**：`:root` 注释固化边框层级（`--border` 静息卡/面板边、`--border-strong` 交互控件与结构强调、状态边框在卡上覆盖两者）；卡片 chrome 统一规约注释（surface-1 + 1px `--border` + r-md；三档 padding：嵌套卡 12×14、KPI/ops 卡 14×16、模型/表单卡 16×18，`model-card` 由 18 归入第三档）；卡片网格节奏统一 gap 14px / margin-bottom 18px（overview 22→18、model 28→18、ops 12/14→14/18；cap-grid 原值即 18）。
+5. **装饰元素收敛/弱化**：dim-dots 常驻 glow 移除（accent 点改纯色），唯一保留的发光时刻是 600ms 活动脉冲且从 12px 柔化到 6px；model-dots 的 accent mini-dot 去 glow；device-chip GPU 图标的 `drop-shadow` 删除（图标色由 chip 颜色继承）。`#dim-dots` 稳定 id 保留。
+6. **models.js FAMILY_LABELS 挂账清零**：按 §2 models 评审意见保留英文技术名展示（属技术字），新增 `models.family.*` 双词典 title 提示（zh：文本嵌入模型/图像嵌入模型/图文嵌入模型/重排模型；en：text/image/multimodal embedding model、reranking model）；未知 type 回退原 type，不产生缺 key；符号名 `FAMILY_LABELS` 保留（`test_dashboard_route.py` 断言）。自动刷新「开/关」文案此前已完成本地化，本次无须再改。
+7. **README 面板截图更新**：`docs/dashboard-overview.png` / `docs/dashboard-text-similarity.png` 按当前 UI 重生成（1440×900，中文界面）；`README.md` / `docs/README.md` / `docs/quickstart.md` 的截图说明同步改写——旧图为 v0.2.0 版面（总览含模型注册表/机器指标/GPU 卡、相似度入口为独立「文本相似度」），现总览为 KPI + 已加载能力与资源占用 + 文档解析引擎 + 向量库连接状态，相似度入口为 模型 → 相似度（文本模式）。
+
+**挂账清零**：models.js FAMILY_LABELS 中文 title 提示（阶段三留账）。
+
+**验证**：`test_dashboard_route.py` / `test_dashboard_i18n.py` / `test_dashboard_feedback.py` / `test_version_single_source.py` 全绿（40 例）；Playwright 中/英冒烟（真实后端，不 mock 接口）——按钮层级（search/browse 主按钮 `btn primary`、queue 过滤芯片 `on`/`ghost`）、表格斑马纹（奇/偶行 透明/#F8FAFC）与 hover 抬升（surface-2）、eval 空态 glyph 渲染、模型卡 family-tag 显英文技术名 + zh title（EN 下切 en title）、EN 下 10 个面板（models/queue/eval/reindex/search/similarity/browse/records/collections/embeddings）零原始 key 泄漏；两张 README 截图 1440×900 重生成并人工核对内容。
+
+**未纳入本次**：eval「scope Apply 未改动时禁用」、queue SSE 连接状态、`app.js` health 轮询与 overview 双拉 `/v1/system/status` 的合并（以上均为 §2 尾注项、未列入阶段清单）；parser-cards 的 family-tag（docling 等解析器族名）无 title 提示（计划仅点名 models.js FAMILY_LABELS）；未触及面板的 S7 a11y 扫尾。
 
 ### 明确不做
 

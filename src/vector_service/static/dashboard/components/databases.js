@@ -135,7 +135,7 @@ export default defineComponent({
         <status-banner kind="error" :text="loadErr" :retry="loadErr ? refresh : null" />
         <status-banner :kind="opKind" :text="opMsg" />
         <div class="actions">
-          <busy-button id="btn-refresh-dbs" :busy="busyKey === 'list'" :label="$t('common.refresh')"
+          <busy-button id="btn-refresh-dbs" variant="ghost" :busy="busyKey === 'list'" :label="$t('common.refresh')"
                        @click="reload" />
           <button id="btn-open-new-db" class="btn" @click="store.modals.newDb = true">{{ $t('common.new_db') }}</button>
         </div>

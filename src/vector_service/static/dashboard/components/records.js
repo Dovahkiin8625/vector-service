@@ -297,15 +297,15 @@ export default defineComponent({
         <div class="records-tabs" role="tablist">
           <button type="button" role="tab" id="tab-vec-write"
                   :aria-selected="tab === 'write' ? 'true' : 'false'"
-                  :class="['btn', 'sm', tab === 'write' ? 'primary' : '']"
+                  :class="['btn', 'sm', tab === 'write' ? 'on' : '']"
                   @click="tab = 'write'">{{ $t('records.tab.write') }}</button>
           <button type="button" role="tab" id="tab-vec-query"
                   :aria-selected="tab === 'query' ? 'true' : 'false'"
-                  :class="['btn', 'sm', tab === 'query' ? 'primary' : '']"
+                  :class="['btn', 'sm', tab === 'query' ? 'on' : '']"
                   @click="tab = 'query'">{{ $t('records.tab.query') }}</button>
           <button type="button" role="tab" id="tab-vec-delete"
                   :aria-selected="tab === 'delete' ? 'true' : 'false'"
-                  :class="['btn', 'sm', tab === 'delete' ? 'primary' : '']"
+                  :class="['btn', 'sm', tab === 'delete' ? 'on' : '']"
                   @click="tab = 'delete'">{{ $t('records.tab.delete') }}</button>
         </div>
 
@@ -326,7 +326,7 @@ export default defineComponent({
             </div>
           </details>
           <div class="actions">
-            <busy-button id="btn-upsert" :busy="busy === 'upsert'" :label="$t('records.upsert')"
+            <busy-button id="btn-upsert" variant="primary" :busy="busy === 'upsert'" :label="$t('records.upsert')"
                          :busy-label="$t('records.upserting')" @click="doUpsert" />
           </div>
         </div>
@@ -334,7 +334,7 @@ export default defineComponent({
         <div v-show="tab === 'query'" role="tabpanel">
           <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-fetch-ids" class="code-input" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
           <div class="actions">
-            <busy-button id="btn-fetch" variant="" :busy="busy === 'fetch'" :label="$t('records.fetch')"
+            <busy-button id="btn-fetch" variant="primary" :busy="busy === 'fetch'" :label="$t('records.fetch')"
                          :busy-label="$t('records.fetching')" @click="doFetch" />
           </div>
         </div>
@@ -378,10 +378,10 @@ export default defineComponent({
           <span class="section-sub">{{ $t('records.fetched_n', { n: fetched.length }) }}</span>
           <span class="section-sub">
             <button type="button" class="btn sm" id="btn-fetch-view-table"
-                    :class="fetchView === 'table' ? 'primary' : ''"
+                    :class="fetchView === 'table' ? 'on' : ''"
                     @click="fetchView = 'table'">{{ $t('records.view.table') }}</button>
             <button type="button" class="btn sm" id="btn-fetch-view-json"
-                    :class="fetchView === 'json' ? 'primary' : ''"
+                    :class="fetchView === 'json' ? 'on' : ''"
                     @click="fetchView = 'json'">JSON</button>
           </span>
         </div>

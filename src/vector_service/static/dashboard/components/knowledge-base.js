@@ -1018,11 +1018,11 @@ export default defineComponent({
             <div class="seg-toggle" role="tablist">
               <button type="button" class="btn sm" id="btn-parse-source"
                       role="tab" :aria-selected="parseView === 'source'"
-                      :class="{ primary: parseView === 'source' }"
+                      :class="{ on: parseView === 'source' }"
                       @click="parseView = 'source'">{{ $t('kb.source') }}</button>
               <button type="button" class="btn sm" id="btn-parse-preview"
                       role="tab" :aria-selected="parseView === 'preview'"
-                      :class="{ primary: parseView === 'preview' }"
+                      :class="{ on: parseView === 'preview' }"
                       @click="parseView = 'preview'">{{ $t('kb.preview') }}</button>
             </div>
             <span class="head-actions">
@@ -1082,7 +1082,7 @@ export default defineComponent({
         </div>
         <div class="row"><label>{{ $t('kb.markdown') }}</label><textarea id="chunk-md" rows="6" v-model="chunkMd"></textarea></div>
         <div class="actions">
-          <busy-button id="btn-chunk" :busy="chunkBusy" :disabled="!canChunk" :label="$t('kb.chunk_btn')"
+          <busy-button id="btn-chunk" variant="primary" :busy="chunkBusy" :disabled="!canChunk" :label="$t('kb.chunk_btn')"
                        :busy-label="$t('kb.chunking')" @click="doChunk" />
         </div>
         <div v-if="chunkResults.length" class="response" id="chunk-results">
@@ -1357,7 +1357,7 @@ export default defineComponent({
           </div>
         </div>
         <div class="actions">
-          <busy-button id="btn-chunks-query" :busy="viewBusy" :label="$t('chunks.query')"
+          <busy-button id="btn-chunks-query" variant="primary" :busy="viewBusy" :label="$t('chunks.query')"
                        :busy-label="$t('chunks.running')" @click="chunksQuery" />
           <button class="btn" id="btn-chunks-reset" :disabled="viewBusy" @click="chunksReset">
             {{ $t('chunks.reset') }}
@@ -1373,11 +1373,11 @@ export default defineComponent({
               <div class="seg-toggle" role="tablist">
                 <button type="button" class="btn sm" id="btn-chunk-source"
                         role="tab" :aria-selected="chunkView === 'source'"
-                        :class="{ primary: chunkView === 'source' }"
+                        :class="{ on: chunkView === 'source' }"
                         @click="chunkView = 'source'">{{ $t('kb.source') }}</button>
                 <button type="button" class="btn sm" id="btn-chunk-preview"
                         role="tab" :aria-selected="chunkView === 'preview'"
-                        :class="{ primary: chunkView === 'preview' }"
+                        :class="{ on: chunkView === 'preview' }"
                         @click="chunkView = 'preview'">{{ $t('kb.preview') }}</button>
               </div>
               <span v-if="viewBusy" class="spinner"></span>

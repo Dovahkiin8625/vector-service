@@ -82,10 +82,10 @@ vector-service
 | `http://127.0.0.1:8080/metrics` | Prometheus |
 
 ![Dashboard 总览首页](dashboard-overview.png)
-*Dashboard 默认落地页：KPI 总览 + 模型注册表 + 向量库状态 + 机器指标 + GPU 设备卡。*
+*Dashboard 默认落地页：KPI 总览 + 已加载能力与资源占用 + 文档解析引擎 + 向量库连接状态。*
 
 ![文本相似度调试面板](dashboard-text-similarity.png)
-*新加的「文本相似度」调试面板（侧栏 模型 → 文本相似度）：左选模型 + 度量，中间填查询与候选（按行拆分），底部按所选度量排序展示 `result-row` 列表。*
+*「相似度」调试面板的文本模式（侧栏 模型 → 相似度）：选模型 + 度量，填查询与候选（每行一条），运行后按所选度量排序展示结果行。*
 
 侧栏「运维」组提供四个运维操作面：
 

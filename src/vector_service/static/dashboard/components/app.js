@@ -163,6 +163,10 @@ const I18N = {
     'models.meta_load_time': '加载耗时',
     'models.device_label': '设备',
     'models.dtype_label': '数据类型',
+    'models.family.embedder': '文本嵌入模型',
+    'models.family.image_embedder': '图像嵌入模型',
+    'models.family.multimodal_embedder': '图文嵌入模型',
+    'models.family.reranker': '重排模型',
 
     // Databases panel
     'databases.coll_count': '集合数',
@@ -965,6 +969,10 @@ const I18N = {
     'models.meta_load_time': 'load time',
     'models.device_label': 'device',
     'models.dtype_label': 'dtype',
+    'models.family.embedder': 'text embedding model',
+    'models.family.image_embedder': 'image embedding model',
+    'models.family.multimodal_embedder': 'multimodal embedding model',
+    'models.family.reranker': 'reranking model',
 
     'databases.coll_count': 'collection count',
     'databases.meta_count': 'metadata fields',
