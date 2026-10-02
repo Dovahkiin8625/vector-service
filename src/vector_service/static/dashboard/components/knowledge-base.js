@@ -1,10 +1,13 @@
 // Knowledge base panels: parse / chunk / ingest.
 //
-// The ingest view talks to POST /v1/ingest/stream and parse to
-// POST /v1/parse/stream: an XHR carries the multipart upload (real
-// byte-level upload % via xhr.upload.onprogress) while its response is
-// consumed incrementally as newline-delimited JSON events —
-// stage / progress then a terminal result/error event.
+// Parse talks to POST /v1/parse/stream: an XHR carries the multipart
+// upload (real byte-level upload % via xhr.upload.onprogress) while
+// its response is consumed incrementally as newline-delimited JSON
+// events — stage / progress then a terminal result/error event.
+// Ingest goes through the async job queue instead: the same kind of
+// XHR submits POST /v1/jobs/ingest (202 + job_id), the run is then
+// followed over GET /v1/jobs/{id}/events (SSE `job` frames carrying
+// full JobStatus snapshots) and cancelled via POST /v1/jobs/{id}/cancel.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
 import { api, enc, extractApiError, t, modelsByType, refreshModels as loadModels } from './app.js';
 import { intError, copyText } from './util.js';
@@ -54,8 +57,10 @@ const STRATEGIES = [
   { value: 'llm', labelKey: 'chunk.strategy.llm' },
 ];
 
-// Stage order is the public event contract of /v1/ingest/stream; the
-// 'uploading' pseudo-stage precedes the first server stage event.
+// Stage order is the public stepper contract. The job queue reports
+// JobStatus.status words, mapped onto these keys by JOB_STAGE below;
+// 'uploading' is the client-side pseudo-stage covering the multipart
+// submit before the job row exists.
 const STAGES = [
   { key: 'uploading', labelKey: 'ingest.stage.upload' },
   { key: 'parse', labelKey: 'ingest.stage.parse' },
@@ -63,6 +68,19 @@ const STAGES = [
   { key: 'embed', labelKey: 'ingest.stage.embed' },
   { key: 'upsert', labelKey: 'ingest.stage.upsert' },
 ];
+
+// JobStatus.status → STAGES key. 'queued' is deliberately absent: the
+// job is accepted but the worker has not started, so the stepper stays
+// on the uploading node at 100%.
+const JOB_STAGE = {
+  parsing: 'parse',
+  chunking: 'chunk',
+  embedding: 'embed',
+  upserting: 'upsert',
+};
+
+// Job statuses that will never transition again.
+const JOB_DONE = new Set(['done', 'failed', 'cancelled']);
 
 function formatBytes(n) {
   if (n == null || Number.isNaN(n)) return '—';
@@ -147,7 +165,12 @@ export default defineComponent({
     // Live socket of the in-flight run, so "cancel" can abort it. The
     // two views can't run at once, but each keeps its own handle.
     let parseXhr = null;
+    // Ingest is job-queue backed: ingestXhr only covers the multipart
+    // submit; once the job exists, cancel goes through the jobs API and
+    // ingestEs is the SSE subscription delivering JobStatus snapshots.
     let ingestXhr = null;
+    let ingestJobId = '';
+    let ingestEs = null;
     const chunkSize = ref(800);
     const chunkOverlap = ref(80);
     const chunkStrategy = ref('recursive');
@@ -517,7 +540,16 @@ export default defineComponent({
       if (parseXhr) parseXhr.abort();
     }
     function cancelIngest() {
-      if (ingestXhr) ingestXhr.abort();
+      // Two phases: while the multipart submit is still on the wire the
+      // job row does not exist yet, so dropping the request is the only
+      // cancel. Afterwards the worker owns the run and cancellation is
+      // cooperative — POST /v1/jobs/{id}/cancel sets a flag the worker
+      // honors at the next stage boundary; the SSE stream then delivers
+      // the 'cancelled' terminal snapshot and the panel unwinds there.
+      if (ingestXhr) { ingestXhr.abort(); return; }
+      if (ingestJobId && ingestEs) {
+        api('POST', '/v1/jobs/' + enc(ingestJobId) + '/cancel').catch(() => {});
+      }
     }
     // Strategy-specific option bag; keys mirror what
     // build_chunker() consumes in chunking/factory.py.
@@ -566,14 +598,99 @@ export default defineComponent({
       ingestError.value = null;
     }
 
-    // Multipart POST to an NDJSON stream endpoint (/v1/ingest/stream
-    // or /v1/parse/stream) with real upload-byte progress (fetch
-    // cannot report upload progress) AND incremental newline-delimited
+    // Multipart POST that resolves a single JSON envelope, with real
+    // upload-byte progress (fetch cannot report it). Used by the ingest
+    // submit: POST /v1/jobs/ingest answers 202 { job_id, status } once
+    // the upload is spooled — the pipeline itself runs on the job
+    // worker. A cancel abort() resolves { aborted: true } so the
+    // caller's await unwinds through the same path as streamPost.
+    function postFormJson(url, form, onPct, onStart) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        if (onStart) onStart(xhr);
+        if (xhr.upload) {
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              // Hold at 99% until the 202 lands — the last progress
+              // event can precede the request being fully sent.
+              onPct(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+            }
+          };
+          xhr.upload.onload = () => onPct(100);
+        }
+        xhr.onload = () => {
+          let payload = null;
+          try { payload = JSON.parse(xhr.responseText); } catch (_e) { payload = null; }
+          resolve({
+            ok: xhr.status >= 200 && xhr.status < 300,
+            status: xhr.status,
+            payload,
+          });
+        };
+        xhr.onabort = () => resolve({ ok: false, status: 0, aborted: true, payload: null });
+        xhr.onerror = () => reject(new Error(t('ingest.err.network')));
+        xhr.send(form);
+      });
+    }
+
+    // Follow GET /v1/jobs/{id}/events (SSE). Every `job` frame is a
+    // full JobStatus snapshot — the initial one arrives immediately,
+    // possibly already terminal. Resolves with the terminal snapshot;
+    // a permanently closed EventSource (server gone) rejects instead of
+    // spinning, while transient drops reconnect and re-send the state.
+    function watchJob(jobId, onFrame) {
+      return new Promise((resolve, reject) => {
+        const es = new EventSource('/v1/jobs/' + enc(jobId) + '/events');
+        ingestEs = es;
+        es.addEventListener('job', (ev) => {
+          let data = null;
+          try { data = JSON.parse(ev.data); } catch (_e) { return; }
+          onFrame(data);
+          if (JOB_DONE.has(data.status)) {
+            es.close();
+            ingestEs = null;
+            resolve(data);
+          }
+        });
+        es.onerror = () => {
+          if (es.readyState === EventSource.CLOSED) {
+            es.close();
+            ingestEs = null;
+            reject(new Error(t('ingest.err.network')));
+          }
+        };
+      });
+    }
+
+    // Map a JobStatus snapshot onto the stepper. 'queued' (and the
+    // terminal words) leave the stage alone: queued means the upload is
+    // done but the worker has not started, terminal is unwound by the
+    // caller. Parse pages only exist during parsing — the worker's
+    // progress counters are (page, total) there and untouched elsewhere.
+    function applyJobFrame(job) {
+      const ui = JOB_STAGE[job.status];
+      if (!ui) return;
+      ingestStage.value = ui;
+      if (ui === 'parse' && job.progress && job.progress.total) {
+        ingestParsePages.value = {
+          page: job.progress.current,
+          total: job.progress.total,
+        };
+      } else {
+        ingestParsePages.value = null;
+      }
+    }
+
+    // Multipart POST to the parse NDJSON stream endpoint
+    // (/v1/parse/stream) with real upload-byte progress (fetch cannot
+    // report upload progress) AND incremental newline-delimited
     // stage/progress events over the same response. Resolves to
     // { ok, status, payload } so HTTP error envelopes are handled by
     // the caller exactly like the shared api() helper. A pre-flight
     // JSON envelope (stream never started) lands via the onload
-    // fallback below.
+    // fallback below. (Ingest used to share this helper; it now goes
+    // through the job queue — see doIngest.)
     function streamPost(url, form, onPct, onEvent, onStart) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -815,9 +932,9 @@ export default defineComponent({
         }
       }
 
-      // Field names mirror the multipart contract in api/ingest.py /
-      // docs/ingest-pipeline.md: embed_model, chunk_size, chunk_overlap,
-      // metadata/chunk_options as JSON strings.
+      // Field names mirror the multipart contract of POST /v1/jobs/ingest
+      // (api/jobs.py → _prepare_ingest): embed_model, chunk_size,
+      // chunk_overlap, metadata/chunk_options as JSON strings.
       const form = new FormData();
       form.append('file', ingestFile.value);
       form.append('database', db.value);
@@ -848,35 +965,54 @@ export default defineComponent({
       }, 200);
 
       try {
-        const res = await streamPost(
-          '/v1/ingest/stream', form,
+        // 1) Submit. The multipart body uploads with real byte %, then
+        //    the API spools it and answers 202 + job_id — from here on
+        //    the run is owned by the job worker.
+        const res = await postFormJson(
+          '/v1/jobs/ingest', form,
           (pct) => { uploadPct.value = pct; },
-          (ev) => {
-            if (ev.type === 'stage') {
-              ingestStage.value = ev.stage;
-              // Page ticks only belong to the parse stage.
-              if (ev.stage !== 'parse') ingestParsePages.value = null;
-            } else if (ev.type === 'progress' && ev.stage === 'parse') {
-              ingestParsePages.value = { page: ev.page, total: ev.total };
-            }
-          },
           (x) => { ingestXhr = x; },
         );
-        const durationMs = performance.now() - startedAt;
         if (res.aborted) {
           ingestFailedStage.value = null;
           ingestError.value = null;
           status.value = 'ok';
-          statusMsg.value = res.payload.error.message;
-        } else if (!res.ok) {
+          statusMsg.value = t('kb.cancelled');
+          return;
+        }
+        if (!res.ok) {
           const err = (res.payload && res.payload.error) || {};
           ingestFailedStage.value = ingestStage.value;
           ingestError.value = {
             code: err.code || ('HTTP ' + res.status),
             message: err.message || ('HTTP ' + res.status),
           };
+          return;
+        }
+        ingestJobId = (res.payload && res.payload.job_id) || '';
+
+        // 2) Follow the run over SSE. Every frame is a full JobStatus;
+        //    the stream closes after the terminal one, which resolves.
+        const job = await watchJob(ingestJobId, applyJobFrame);
+        const durationMs = performance.now() - startedAt;
+        if (job.status === 'cancelled') {
+          // Cooperative cancel — the requested outcome, not an error.
+          ingestFailedStage.value = null;
+          ingestError.value = null;
+          status.value = 'ok';
+          statusMsg.value = t('kb.cancelled');
+        } else if (job.status === 'failed') {
+          const err = job.error || {};
+          ingestFailedStage.value = ingestStage.value;
+          ingestError.value = {
+            code: err.code || 'job_failed',
+            message: err.message || t('ingest.err.network'),
+          };
         } else {
-          ingestResult.value = res.payload || {};
+          // done: JobStatus carries exactly the terminal stats the
+          // result block renders (doc_id / chunk_count / page_count /
+          // tokens_used).
+          ingestResult.value = job;
           ingestMeta.value = {
             database: db.value,
             collection: INGEST_COLLECTION,
@@ -894,6 +1030,8 @@ export default defineComponent({
         };
       } finally {
         ingestXhr = null;
+        if (ingestEs) { ingestEs.close(); ingestEs = null; }
+        ingestJobId = '';
         if (ingestTimer) { clearInterval(ingestTimer); ingestTimer = null; }
         ingestElapsed.value = (performance.now() - startedAt) / 1000;
         ingestBusy.value = false;
@@ -1112,7 +1250,7 @@ export default defineComponent({
       </div>
 
       <div class="section" v-show="view === 'ingest'">
-        <div class="section-head"><h3 class="section-title">{{ $t('kb.ingest_title') }} <span class="pill accent">POST /v1/ingest/stream</span></h3></div>
+        <div class="section-head"><h3 class="section-title">{{ $t('kb.ingest_title') }} <span class="pill accent">POST /v1/jobs/ingest</span></h3></div>
         <!-- Load failures for the two dropdowns below, previously
              swallowed: an empty database list looked like "no databases
              exist" rather than "the request failed". -->
@@ -1215,9 +1353,10 @@ export default defineComponent({
         <status-banner kind="error" :text="formErr" />
 
         <!-- In-flight: 5-stage stepper. Upload has a real byte %, the
-             parse stage has a real per-page % (progress events); the
-             later stages move as stage events arrive with an
-             indeterminate bar. -->
+             parse stage has a real per-page % (JobStatus.progress);
+             later stages move as SSE job frames arrive with an
+             indeterminate bar. Cancel is cooperative once the job
+             exists — the worker stops at the next stage boundary. -->
         <div v-if="ingestBusy" class="response ingest-progress" id="ingest-progress">
           <div class="ingest-progress-head">
             <span class="spinner"></span>

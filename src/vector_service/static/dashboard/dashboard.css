@@ -1153,9 +1153,9 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 
 /* ============ Ingest: progress + result cards ============
    Two terminal states (success / error) plus a live progress card.
-   Upload byte % drives the determinate .bar fill; once the bytes are
-   on the wire, /v1/ingest/stream stage events move the stepper and
-   the bar swaps to an indeterminate slider for parse -> chunk ->
+   Upload byte % drives the determinate .bar fill; once the job is
+   accepted, SSE `job` frames (JobStatus snapshots) move the stepper
+   and the bar swaps to an indeterminate slider for parse -> chunk ->
    embed -> upsert. */
 .ingest-file-meta {
   display: flex;

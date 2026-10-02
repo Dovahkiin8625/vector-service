@@ -383,9 +383,10 @@ async def parse_document_stream(
     parser = _parser_for_mime(mime)
 
     async def event_stream():
-        # Same queue-decoupled shape as /v1/ingest/stream: the converter
-        # runs in a worker thread while page ticks and the terminal
-        # event get flushed as soon as they happen.
+        # Queue-decoupled shape (same one the ingest pipeline emits
+        # internally): the converter runs in a worker thread while page
+        # ticks and the terminal event get flushed as soon as they
+        # happen.
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[Any] = asyncio.Queue()
         sentinel = object()

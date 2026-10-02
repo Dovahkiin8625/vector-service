@@ -130,7 +130,7 @@ def test_dashboard_exposes_knowledge_base_panels():
     assert _has('data-view="ingest"')
     assert "POST /v1/parse" in _ALL
     assert "POST /v1/chunk" in _ALL
-    assert "POST /v1/ingest" in _ALL
+    assert "POST /v1/jobs/ingest" in _ALL
     # Form-control ids.
     for f in [
         'id="parse-file"', 'id="parse-result"', 'id="parse-markdown"',
@@ -143,18 +143,39 @@ def test_dashboard_exposes_knowledge_base_panels():
         assert _has(f), f"{f} missing"
 
 
-def test_dashboard_ingest_panel_streams_stage_events():
-    """Ingest posts to the NDJSON stream route and renders a 5-stage
-    stepper (upload/parse/chunk/embed/upsert). The old manual
-    'refresh dbs' button is gone — dbs/models auto-refresh when the
-    tab is opened via a view watcher."""
+def test_dashboard_ingest_panel_follows_job_events():
+    """Ingest submits ``POST /v1/jobs/ingest`` and follows the run over
+    ``GET /v1/jobs/{id}/events`` (SSE), rendering a 5-stage stepper
+    (upload/parse/chunk/embed/upsert). The removed ``/v1/ingest/stream``
+    NDJSON route must not come back. The old manual 'refresh dbs'
+    button is gone — dbs/models auto-refresh when the tab is opened via
+    a view watcher."""
     kb = (
         _ST / "static" / "dashboard" / "components" / "knowledge-base.js"
     ).read_text(encoding="utf-8")
-    # Stream endpoint (the classic /v1/ingest pill stays matched too).
-    assert "POST /v1/ingest/stream" in kb
-    assert "'/v1/ingest/stream'" in kb
-    # XHR is required for upload byte progress + incremental NDJSON.
+    # Async jobs contract (docs/ingest-pipeline.md): multipart submit,
+    # then SSE subscription of full JobStatus snapshots.
+    assert "POST /v1/jobs/ingest" in kb
+    assert "'/v1/jobs/ingest'" in kb
+    assert "new EventSource(" in kb
+    assert "addEventListener('job'" in kb
+    assert "'/v1/jobs/'" in kb
+    assert "'/events'" in kb
+    # Cancel is a cooperative job cancel, not an abort of a dead socket.
+    assert "'/cancel'" in kb
+    # JobStatus.status values map onto the fixed 5-node stepper.
+    for pair in [
+        "parsing: 'parse'",
+        "chunking: 'chunk'",
+        "embedding: 'embed'",
+        "upserting: 'upsert'",
+    ]:
+        assert pair in kb
+    # The deleted synchronous NDJSON route stays deleted.
+    assert "'/v1/ingest/stream'" not in kb
+    assert "POST /v1/ingest/stream" not in kb
+    # XHR is required for upload byte progress (parse still streams
+    # NDJSON over the same helper; ingest uses it for the submit body).
     assert "XMLHttpRequest" in kb
     assert "xhr.upload.onprogress" in kb
     # Stage stepper contract.

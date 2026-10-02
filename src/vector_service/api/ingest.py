@@ -287,9 +287,9 @@ def _resolve_mime(filename: str | None, content_type: str | None) -> str:
 
 # ---- shared pipeline --------------------------------------------------
 
-# Stage names are the public event contract of /v1/ingest/stream —
-# clients (the dashboard) render progress from these exact strings, so
-# treat them like an API version.
+# Stage names are the pipeline's public progress contract — the worker
+# maps them onto the job row and the dashboard's upload/parse/chunk/
+# embed/upsert stepper keys, so treat them like an API version.
 INGEST_STAGES = ("parse", "chunk", "embed", "upsert")
 
 # Async sink for progress events. The worker persists progress ticks
