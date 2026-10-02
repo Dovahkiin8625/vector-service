@@ -7,6 +7,8 @@
 // =====================================================================
 import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api } from './app.js';
+import { EmptyState } from './feedback.js';
+import UiPager from './pager.js';
 import {
   enc, formatTs, fixed, pct, pillClass, statusLabel, DEFAULT_SCOPE,
 } from './ops-common.js';
@@ -24,40 +26,57 @@ export default defineComponent({
     // ---- sets list / set detail ----
     const sets = ref([]);
     const setsTotal = ref(0);
-    const setsOffset = ref(0);
+    const setsPage = ref(1);
+    const setsLoading = ref(false);
     const setDetail = ref(null);
     const questions = ref([]);
     const versions = ref([]);
     const runs = ref([]);
+    // The three set-detail sub-lists load together; one flag keeps their
+    // empty states from claiming "no data" while the fetch is in flight.
+    const setLoading = ref(false);
 
     // ---- run detail ----
     const runDetail = ref(null);
     const runBack = ref(null);              // where to return: 'set' | 'gate'
+    const runLoading = ref(false);
 
     // ---- gates ----
     const gates = ref([]);
+    const gatesPage = ref(1);
+    const gatesLoading = ref(false);
     const gateDetail = ref(null);
     const gateChecks = ref([]);
+    const checksLoading = ref(false);
+
+    const setsPages = computed(() => Math.max(1, Math.ceil(setsTotal.value / PAGE)));
+    const setsOffset = computed(() => (setsPage.value - 1) * PAGE);
+    // Gates come back unpaginated (scope-unique per database+collection,
+    // so the list is usually one row); slice here so a long list still
+    // pages exactly like the sets list above.
+    const gatesPages = computed(() => Math.max(1, Math.ceil(gates.value.length / PAGE)));
+    const gatesOffset = computed(() => (gatesPage.value - 1) * PAGE);
+    const pagedGates = computed(() =>
+      gates.value.slice(gatesOffset.value, gatesOffset.value + PAGE));
 
     function resetErr() { errMsg.value = ''; }
     async function loadSets() {
       resetErr();
+      setsLoading.value = true;
       try {
         const q = `/v1/evaluation/sets?database=${enc(db.value)}`
-          + `&collection=${enc(coll.value)}&limit=${PAGE}&offset=${setsOffset.value}`;
+          + `&collection=${enc(coll.value)}&limit=${PAGE}`
+          + `&offset=${setsOffset.value}`;
         const { payload } = await api('GET', q);
         sets.value = (payload && payload.items) || [];
         setsTotal.value = (payload && payload.total) || 0;
       } catch (e) { errMsg.value = e.message; }
+      finally { setsLoading.value = false; }
     }
-    function setsPrev() {
-      if (setsOffset.value === 0) return;
-      setsOffset.value = Math.max(0, setsOffset.value - PAGE);
-      loadSets();
-    }
-    function setsNext() {
-      if (setsOffset.value + sets.length >= setsTotal.value) return;
-      setsOffset.value += PAGE;
+    function setsGo(n) {
+      const target = Math.min(Math.max(1, Number(n) || 1), setsPages.value);
+      if (target === setsPage.value) return;
+      setsPage.value = target;
       loadSets();
     }
 
@@ -65,6 +84,7 @@ export default defineComponent({
       resetErr();
       setDetail.value = s;
       runDetail.value = null;
+      setLoading.value = true;
       try {
         const id = enc(s.set_id);
         const [q, v, r] = await Promise.all([
@@ -76,6 +96,7 @@ export default defineComponent({
         versions.value = (v.payload && v.payload.items) || v.payload || [];
         runs.value = (r.payload && r.payload.items) || r.payload || [];
       } catch (e) { errMsg.value = e.message; }
+      finally { setLoading.value = false; }
     }
     function backToList() {
       setDetail.value = null;
@@ -85,10 +106,12 @@ export default defineComponent({
     async function openRun(runId, backTo) {
       resetErr();
       runBack.value = backTo || 'set';
+      runLoading.value = true;
       try {
         const { payload } = await api('GET', `/v1/evaluation/runs/${enc(runId)}`);
         runDetail.value = payload;
       } catch (e) { errMsg.value = e.message; }
+      finally { runLoading.value = false; }
     }
     // Returns to the view the run was opened from. runBack was written
     // on every openRun but never read, so the back button just dropped
@@ -100,17 +123,26 @@ export default defineComponent({
 
     async function loadGates() {
       resetErr();
+      gatesLoading.value = true;
       try {
         const q = `/v1/evaluation/gates?database=${enc(db.value)}&collection=${enc(coll.value)}`;
         const { payload } = await api('GET', q);
         gates.value = (payload && payload.items) || [];
+        gatesPage.value = 1;
       } catch (e) { errMsg.value = e.message; }
+      finally { gatesLoading.value = false; }
+    }
+    function gatesGo(n) {
+      const target = Math.min(Math.max(1, Number(n) || 1), gatesPages.value);
+      if (target === gatesPage.value) return;
+      gatesPage.value = target;
     }
 
     async function openGate(g) {
       resetErr();
       gateDetail.value = g;
       runDetail.value = null;
+      checksLoading.value = true;
       try {
         const { payload } = await api(
           'GET',
@@ -118,6 +150,7 @@ export default defineComponent({
         );
         gateChecks.value = (payload && payload.items) || [];
       } catch (e) { errMsg.value = e.message; }
+      finally { checksLoading.value = false; }
     }
     function backToGates() {
       gateDetail.value = null;
@@ -151,15 +184,18 @@ export default defineComponent({
 
     return {
       tab, db, coll, errMsg,
-      sets, setsTotal, setsOffset, setsPrev, setsNext,
-      setDetail, questions, versions, runs,
+      sets, setsTotal, setsPage, setsPages, setsOffset, setsLoading, setsGo,
+      setDetail, questions, versions, runs, setLoading,
       loadSets, openSet, backToList,
-      runDetail, runBack, openRun, closeRun, summary,
-      gates, gateDetail, gateChecks, loadGates, openGate, backToGates,
+      runDetail, runBack, runLoading, openRun, closeRun, summary,
+      gates, gatesPage, gatesPages, gatesOffset, pagedGates, gatesLoading, gatesGo,
+      gateDetail, gateChecks, checksLoading,
+      loadGates, openGate, backToGates,
       switchTab,
       formatTs, fixed, pct, pillClass, statusLabel,
     };
   },
+  components: { EmptyState, UiPager },
   template: `
     <div class="ops-panel">
       <div class="section">
@@ -182,13 +218,15 @@ export default defineComponent({
           </button>
         </div>
 
-        <div class="seg-toggle ops-tabs">
-          <button type="button" class="btn sm"
+        <div class="seg-toggle ops-tabs" role="tablist" :aria-label="$t('nav.eval')">
+          <button type="button" class="btn sm" role="tab"
+                  :aria-selected="tab === 'sets' ? 'true' : 'false'"
                   :class="{ primary: tab === 'sets' }"
                   @click="switchTab('sets')">
             {{ $t('ops.eval.tab_sets') }}
           </button>
-          <button type="button" class="btn sm"
+          <button type="button" class="btn sm" role="tab"
+                  :aria-selected="tab === 'gates' ? 'true' : 'false'"
                   :class="{ primary: tab === 'gates' }"
                   @click="switchTab('gates')">
             {{ $t('ops.eval.tab_gates') }}
@@ -199,7 +237,12 @@ export default defineComponent({
       </div>
 
       <!-- ============ run detail (shared) ============ -->
-      <div v-if="runDetail" class="section">
+      <!-- The fetch used to show nothing between click and payload, so
+           the row looked dead; now it announces itself. -->
+      <div v-if="runLoading" class="section">
+        <empty-state state="loading" :text="$t('common.state.loading')" />
+      </div>
+      <div v-else-if="runDetail" class="section">
         <div class="section-head">
           <h3 class="section-title">
             {{ $t('ops.eval.run') }}
@@ -279,7 +322,9 @@ export default defineComponent({
         </div>
 
         <h4 class="ops-sub-title">{{ $t('ops.eval.per_question') }}</h4>
-        <div class="data-table-wrap">
+        <empty-state v-if="!(runDetail.results || []).length" state="empty"
+                     :text="$t('common.state.empty')" />
+        <div v-else class="data-table-wrap">
           <table class="data-table ops-results-table">
             <thead>
               <tr>
@@ -340,8 +385,13 @@ export default defineComponent({
           </div>
           <p class="ops-set-desc">{{ setDetail.description || '—' }}</p>
 
+          <!-- The three sub-lists load in one batch; one loading block
+               covers them so none can claim "empty" mid-flight. -->
+          <empty-state v-if="setLoading" state="loading" :text="$t('common.state.loading')" />
+          <template v-else>
           <h4 class="ops-sub-title">{{ $t('ops.eval.questions') }} · {{ questions.length }}</h4>
-          <div class="data-table-wrap">
+          <empty-state v-if="!questions.length" state="empty" :text="$t('common.state.empty')" />
+          <div v-else class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr><th>{{ $t('common.question_id') }}</th><th>{{ $t('ops.eval.question') }}</th><th>{{ $t('ops.eval.expected') }}</th></tr>
@@ -365,7 +415,8 @@ export default defineComponent({
           </div>
 
           <h4 class="ops-sub-title">{{ $t('ops.eval.versions') }} · {{ versions.length }}</h4>
-          <div class="data-table-wrap">
+          <empty-state v-if="!versions.length" state="empty" :text="$t('common.state.empty')" />
+          <div v-else class="data-table-wrap">
             <table class="data-table">
               <thead><tr><th>{{ $t('common.version_id') }}</th><th>{{ $t('common.tag') }}</th><th>{{ $t('common.question_count') }}</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
               <tbody>
@@ -380,7 +431,8 @@ export default defineComponent({
           </div>
 
           <h4 class="ops-sub-title">{{ $t('ops.eval.runs') }} · {{ runs.length }}</h4>
-          <div class="data-table-wrap">
+          <empty-state v-if="!runs.length" state="empty" :text="$t('common.state.empty')" />
+          <div v-else class="data-table-wrap">
             <table class="data-table">
               <thead><tr><th>{{ $t('common.run_id') }}</th><th>{{ $t('common.params') }}</th><th>{{ $t('ops.queue.created') }}</th></tr></thead>
               <tbody>
@@ -395,11 +447,15 @@ export default defineComponent({
               </tbody>
             </table>
           </div>
+          </template>
         </div>
 
         <!-- set list -->
         <div v-else class="section">
-          <div class="data-table-wrap">
+          <div v-if="setsLoading && !sets.length" class="spinner"></div>
+          <empty-state v-else-if="!setsLoading && !errMsg && !sets.length"
+                       state="empty" :text="$t('common.state.empty')" />
+          <div v-else-if="sets.length" class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr>
@@ -424,11 +480,16 @@ export default defineComponent({
               </tbody>
             </table>
           </div>
-          <div class="pager">
-            <span class="pager-info">{{ $t('common.total') }} {{ setsTotal }} · {{ $t('common.offset') }} {{ setsOffset }}</span>
-            <button class="btn sm ghost" :disabled="setsOffset === 0" @click="setsPrev">← {{ $t('common.prev') }}</button>
-            <button class="btn sm ghost" :disabled="setsOffset + sets.length >= setsTotal" @click="setsNext">{{ $t('common.next') }} →</button>
-          </div>
+          <ui-pager v-if="setsTotal" root-id="eval-sets-pager" info-id="eval-sets-pager-info"
+                    first-id="btn-eval-sets-first" prev-id="btn-eval-sets-prev"
+                    next-id="btn-eval-sets-next" last-id="btn-eval-sets-last"
+                    jump-id="eval-sets-jump" jump-btn-id="btn-eval-sets-jump"
+                    :page="setsPage" :pages="setsPages"
+                    :busy="setsLoading" :show-jump="true"
+                    :info-text="$t('ops.pager_info', { from: setsOffset + 1, to: setsOffset + sets.length, total: setsTotal, page: setsPage, pages: setsPages })"
+                    @first="setsGo(1)" @prev="setsGo(setsPage - 1)"
+                    @next="setsGo(setsPage + 1)" @last="setsGo(setsPages)"
+                    @go="setsGo" />
         </div>
       </template>
 
@@ -469,13 +530,21 @@ export default defineComponent({
           </div>
 
           <h4 class="ops-sub-title">{{ $t('ops.eval.checks') }} · {{ gateChecks.length }}</h4>
-          <div class="data-table-wrap">
+          <empty-state v-if="checksLoading" state="loading" :text="$t('common.state.loading')" />
+          <empty-state v-else-if="!gateChecks.length" state="empty" :text="$t('common.state.empty')" />
+          <div v-else class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr><th>{{ $t('common.check_id') }}</th><th>{{ $t('ops.queue.status') }}</th><th>{{ $t('common.candidate_ref') }}</th><th>{{ $t('common.run_id') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
-                <tr v-for="c in gateChecks" :key="c.check_id" class="ops-job-row" role="button" tabindex="0"
+                <!-- A check with no run_id opens nothing — it gets a
+                     plain row instead of a button affordance (§2 item
+                     21). -->
+                <tr v-for="c in gateChecks" :key="c.check_id"
+                    :class="c.run_id ? 'ops-job-row' : 'ops-row-static'"
+                    :role="c.run_id ? 'button' : null"
+                    :tabindex="c.run_id ? 0 : null"
                     @click="c.run_id ? openRun(c.run_id, 'gate') : null"
                     @keydown.enter.prevent="c.run_id ? openRun(c.run_id, 'gate') : null"
                     @keydown.space.prevent="c.run_id ? openRun(c.run_id, 'gate') : null">
@@ -492,13 +561,16 @@ export default defineComponent({
 
         <!-- gate list -->
         <div v-else class="section">
-          <div class="data-table-wrap">
+          <div v-if="gatesLoading && !gates.length" class="spinner"></div>
+          <empty-state v-else-if="!gatesLoading && !errMsg && !gates.length"
+                       state="empty" :text="$t('common.state.empty')" />
+          <div v-else-if="gates.length" class="data-table-wrap">
             <table class="data-table">
               <thead>
                 <tr><th>{{ $t('common.gate_id') }}</th><th>{{ $t('common.scope') }}</th><th>{{ $t('common.set_id') }}</th><th>{{ $t('common.baseline') }}</th><th>{{ $t('ops.queue.created') }}</th></tr>
               </thead>
               <tbody>
-                <tr v-for="g in gates" :key="g.gate_id" class="ops-job-row" role="button" tabindex="0"
+                <tr v-for="g in pagedGates" :key="g.gate_id" class="ops-job-row" role="button" tabindex="0"
                     @click="openGate(g)"
                     @keydown.enter.prevent="openGate(g)"
                     @keydown.space.prevent="openGate(g)">
@@ -511,6 +583,18 @@ export default defineComponent({
               </tbody>
             </table>
           </div>
+          <!-- The list comes back whole from the API; page it here so a
+               long list uses the same pager shape as the sets tab. -->
+          <ui-pager v-if="gates.length" root-id="eval-gates-pager" info-id="eval-gates-pager-info"
+                    first-id="btn-eval-gates-first" prev-id="btn-eval-gates-prev"
+                    next-id="btn-eval-gates-next" last-id="btn-eval-gates-last"
+                    jump-id="eval-gates-jump" jump-btn-id="btn-eval-gates-jump"
+                    :page="gatesPage" :pages="gatesPages"
+                    :busy="gatesLoading" :show-jump="true"
+                    :info-text="$t('ops.pager_info', { from: gatesOffset + 1, to: gatesOffset + pagedGates.length, total: gates.length, page: gatesPage, pages: gatesPages })"
+                    @first="gatesGo(1)" @prev="gatesGo(gatesPage - 1)"
+                    @next="gatesGo(gatesPage + 1)" @last="gatesGo(gatesPages)"
+                    @go="gatesGo" />
         </div>
       </template>
     </div>

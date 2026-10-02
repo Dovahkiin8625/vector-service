@@ -1,7 +1,7 @@
 // Embeddings panel: text / image / multimodal - kind prop picks mode.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
 import { t, api, extractApiError, modelsByType, refreshModels as loadModels } from './app.js';
-import { fileToB64, DEFAULT_MIME, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT, modelTypeOf } from './util.js';
+import { fileToB64, copyText, DEFAULT_MIME, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT, modelTypeOf } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
 // Endpoint pills are protocol literals and stay untranslated.
@@ -17,13 +17,20 @@ export default defineComponent({
     const model = ref('');
     const textInput = ref('hello world');
     const listInput = ref('["a", "b", "c"]');
-    const fileList = ref([]);
+    // The <input type=file> FileList is immutable and re-picked files
+    // replace the whole set; an owned array is what the removable chips
+    // below need (and what run() reads).
+    const files = ref([]);
+    const fileInput = ref(null);
     const listJson = ref('[]');
     const mime = ref('');
     const modeText = ref('single');
     const status = ref('idle');
     const errMsg = ref('');
     const result = ref(null);
+    const elapsedMs = ref(0);
+    const copyState = ref('');  // '' | 'ok' | 'err' — flashes on the button
+    let copyTimer = 0;
 
     const busy = computed(() => status.value === 'loading');
     // A failed request is worth offering a retry for; a form-validation
@@ -65,6 +72,38 @@ export default defineComponent({
 
     function safeParse(s) { try { return JSON.parse(s); } catch (_e) { return null; } }
 
+    // Headline numbers for the response bar; the JSON dump stays folded.
+    const resultCount = computed(() => {
+      const data = result.value && result.value.data;
+      return Array.isArray(data) ? data.length : 0;
+    });
+    const resultDim = computed(() => {
+      const data = result.value && result.value.data;
+      const first = Array.isArray(data) ? data[0] : null;
+      return first && Array.isArray(first.embedding) ? first.embedding.length : 0;
+    });
+
+    function onFiles(e) {
+      const picked = Array.from(e.target.files || []);
+      for (const f of picked) {
+        if (!files.value.some(x => x.name === f.name && x.size === f.size)) files.value.push(f);
+      }
+      // Clearing the input means re-picking a removed name fires change.
+      e.target.value = '';
+    }
+    function removeFile(i) { files.value.splice(i, 1); }
+    function clearFiles() {
+      files.value = [];
+      if (fileInput.value) fileInput.value = '';
+    }
+
+    async function copyResult() {
+      const ok = await copyText(JSON.stringify(result.value, null, 2));
+      copyState.value = ok ? 'ok' : 'err';
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { copyState.value = ''; }, 2000);
+    }
+
     function fail(key) {
       status.value = 'error';
       errMsg.value = t(key);
@@ -73,6 +112,7 @@ export default defineComponent({
 
     async function run() {
       if (!model.value) return;
+      const t0 = performance.now();
       try {
         status.value = 'loading';
         errMsg.value = '';
@@ -97,8 +137,8 @@ export default defineComponent({
           const parsed = safeParse(listJson.value);
           if (Array.isArray(parsed) && parsed.length) {
             for (const it of parsed) items.push(it);
-          } else if (fileList.value.length) {
-            for (const f of fileList.value) {
+          } else if (files.value.length) {
+            for (const f of files.value) {
               items.push({ data: await fileToB64(f), mime: mime.value || f.type || DEFAULT_MIME });
             }
           } else { fail('embeddings.err.no_input'); return; }
@@ -107,29 +147,36 @@ export default defineComponent({
           result.value = payload;
         } else {  // multimodal
           const items = [];
-          for (const f of fileList.value) {
+          for (const f of files.value) {
             items.push({ kind: 'image', data: await fileToB64(f), mime: mime.value || f.type || DEFAULT_MIME });
           }
           const parsed = safeParse(listJson.value);
           if (Array.isArray(parsed)) {
-            for (const t of parsed) if (typeof t === 'string') items.push({ kind: 'text', text: t });
+            for (const s of parsed) if (typeof s === 'string') items.push({ kind: 'text', text: s });
           }
           if (!items.length) { fail('embeddings.err.no_items'); return; }
           const { payload } = await api('POST', '/v1/multimodal_embeddings', { model: model.value, input: items });
           result.value = payload;
         }
         status.value = 'ok';
+        // Includes base64 conversion — the wall time the operator waited.
+        // Not in `finally`: a validation fail makes no request and must
+        // not restamp the summary still showing the previous result.
+        elapsedMs.value = Math.round(performance.now() - t0);
       } catch (e) {
         status.value = 'error';
         errMsg.value = extractApiError(e, t('common.unknown'));
         canRetry.value = true;
+        elapsedMs.value = Math.round(performance.now() - t0);
       }
     }
 
     return {
-      models, model, textInput, listInput, fileList, listJson, mime, modeText,
+      models, model, textInput, listInput, files, fileInput, listJson, mime, modeText,
       status, errMsg, result, busy, canRetry, refreshModels, run,
       modelsStatus, modelsText, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT,
+      resultCount, resultDim, elapsedMs, copyState, copyResult,
+      onFiles, removeFile, clearFiles,
     };
   },
   components: { StatusBanner, BusyButton, EmptyState },
@@ -183,7 +230,19 @@ export default defineComponent({
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.select_images') }} <span class="hint">{{ $t('embeddings.hint.local_files') }}</span></label>
-          <input type="file" multiple :accept="IMAGE_ACCEPT" @change="fileList = $event.target.files" />
+          <input ref="fileInput" type="file" multiple :accept="IMAGE_ACCEPT" @change="onFiles" />
+          <!-- The picker's own "N files" text vanishes on blur; chips keep
+               the selection visible and let one wrong pick be dropped. -->
+          <div class="picked-files" v-if="files.length">
+            <span class="hint">{{ $t('embeddings.files_n', { n: files.length }) }}</span>
+            <span class="picked-file" v-for="(f, i) in files" :key="f.name + ':' + f.size">
+              <span class="picked-name">{{ f.name }}</span>
+              <button type="button" class="btn sm"
+                      :aria-label="$t('embeddings.file_remove', { name: f.name })"
+                      @click="removeFile(i)">&#215;</button>
+            </span>
+            <button type="button" class="btn sm" @click="clearFiles">{{ $t('common.clear') }}</button>
+          </div>
         </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.json_list') }} <span class="hint">{{ $t('embeddings.hint.each_item') }}</span></label>
@@ -210,8 +269,18 @@ export default defineComponent({
         <div v-if="result" class="response">
           <div class="response-head">
             <span v-if="status === 'ok'" class="pill success">{{ $t('common.status.ok') }}</span>
+            <!-- count/dim/ms is what a run is checked for; the raw JSON
+                 is evidence, folded by default (S7). -->
+            <span class="emb-summary">{{ $t('embeddings.summary', { count: resultCount, dim: resultDim, ms: elapsedMs }) }}</span>
+            <span class="head-actions">
+              <button type="button" class="btn sm" id="btn-emb-copy"
+                      @click="copyResult">{{ copyState === 'ok' ? $t('common.copied') : (copyState === 'err' ? $t('common.copy_failed') : $t('common.copy')) }}</button>
+            </span>
           </div>
-          <pre class="code-pane">{{ JSON.stringify(result, null, 2) }}</pre>
+          <details class="collapsible">
+            <summary>{{ $t('common.raw_json') }}</summary>
+            <div class="body"><pre class="code-pane">{{ JSON.stringify(result, null, 2) }}</pre></div>
+          </details>
         </div>
       </div>
     </div>

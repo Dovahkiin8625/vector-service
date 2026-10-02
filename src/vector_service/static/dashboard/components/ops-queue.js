@@ -5,9 +5,10 @@
 //   GET  /v1/jobs/{id}/events    SSE live updates (named "job" events)
 //   POST /v1/jobs/{id}/cancel    cooperative cancel (409 if terminal)
 // =====================================================================
-import { defineComponent, ref, watch } from '../vue.esm-browser.prod.js';
+import { defineComponent, ref, computed, watch } from '../vue.esm-browser.prod.js';
 import { store, api, t } from './app.js';
-import { StatusBanner, BusyButton, askConfirm } from './feedback.js';
+import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
+import UiPager from './pager.js';
 import {
   enc, formatTs, pillClass, progressText, statusLabel, TERMINAL,
 } from './ops-common.js';
@@ -23,7 +24,8 @@ export default defineComponent({
   setup() {
     const items = ref([]);
     const total = ref(0);
-    const offset = ref(0);
+    // Page-number paging fronting the API's offset (shared UiPager).
+    const page = ref(1);
     const statusFilter = ref('');
     const loading = ref(false);
     const listErr = ref('');
@@ -37,11 +39,14 @@ export default defineComponent({
     let timer = null;
     let started = false;
 
+    const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE)));
+    const pageOffset = computed(() => (page.value - 1) * PAGE);
+
     async function load() {
       loading.value = true;
       listErr.value = '';
       try {
-        const q = `/v1/jobs?limit=${PAGE}&offset=${offset.value}`
+        const q = `/v1/jobs?limit=${PAGE}&offset=${pageOffset.value}`
           + (statusFilter.value ? `&status=${enc(statusFilter.value)}` : '');
         const { payload } = await api('GET', q);
         if (payload) {
@@ -62,17 +67,15 @@ export default defineComponent({
 
     function setFilter(s) {
       statusFilter.value = s;
-      offset.value = 0;
+      page.value = 1;
       load();
     }
-    function prevPage() {
-      if (offset.value === 0) return;
-      offset.value = Math.max(0, offset.value - PAGE);
-      load();
-    }
-    function nextPage() {
-      if (offset.value + items.value.length >= total.value) return;
-      offset.value += PAGE;
+    // UiPager disables the edges and clamps the jump box; this clamps
+    // again for the event handlers and skips a no-op landing.
+    function goToPage(n) {
+      const target = Math.min(Math.max(1, Number(n) || 1), pages.value);
+      if (target === page.value) return;
+      page.value = target;
       load();
     }
 
@@ -152,13 +155,14 @@ export default defineComponent({
     if (store.view === 'queue') start();
 
     return {
-      STATUS_FILTERS, PAGE, items, total, offset, statusFilter, loading, listErr,
+      STATUS_FILTERS, items, total, page, pages, pageOffset,
+      statusFilter, loading, listErr,
       detail, detailErr, cancelBusy, manualBusy,
-      load, reload, setFilter, prevPage, nextPage, openDetail, closeDetail, cancelJob,
+      load, reload, setFilter, goToPage, openDetail, closeDetail, cancelJob,
       formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
-  components: { StatusBanner, BusyButton },
+  components: { StatusBanner, BusyButton, EmptyState, UiPager },
   template: `
     <div class="ops-panel">
       <div class="section">
@@ -182,9 +186,15 @@ export default defineComponent({
         </div>
 
         <status-banner kind="error" :text="listErr" :retry="listErr ? reload : null" />
-        <div v-if="loading" class="spinner"></div>
+        <!-- Three list states that used to share one blank table: a
+             first load, an honestly empty queue, and the rows themselves.
+             Stale rows stay on screen during a failed refresh (the
+             banner reports it), matching the browse convention. -->
+        <div v-if="loading && !items.length" class="spinner"></div>
+        <empty-state v-else-if="!loading && !listErr && !items.length"
+                     state="empty" :text="$t('common.state.empty')" />
 
-        <div class="data-table-wrap">
+        <div v-else-if="items.length" class="data-table-wrap">
           <table class="data-table ops-jobs-table">
             <thead>
               <tr>
@@ -218,11 +228,18 @@ export default defineComponent({
           </table>
         </div>
 
-        <div class="pager">
-          <span class="pager-info">{{ $t('common.total') }} {{ total }} · {{ $t('common.offset') }} {{ offset }}</span>
-          <button class="btn sm ghost" :disabled="offset === 0" @click="prevPage">← {{ $t('common.prev') }}</button>
-          <button class="btn sm ghost" :disabled="offset + items.length >= total" @click="nextPage">{{ $t('common.next') }} →</button>
-        </div>
+        <!-- Shared pager (S6): page numbers, jump and totals — this list
+             used to show only a bare count/offset line with prev/next. -->
+        <ui-pager v-if="total" root-id="queue-pager" info-id="queue-pager-info"
+                  first-id="btn-queue-first" prev-id="btn-queue-prev"
+                  next-id="btn-queue-next" last-id="btn-queue-last"
+                  jump-id="queue-jump" jump-btn-id="btn-queue-jump"
+                  :page="page" :pages="pages"
+                  :busy="loading" :show-jump="true"
+                  :info-text="$t('ops.pager_info', { from: pageOffset + 1, to: pageOffset + items.length, total: total, page: page, pages: pages })"
+                  @first="goToPage(1)" @prev="goToPage(page - 1)"
+                  @next="goToPage(page + 1)" @last="goToPage(pages)"
+                  @go="goToPage" />
       </div>
 
       <div v-if="detail" class="section ops-detail">

@@ -1,4 +1,8 @@
 // Records panel: upsert / fetch by id / delete by id or filter.
+// Stage 3 IA: the three verbs used to share one form (and one button
+// row), so "write", "query" and "delete" read as one action. They are
+// now tabs over a shared scope (database/collection/field names); each
+// pane owns its own inputs and its own submit button.
 import { defineComponent, ref, computed, watch, onMounted } from '../vue.esm-browser.prod.js';
 import { t, api, enc, extractApiError } from './app.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
@@ -12,6 +16,12 @@ export default defineComponent({
     const coll = ref('');
     const primary = ref('id');
     const vecfield = ref('vector');
+    // Field-name suggestions from the collection schema: the primary/
+    // vector field boxes stay free text (a schema-less backend or a
+    // collection still loading must not block typing) but datalist
+    // dropdowns now offer the real names instead of a guess (stage 3).
+    const schemaFields = ref([]);
+    const tab = ref('write');
     const mode = ref('texts');
     // No pre-filled example values. They used to ship as valid-looking
     // JSON (``["sku-1", "sku-2"]`` plus a row-aligned fields array), so
@@ -46,6 +56,8 @@ export default defineComponent({
     const fetched = ref(null);        // GetVectorItem[] | null (never run)
     const fetchRequested = ref(0);
     const fetchMissing = ref([]);
+    // Table vs raw-JSON rendering of the fetch result (stage 3).
+    const fetchView = ref('table');
 
     function ok(msg) { status.value = 'ok'; errMsg.value = ''; okMsg.value = msg; }
     function failed(e) {
@@ -76,7 +88,19 @@ export default defineComponent({
         loadErr.value = t('common.load_failed') + extractApiError(e, t('common.unknown'));
       }
     }
+    // Schema names for the field-name datalists. Best-effort: a failed
+    // lookup only costs the suggestions, it never blocks the form.
+    async function refreshSchema() {
+      schemaFields.value = [];
+      if (!db.value || !coll.value) return;
+      try {
+        const { payload } = await api('GET',
+          '/v1/databases/' + enc(db.value) + '/collections/' + enc(coll.value));
+        schemaFields.value = ((payload && payload.fields) || []).map(f => f.name);
+      } catch (_e) { /* hints are optional */ }
+    }
     watch(db, refreshColls);
+    watch(coll, refreshSchema);
     onMounted(refreshDbs);
 
     function safeParse(s) { try { return JSON.parse(s); } catch (_e) { return null; } }
@@ -86,20 +110,32 @@ export default defineComponent({
       const idsArr = safeParse(ids.value);
       if (!Array.isArray(idsArr)) { formErr.value = t('records.err.ids_json'); return null; }
       const body = { primary_field: primary.value.trim(), vector_field: vecfield.value.trim(), ids: idsArr };
-      if (mode.value === 'texts') {
-        const txt = safeParse(texts.value);
-        if (!Array.isArray(txt)) { formErr.value = t('records.err.texts_json'); return null; }
-        body.texts = txt;
-      } else {
-        const e = safeParse(embs.value);
-        if (!Array.isArray(e)) { formErr.value = t('records.err.vectors_json'); return null; }
-        body.vectors = e;
+      // texts/vectors/fields are row-aligned with ids; a ragged body
+      // used to reach the server and fail (or worse, be accepted with
+      // rows silently paired in order). Checked here so the complaint
+      // names both counts.
+      const dataArr = mode.value === 'texts' ? safeParse(texts.value) : safeParse(embs.value);
+      if (!Array.isArray(dataArr)) {
+        formErr.value = t(mode.value === 'texts' ? 'records.err.texts_json' : 'records.err.vectors_json');
+        return null;
       }
+      if (dataArr.length !== idsArr.length) {
+        formErr.value = t('records.err.len_mismatch', { ids: idsArr.length, n: dataArr.length });
+        return null;
+      }
+      if (mode.value === 'texts') body.texts = dataArr;
+      else body.vectors = dataArr;
       const fRaw = fields.value.trim();
       if (fRaw && fRaw !== '[]') {
         const f = safeParse(fRaw);
         if (!Array.isArray(f)) { formErr.value = t('records.err.fields_json'); return null; }
-        if (f.length) body.fields = f;
+        if (f.length) {
+          if (f.length !== idsArr.length) {
+            formErr.value = t('records.err.len_mismatch_fields', { ids: idsArr.length, n: f.length });
+            return null;
+          }
+          body.fields = f;
+        }
       }
       return body;
     }
@@ -215,9 +251,11 @@ export default defineComponent({
       return status.value === 'ok' ? okMsg.value : '';
     });
 
-    return { dbs, colls, db, coll, primary, vecfield, mode, ids, texts, embs, fields,
+    return { dbs, colls, db, coll, primary, vecfield, schemaFields, tab, mode,
+             ids, texts, embs, fields,
              delMode, delIds, delFilter, busy, status, formErr, loadErr,
-             fetched, fetchRequested, fetchMissing, outcomeKind, outcomeText,
+             fetched, fetchRequested, fetchMissing, fetchView,
+             outcomeKind, outcomeText,
              canDelete, deleteBlockReason,
              refreshDbs, doUpsert, doFetch, doDelete };
   },
@@ -228,6 +266,8 @@ export default defineComponent({
         <div class="section-head">
           <h3 class="section-title">{{ $t('records.title') }} <span class="pill accent">PUT /v1/databases/{db}/collections/{coll}/vectors</span></h3>
         </div>
+        <!-- Shared scope: every verb below works on this db/collection
+             and these field names. -->
         <div class="row split">
           <div class="row"><label>{{ $t('common.database') }}</label>
             <select id="vec-db" v-model="db"><option v-for="d in dbs" :key="d" :value="d">{{ d }}</option></select>
@@ -237,56 +277,92 @@ export default defineComponent({
           </div>
         </div>
         <div class="row split">
-          <div class="row"><label>{{ $t('common.primary_field') }}</label><input type="text" id="vec-primary" v-model="primary" /></div>
-          <div class="row"><label>{{ $t('common.vector_field') }}</label><input type="text" id="vec-vecfield" v-model="vecfield" /></div>
-        </div>
-        <div class="row"><label>{{ $t('records.input_mode') }}</label>
-          <select id="vec-mode" v-model="mode">
-            <option value="texts">{{ $t('records.mode.texts') }}</option>
-            <option value="vectors">{{ $t('records.mode.vectors') }}</option>
-          </select>
-        </div>
-        <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-ids" class="code-input" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
-        <div class="row" v-show="mode === 'texts'"><label>{{ $t('records.texts') }}</label><textarea id="vec-texts" class="code-input" rows="3" v-model="texts" :placeholder="$t('records.ph.texts')"></textarea></div>
-        <div class="row" v-show="mode === 'vectors'"><label>{{ $t('records.vectors') }}</label><textarea id="vec-embs" class="code-input" rows="3" v-model="embs" :placeholder="$t('records.ph.vectors')"></textarea></div>
-        <details class="collapsible">
-          <summary>{{ $t('records.fields') }}</summary>
-          <div class="body">
-            <div class="row"><label>{{ $t('records.field_set') }}</label><textarea id="vec-fields" class="code-input" rows="3" v-model="fields" :placeholder="$t('records.ph.fields')"></textarea></div>
+          <div class="row"><label>{{ $t('common.primary_field') }}</label>
+            <input type="text" id="vec-primary" v-model="primary" list="vec-primary-opts" />
+            <datalist id="vec-primary-opts">
+              <option v-for="f in schemaFields" :key="f" :value="f"></option>
+            </datalist>
           </div>
-        </details>
+          <div class="row"><label>{{ $t('common.vector_field') }}</label>
+            <input type="text" id="vec-vecfield" v-model="vecfield" list="vec-vecfield-opts" />
+            <datalist id="vec-vecfield-opts">
+              <option v-for="f in schemaFields" :key="f" :value="f"></option>
+            </datalist>
+          </div>
+        </div>
 
-        <details class="collapsible">
-          <summary>{{ $t('records.delete_params') }} <span class="hint">{{ $t('records.delete_params_hint') }}</span></summary>
-          <div class="body">
-            <div class="row"><label>{{ $t('records.delete_mode') }}</label>
-              <select id="vec-del-mode" v-model="delMode">
-                <option value="ids">{{ $t('records.del_mode.ids') }}</option>
-                <option value="filter">{{ $t('records.del_mode.filter') }}</option>
-              </select>
+        <!-- Three verbs, three panes. The ids box is shared by write and
+             query (both target the same primary keys) and is rendered in
+             both panes against one model. -->
+        <div class="records-tabs" role="tablist">
+          <button type="button" role="tab" id="tab-vec-write"
+                  :aria-selected="tab === 'write' ? 'true' : 'false'"
+                  :class="['btn', 'sm', tab === 'write' ? 'primary' : '']"
+                  @click="tab = 'write'">{{ $t('records.tab.write') }}</button>
+          <button type="button" role="tab" id="tab-vec-query"
+                  :aria-selected="tab === 'query' ? 'true' : 'false'"
+                  :class="['btn', 'sm', tab === 'query' ? 'primary' : '']"
+                  @click="tab = 'query'">{{ $t('records.tab.query') }}</button>
+          <button type="button" role="tab" id="tab-vec-delete"
+                  :aria-selected="tab === 'delete' ? 'true' : 'false'"
+                  :class="['btn', 'sm', tab === 'delete' ? 'primary' : '']"
+                  @click="tab = 'delete'">{{ $t('records.tab.delete') }}</button>
+        </div>
+
+        <div v-show="tab === 'write'" role="tabpanel">
+          <div class="row"><label>{{ $t('records.input_mode') }}</label>
+            <select id="vec-mode" v-model="mode">
+              <option value="texts">{{ $t('records.mode.texts') }}</option>
+              <option value="vectors">{{ $t('records.mode.vectors') }}</option>
+            </select>
+          </div>
+          <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-ids" class="code-input" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
+          <div class="row" v-show="mode === 'texts'"><label>{{ $t('records.texts') }}</label><textarea id="vec-texts" class="code-input" rows="3" v-model="texts" :placeholder="$t('records.ph.texts')"></textarea></div>
+          <div class="row" v-show="mode === 'vectors'"><label>{{ $t('records.vectors') }}</label><textarea id="vec-embs" class="code-input" rows="3" v-model="embs" :placeholder="$t('records.ph.vectors')"></textarea></div>
+          <details class="collapsible">
+            <summary>{{ $t('records.fields') }}</summary>
+            <div class="body">
+              <div class="row"><label>{{ $t('records.field_set') }}</label><textarea id="vec-fields" class="code-input" rows="3" v-model="fields" :placeholder="$t('records.ph.fields')"></textarea></div>
             </div>
-            <div class="row" id="vec-del-ids-row" v-show="delMode === 'ids'"><label>{{ $t('records.del_ids') }}</label><textarea id="vec-del-ids" class="code-input" rows="2" v-model="delIds" :placeholder="$t('records.ph.del_ids')"></textarea></div>
-            <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label>{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" class="code-input" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
-            <!-- Why the red button below is disabled. Lives here, beside
-                 the params that would unblock it. -->
-            <div class="row" v-if="deleteBlockReason"><span class="hint">{{ deleteBlockReason }}</span></div>
+          </details>
+          <div class="actions">
+            <busy-button id="btn-upsert" :busy="busy === 'upsert'" :label="$t('records.upsert')"
+                         :busy-label="$t('records.upserting')" @click="doUpsert" />
           </div>
-        </details>
-
-        <div class="actions">
-          <busy-button id="btn-upsert" :busy="busy === 'upsert'" :label="$t('records.upsert')"
-                       :busy-label="$t('records.upserting')" @click="doUpsert" />
-          <busy-button id="btn-fetch" variant="" :busy="busy === 'fetch'" :label="$t('records.fetch')"
-                       :busy-label="$t('records.fetching')" @click="doFetch" />
-          <!-- Disabled until the delete request is well-formed. The title
-               attribute carries the reason for the collapsed-params case,
-               where the hint inside the details block is not on screen.
-               (No backticks in here: this comment lives inside the
-               component's template literal.) -->
-          <busy-button id="btn-delete" variant="danger" :busy="busy === 'delete'" :disabled="!canDelete"
-                       :title="deleteBlockReason" :label="$t('records.delete')"
-                       :busy-label="$t('records.deleting')" @click="doDelete" />
         </div>
+
+        <div v-show="tab === 'query'" role="tabpanel">
+          <div class="row"><label>{{ $t('records.ids') }}</label><textarea id="vec-fetch-ids" class="code-input" rows="2" v-model="ids" :placeholder="$t('records.ph.ids')"></textarea></div>
+          <div class="actions">
+            <busy-button id="btn-fetch" variant="" :busy="busy === 'fetch'" :label="$t('records.fetch')"
+                         :busy-label="$t('records.fetching')" @click="doFetch" />
+          </div>
+        </div>
+
+        <div v-show="tab === 'delete'" role="tabpanel">
+          <div class="row"><label>{{ $t('records.delete_mode') }}</label>
+            <select id="vec-del-mode" v-model="delMode">
+              <option value="ids">{{ $t('records.del_mode.ids') }}</option>
+              <option value="filter">{{ $t('records.del_mode.filter') }}</option>
+            </select>
+          </div>
+          <div class="row" id="vec-del-ids-row" v-show="delMode === 'ids'"><label>{{ $t('records.del_ids') }}</label><textarea id="vec-del-ids" class="code-input" rows="2" v-model="delIds" :placeholder="$t('records.ph.del_ids')"></textarea></div>
+          <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label>{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" class="code-input" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
+          <!-- Why the red button below is disabled. Lives here, beside
+               the params that would unblock it. -->
+          <div class="row" v-if="deleteBlockReason"><span class="hint">{{ deleteBlockReason }}</span></div>
+          <div class="actions">
+            <!-- Disabled until the delete request is well-formed. The title
+                 attribute carries the reason for the case where the hint
+                 above is not on screen.
+                 (No backticks in here: this comment lives inside the
+                 component's template literal.) -->
+            <busy-button id="btn-delete" variant="danger" :busy="busy === 'delete'" :disabled="!canDelete"
+                         :title="deleteBlockReason" :label="$t('records.delete')"
+                         :busy-label="$t('records.deleting')" @click="doDelete" />
+          </div>
+        </div>
+
         <status-banner kind="error" :text="formErr" />
         <status-banner kind="error" :text="loadErr" :retry="loadErr ? refreshDbs : null" />
         <!-- Replaces the old "last op: OK" line, which reported the word
@@ -300,8 +376,17 @@ export default defineComponent({
         <div class="section-head">
           <h3 class="section-title">{{ $t('common.results') }} <span class="pill accent">POST /v1/databases/{db}/collections/{coll}/vectors/get</span></h3>
           <span class="section-sub">{{ $t('records.fetched_n', { n: fetched.length }) }}</span>
+          <span class="section-sub">
+            <button type="button" class="btn sm" id="btn-fetch-view-table"
+                    :class="fetchView === 'table' ? 'primary' : ''"
+                    @click="fetchView = 'table'">{{ $t('records.view.table') }}</button>
+            <button type="button" class="btn sm" id="btn-fetch-view-json"
+                    :class="fetchView === 'json' ? 'primary' : ''"
+                    @click="fetchView = 'json'">JSON</button>
+          </span>
         </div>
         <empty-state v-if="!fetched.length" state="empty" :text="$t('records.fetched_n', { n: 0 })" />
+        <pre v-else-if="fetchView === 'json'" class="code-pane">{{ JSON.stringify(fetched, null, 2) }}</pre>
         <div v-else class="data-table-wrap">
           <table class="data-table">
             <thead><tr>

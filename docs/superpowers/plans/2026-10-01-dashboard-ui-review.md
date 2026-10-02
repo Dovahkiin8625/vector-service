@@ -12,7 +12,9 @@
 > | S4 版本号单一来源 | **已实施**（2026-10-01，见 §1 S4 实施记录） |
 > | S5 排版与字体 | **已实施**（2026-10-01，见 §1 S5 实施记录） |
 > | S6 表单/数据加载规范 | **已实施**（2026-10-01，见 §1 S6 实施记录） |
-> | S7 a11y、阶段三、阶段四 | 未开始 |
+> | 阶段三（P2 信息架构） | **已实施**（2026-10-02，见 §3 阶段三实施记录） |
+> | S7 a11y | 随各阶段顺手实施（阶段一至三触及元素已修，余下随阶段四） |
+> | 阶段四（P3 视觉提升） | 未开始 |
 | 阶段一第 4 项（records 危险默认值） | **已实施**（2026-10-01，见 §3 阶段一实施记录） |
 
 ---
@@ -385,6 +387,24 @@
 7. 三个 embedding 面板统一为参数化单模板。
 
 验收：重点页（retrieval/ingested/records/ingest）首屏信息密度下降，核心动作首屏可达；原有功能零回归。
+
+**实施记录（2026-10-02）**：七项全部落地，验收通过（重点页首屏密度下降、核心动作首屏可达、零功能回归）。
+
+1. **records**：写入/查询/删除拆为共享作用域上的三个 tab，各 pane 自带输入与提交按钮；写入增加 ids/texts|vectors/fields 行数对齐校验（`records.err.len_mismatch*`，出错同时点名两个计数）；字段名用集合 schema 填充 datalist 提示（查找失败不阻塞表单）；查询结果支持 表格/JSON 双视图。
+2. **retrieval**：四模式语义落实——basic 仅查询/top_k/库（通道与融合隐藏）；hybrid 显示通道+融合、手风琴折叠；advanced 展开手风琴（`setMode` 同步 `advOpen`，模式即披露级别）；custom 为原生 JSON 编辑（B9 已真，保留）。六个调参分组（意图路由/查询改写/多样性/重排/上下文预算/元数据过滤）收入 `details.collapsible`（fieldset+legend，`retrieval.group.context` 拆分后删除）；双通道全关阻断运行并给行内提示（`retrieval.err.no_channel`）；AbortController 取消（`retrieval.cancel/cancelled`，安静 info 横幅）；错误横幅换 StatusBanner+重试按钮；零命中走 EmptyState；trace 开关换真按钮+`aria-expanded`。
+3. **ingested**（`knowledge-base.js`）：卡片头两行化；body 支持 source/preview 双视图（与解析页同一开关语义）；按 doc_id 分组（组头承载 doc_id/文件名、可折叠，doc_id 不再每卡重复；折叠态取「有效态取反」以免首击落空）；`copyText` 抽到 `util.js`（含 http 非安全上下文回退、复制 ok/err 反馈）。
+4. **collections**：全面板一个选库（`#colls-db`），索引表单按 `db::coll` 联动；目标字段去掉单选项假 select（直显向量字段）；params 提供 hnsw/ivf 模板一键填入/清空；metric 预选不再写死 cosine/HNSW。
+5. **browse**：列基于集合 schema（按 dtype 过滤向量列、主键只渲染一次），schema 缺失时回退页内并集；删除标题旁与统计条重复的 range 行。
+6. **reindex/queue/eval**：
+   - **reindex**：「重建 → 评测/门禁 → 提升」步骤条，每步显示可用状态 pill（job 状态 / 门禁检查状态 / 可提升·已提升）；promote 按钮固定存在、条件禁用并逐条说明原因（任务未完成 → canary=0 → 无检查 → 检查未过：`ops.reindex.block_no_job/block_canary_zero/block_no_check/block_check_failed`）；轮询/加载错误写独立 `jobErr` 槽（不再误报到提交表单错误槽）+重试；非终态任务提供 `POST /v1/jobs/{id}/cancel` 取消入口（askConfirm 确认，与 queue 面板同一模态）。
+   - **queue/eval**：分页统一为共享 `UiPager`（页码+跳页+总数；稳定 id `queue-*` / `eval-sets-*` / `eval-gates-*`；文案 `ops.pager_info`）；列表三态（spinner/空态/数据）沿用 browse「刷新失败保留旧数据」约定；ops-tabs 补 `role="tablist"`/`role="tab"`+`aria-selected`；gate check 无 run_id 行去掉可点击样式（`ops-row-static`，无 role/tabindex）；gates 列表分页为客户端切片（`list_gates` 无分页参数且 scope 唯一）；eval run 详情返回来源 tab（`runBack`）；子表统一 loading/空态（集合详情三张子表一次批量加载，用一个 loading 块覆盖）。顺带修掉 `setsNext` 拿 ref 对象做比较导致翻页永不终止的旧缺陷（改为钳制式 `setsGo`/`goToPage`）。
+7. **embeddings**：三个模式共用一套参数化模板（`kind` prop）；文件改为可移除 chips（自持数组，重选同名文件可触发 change）；结果条形头（数量/维度/耗时）+JSON 折叠+一键复制反馈；`elapsedMs` 在成功路径打点（不进 finally）。
+
+**挂账清零**：gates 分页、子表空态/局部 loading、无 run_id 行的可点击样式（原 S3 实施记录留给阶段三的三项）；queue 的 `total · offset` 分页样式统一（S6 备注）。
+
+**验证**：`test_dashboard_route.py` / `test_dashboard_i18n.py` / `test_dashboard_feedback.py` / `test_version_single_source.py` 全绿（40 例）；Playwright 中/英冒烟——retrieval 四模式结构、取消（延迟路由）、零命中空态、trace 开关；queue pager 跳页钳制/过滤复位/详情选中/终态不显取消/过滤空态；eval tablist 切换与集合·门禁空列表渲染（本地后端无评测数据，分页交互由 queue 面板实测同一 UiPager 组件覆盖）；reindex 步骤条三步状态、promote 禁用+`block_no_job` 原因、无 job 不显取消、中/英标签与原因文案互切；EN 下 queue/eval/reindex 无原始 key 泄漏。
+
+**未纳入本次**：eval「scope Apply 未改动时禁用」（§2 第 21 条尾注，未列入阶段三清单）；queue SSE 连接状态（第 18 条尾注，同上）；`app.js` health 轮询与 overview 各拉一次 `/v1/system/status` 的合并；models.js FAMILY_LABELS 与自动刷新「开/关」文案（留阶段四）。
 
 ### 阶段四（P3 视觉提升）： polish
 

@@ -104,10 +104,25 @@ export default defineComponent({
     watch(primary, () => { resetSelectionState(); });
     onMounted(refreshDbs);
 
+    // Columns come from the collection schema when one is loaded, not
+    // from the union of keys on the current page (stage 3): a page-union
+    // header changed shape between pages ("cross-page drift"), and the
+    // primary key could show up twice — once from row.id and again as a
+    // fields entry of the same name. The PK column is rendered once;
+    // fields entries named like the PK and vector columns are dropped.
+    // Without a schema (failed/absent detail) the old page-union remains
+    // as the fallback so the table still renders something.
     const columns = computed(() => {
-      const set = new Set();
-      items.value.forEach(it => Object.keys(it.fields || {}).forEach(k => set.add(k)));
-      return [primary.value, ...Array.from(set)].filter((c, i, a) => a.indexOf(c) === i);
+      const names = [];
+      const push = (n) => { if (n && n !== primary.value && !names.includes(n)) names.push(n); };
+      if (schema.value && Array.isArray(schema.value.fields)) {
+        schema.value.fields.forEach(f => {
+          if (f && f.dtype !== 'float_vector') push(f.name);
+        });
+      } else {
+        items.value.forEach(it => Object.keys(it.fields || {}).forEach(push));
+      }
+      return [primary.value, ...names];
     });
     const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
     const currentPage = computed(() => Math.floor(offset.value / pageSize.value) + 1);
@@ -357,9 +372,9 @@ export default defineComponent({
       <div class="section">
         <div class="section-head">
           <h3 class="section-title">{{ $t('common.results') }}</h3>
-          <span class="section-sub" id="brw-summary">
-            {{ total ? $t('browse.rows_range', { from: offset + 1, to: offset + items.length, total: total }) : $t('browse.empty_summary') }}
-          </span>
+          <!-- Scope/range is stated by the stats strip below (the old
+               section-sub rephrased the same numbers next to the title,
+               on top of the stats strip and the pager line). -->
         </div>
         <!-- Selection/schema load failures were swallowed before: the
              dropdown just came up empty with no explanation. -->

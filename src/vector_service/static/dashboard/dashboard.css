@@ -1375,16 +1375,52 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 }
 .ingest-result-ok details.collapsible { margin: 0 16px 14px; }
 
-/* doc_id row inside an ingested-chunk card */
-.chunks-docid {
+/* Ingested-chunk browse: one group header per doc_id (fold caret,
+   file name, chunk count, doc_id row); cards under it carry only the
+   section breadcrumb + meta + body. */
+.doc-group { margin-bottom: 12px; }
+.doc-group-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 0 14px 12px;
+  margin-bottom: 8px;
   padding: 8px 12px;
   background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
+}
+.doc-group-head .title {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-group-head .hint { flex-shrink: 0; }
+.doc-fold {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.doc-fold:hover { color: var(--text); background: var(--surface-2); }
+.doc-fold svg { transition: transform var(--t-fast); }
+.doc-fold[aria-expanded="true"] svg { transform: rotate(90deg); }
+/* doc_id chip inside the group header */
+.chunks-docid {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  min-width: 0;
 }
 .chunks-docid .hint { flex-shrink: 0; }
 .chunks-docid code {
@@ -1393,6 +1429,34 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   font-family: var(--mono);
   font-size: 12px;
   color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Card head row 2: the meta line the single-row header used to crowd
+   in beside the name — chunk #, chars/tokens, page, muted. */
+.field-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -4px 0 8px;
+}
+.field-card-meta .index-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-3);
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  letter-spacing: 0.04em;
+}
+.field-card-header .crumb {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.field-card-header .crumb-path {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1725,6 +1789,22 @@ details.collapsible > .body { padding: 0 14px 14px; }
   margin-left: auto;
   display: flex; align-items: center; gap: 6px;
 }
+/* Selected-file chips under the embeddings file picker: name + drop. */
+.picked-files {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 6px;
+}
+.picked-file {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 2px 4px 2px 8px;
+  font-family: var(--mono); font-size: 11px;
+}
+.picked-name {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Headline numbers (count / dim / ms) in the embeddings response head. */
+.emb-summary { color: var(--text); }
 /* markdown / original segmented toggle in the parse result head. */
 .seg-toggle { display: inline-flex; }
 .seg-toggle .btn { border-radius: 0; }
@@ -1860,6 +1940,18 @@ pre.code-pane.chunk-text.clamped {
 .chunk-expand {
   align-self: flex-start;
   margin-top: 8px;
+}
+/* In-card rendered markdown (入库浏览 preview tab): same flow-with-page
+   rule as pre.code-pane.chunk-text — no nested scrollbar; the long-body
+   clamp is shared with the source view. */
+.md-preview.chunk-md {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+}
+.md-preview.chunk-md.clamped {
+  max-height: 320px;
+  overflow: hidden;
 }
 
 /* ============ Status bar ============ */
@@ -2117,9 +2209,60 @@ table.data-table tbody tr.selected:hover td { background: var(--accent-soft); }
   margin-bottom: 12px;
 }
 
-.ops-jobs-table tbody tr.ops-job-row { cursor: pointer; }
-.ops-jobs-table tbody tr.ops-job-row:hover td { background: var(--surface-2); }
-.ops-jobs-table tbody tr.ops-row-selected td { background: var(--accent-soft); }
+/* Rebuild → gate → promote process ribbon (reindex): one card per
+   step, name left, availability pill right. */
+.ops-steps {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+.ops-step {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+}
+.ops-step-num {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ops-step-name {
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ops-step .pill {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* Clickable rows are used by several ops tables (queue jobs, eval
+   sets/runs/gates/checks), so the affordance is not scoped to one
+   table. ops-row-static is a row with no action behind it (a gate check
+   with no run_id): no pointer, no hover lift. */
+tr.ops-job-row { cursor: pointer; }
+tr.ops-job-row:hover td { background: var(--surface-2); }
+tr.ops-row-selected td { background: var(--accent-soft); }
+tr.ops-row-static { cursor: default; }
+tr.ops-row-static:hover td { background: transparent; }
 .ops-jobs-table td.ops-ts {
   font-family: var(--mono);
   font-size: 11px;
@@ -2426,6 +2569,12 @@ details.ops-id-details > summary:hover { color: var(--accent); }
 .retrieval-modes { display: flex; gap: 6px; margin: 10px 0; }
 .retrieval-fieldset { border: none; padding: 0; margin: 0 0 10px; }
 .retrieval-fieldset[disabled] { opacity: .55; }
+.retrieval-fieldset > legend {
+  padding: 0; margin: 0 0 6px;
+  font-family: var(--font); font-size: 11px; color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+.retrieval-adv { margin: 10px 0 12px; }
 .retrieval-progress { display: flex; flex-wrap: wrap; gap: 12px; }
 .retrieval-stage { display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; color: var(--text-muted, #888); }
@@ -2438,8 +2587,12 @@ details.ops-id-details > summary:hover { color: var(--accent); }
   color: var(--text-muted, #888); }
 .retrieval-chunk-text { margin: 8px 0; white-space: pre-wrap; }
 .retrieval-chunk-meta { font-size: 12px; color: var(--text-muted, #888); }
-.retrieval-trace-toggle { cursor: pointer; margin: 12px 0 6px;
-  font-weight: 600; }
+.retrieval-trace-toggle {
+  background: none; border: none; padding: 0;
+  font-family: var(--font); font-size: 12px; color: var(--text-dim);
+  cursor: pointer; margin: 12px 0 6px; font-weight: 600; text-align: left;
+}
+.retrieval-trace-toggle:hover { color: var(--text); }
 .retrieval-trace .stat { display: flex; gap: 8px; padding: 3px 0;
   font-size: 12px; }
 .retrieval-trace .key { min-width: 200px; color: var(--text-muted, #888); }

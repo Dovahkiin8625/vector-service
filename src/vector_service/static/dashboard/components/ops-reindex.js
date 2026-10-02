@@ -28,12 +28,19 @@ export default defineComponent({
     const submitting = ref(false);
     const formErr = ref('');
     const job = ref(null);
+    // Last job id touched — survives a failed first loadJob so the
+    // retry button on the job banner can still address the job.
+    const jobId = ref('');
     const indexRef = ref(null);
     const promoted = ref(null);
     // Promote and the manual gate refresh had no in-flight state: both
     // could be fired repeatedly while the previous call was still out.
     const promoting = ref(false);
     const refreshing = ref(false);
+    const cancelling = ref(false);
+    // Job load/poll failures. Not formErr: that banner sits under the
+    // submit form and reads as "the submit failed".
+    const jobErr = ref('');
 
     const gates = ref([]);
     const checks = ref([]);
@@ -69,33 +76,71 @@ export default defineComponent({
     // The endpoint's own gate rule: with a gate registered, promotion is
     // allowed only when the latest check passed. With no gate the canary
     // can be promoted directly (a 409 still comes back if none is parked).
+    // In front of that, the button stays disabled until the rebuild job
+    // is done and a canary actually exists (canary 0 parks nothing).
+    const jobDone = computed(() => !!job.value && job.value.status === 'done');
     const canPromote = computed(() => {
+      if (!jobDone.value) return false;
+      if (Number(canaryPercent.value) === 0) return false;
       if (!gates.value.length) return true;
       return !!latestCheck.value && latestCheck.value.status === 'passed';
     });
     const promoteBlockReason = computed(() => {
       if (canPromote.value) return '';
+      if (!jobDone.value) return t('ops.reindex.block_no_job');
+      if (Number(canaryPercent.value) === 0) return t('ops.reindex.block_canary_zero');
       if (!latestCheck.value) return t('ops.reindex.block_no_check');
       return t('ops.reindex.block_check_failed', {
         status: statusLabel(latestCheck.value.status),
       });
     });
+    // 重建 → 评测/门禁 → 提升 as one ribbon: each step carries its own
+    // availability state instead of the flow being inferred from which
+    // sections happen to be filled in.
+    const stepStates = computed(() => [
+      {
+        name: t('ops.reindex.step_rebuild'),
+        cls: job.value ? pillClass(job.value.status) : '',
+        label: job.value ? statusLabel(job.value.status) : t('ops.reindex.step_pending'),
+      },
+      {
+        name: t('ops.reindex.step_gate'),
+        cls: latestCheck.value ? pillClass(latestCheck.value.status) : '',
+        label: !gates.value.length ? t('ops.reindex.no_gate')
+          : (!latestCheck.value ? t('ops.reindex.no_check')
+            : statusLabel(latestCheck.value.status)),
+      },
+      {
+        name: t('ops.reindex.step_promote'),
+        cls: promoted.value ? 'success' : (canPromote.value ? 'accent' : ''),
+        label: promoted.value ? t('common.promoted')
+          : (canPromote.value ? t('ops.reindex.ready') : t('ops.reindex.step_pending')),
+      },
+    ]);
 
-    async function loadJob(jobId) {
+    // loadJob failures go to jobErr, never formErr: the form banner
+    // implies the submit failed, which is wrong for a poll error.
+    async function loadJob(id) {
+      jobId.value = id;
       try {
-        const { payload } = await api('GET', `/v1/jobs/${enc(jobId)}`);
+        const { payload } = await api('GET', `/v1/jobs/${enc(id)}`);
         job.value = payload;
-      } catch (e) { formErr.value = e.message; }
+        jobErr.value = '';
+      } catch (e) { jobErr.value = e.message; }
+    }
+
+    function retryJob() {
+      if (jobId.value) loadJob(jobId.value);
     }
 
     function stopTimer() {
       if (timer) { clearInterval(timer); timer = null; }
     }
 
-    function pollJob(jobId) {
+    function pollJob(id) {
       stopTimer();
       timer = setInterval(async () => {
-        await loadJob(jobId);
+        await loadJob(id);
         if (job.value && TERMINAL.has(job.value.status)) {
           stopTimer();
           if (job.value.status === 'done') await loadGates();
@@ -128,6 +173,7 @@ export default defineComponent({
       if (!confirmed) return;
       submitting.value = true;
       formErr.value = '';
+      jobErr.value = '';
       promoteErr.value = '';
       promoted.value = null;
       try {
@@ -137,6 +183,32 @@ export default defineComponent({
         pollJob(payload.job_id);
       } catch (e) { formErr.value = e.message; }
       finally { submitting.value = false; }
+    }
+
+    // Cooperative cancel against the same job endpoint the queue panel
+    // uses. A rebuild can be long-running, and until now the only way to
+    // stop one was to leave the page and find it in the queue.
+    async function cancelJob() {
+      const cur = job.value;
+      if (!cur || TERMINAL.has(cur.status) || cancelling.value) return;
+      const confirmed = await askConfirm({
+        title: t('ops.queue.cancel_title'),
+        message: t('ops.queue.cancel_confirm'),
+        details: [
+          { label: t('common.job_id'), value: cur.job_id },
+          { label: t('common.scope'), value: db.value + '/' + coll.value },
+          { label: t('ops.queue.status'), value: statusLabel(cur.status) },
+        ],
+        confirmLabel: t('ops.queue.cancel'),
+      });
+      if (!confirmed) return;
+      cancelling.value = true;
+      try {
+        await api('POST', `/v1/jobs/${enc(cur.job_id)}/cancel`);
+        await loadJob(cur.job_id);
+        stopTimer();
+      } catch (e) { jobErr.value = e.message; }
+      finally { cancelling.value = false; }
     }
 
     async function loadGates() {
@@ -209,11 +281,11 @@ export default defineComponent({
     return {
       db, coll, embedModel, canaryPercent, batchSize,
       canaryErr, batchErr,
-      submitting, formErr, job, indexRef, promoted,
-      promoting, refreshing,
+      submitting, formErr, job, jobId, indexRef, promoted,
+      promoting, refreshing, cancelling, jobErr,
       gates, checks, gateErr, promoteErr, scopeGate, latestCheck,
-      canPromote, promoteBlockReason,
-      submit, loadGates, promote,
+      canPromote, promoteBlockReason, stepStates,
+      submit, loadGates, promote, retryJob, cancelJob,
       formatTs, pillClass, progressText, statusLabel, TERMINAL,
     };
   },
@@ -227,6 +299,16 @@ export default defineComponent({
             <span class="pill accent">POST /v1/databases/{db}/collections/{coll}/reindex</span>
           </h3>
         </div>
+
+        <!-- 重建 → 评测/门禁 → 提升: the flow is a visible sequence now;
+             each step carries its own availability state (§2 item 19). -->
+        <ol class="ops-steps">
+          <li v-for="(st, i) in stepStates" :key="st.name" class="ops-step">
+            <span class="ops-step-num" aria-hidden="true">{{ i + 1 }}</span>
+            <span class="ops-step-name">{{ st.name }}</span>
+            <span :class="['pill', st.cls]">{{ st.label }}</span>
+          </li>
+        </ol>
 
         <div class="ops-scope">
           <label>{{ $t('common.database') }}
@@ -265,12 +347,20 @@ export default defineComponent({
         </div>
       </div>
 
-      <div v-if="job" class="section">
+      <!-- job || jobErr: a failed first load still needs somewhere to
+           report — a bare form banner would read as a failed submit. -->
+      <div v-if="job || jobErr" class="section">
         <div class="section-head">
           <h3 class="section-title">{{ $t('ops.reindex.job') }}</h3>
           <span class="section-sub ops-mono">{{ indexRef }}</span>
+          <span class="section-sub">
+            <busy-button v-if="job && !TERMINAL.has(job.status)" class="sm" variant="danger"
+                         :busy="cancelling" :label="$t('ops.queue.cancel')"
+                         :busy-label="$t('common.deleting')" @click="cancelJob" />
+          </span>
         </div>
-        <table class="info-table">
+        <status-banner kind="error" :text="jobErr" :retry="jobErr && jobId ? retryJob : null" />
+        <table v-if="job" class="info-table">
           <tr><th>{{ $t('common.job_id') }}</th><td class="ops-mono">{{ job.job_id }}</td></tr>
           <tr><th>{{ $t('ops.queue.status') }}</th><td><span :class="['pill', pillClass(job.status)]">{{ statusLabel(job.status) }}</span></td></tr>
           <tr><th>{{ $t('ops.queue.stage') }}</th><td>{{ job.stage ? statusLabel(job.stage) : '—' }}</td></tr>

@@ -88,3 +88,26 @@ export function intError(value, min, max) {
   }
   return '';
 }
+
+// Clipboard API is unavailable in non-secure contexts (plain http);
+// fall back to a hidden textarea + execCommand. Resolves to whether the
+// text actually landed — callers surface failure instead of silently
+// pretending success.
+export function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}

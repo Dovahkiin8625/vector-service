@@ -6,6 +6,7 @@ import {
 } from '../vue.esm-browser.prod.js';
 import { t } from './app.js';
 import { intError } from './util.js';
+import { StatusBanner, EmptyState } from './feedback.js';
 
 async function getJson(url) {
   const resp = await fetch(url);
@@ -45,8 +46,12 @@ function defaultState() {
     busy: false,
     stages: [],
     error: '',
+    // Quiet status (e.g. a cancelled stream) — not an error banner.
+    notice: '',
     result: null,
     showTrace: false,
+    // 「高级选项」accordion. hybrid keeps it folded, advanced opens it.
+    advOpen: false,
     // Raw request body for the 'custom' preset. Filled from the current
     // controls when the mode is entered, then editable verbatim.
     customJson: '',
@@ -101,6 +106,10 @@ export default defineComponent({
         s.methods = { hyde: true, multi_query: true, step_back: true, decompose: true };
         s.mmr = false; s.rerank = true;
       }
+      // The mode is also the disclosure level: advanced is the mode for
+      // the tuning sections, so it unfurls the accordion that hybrid
+      // leaves folded (basic hides it entirely).
+      s.advOpen = mode === 'advanced';
     }
 
     function buildBody() {
@@ -155,8 +164,18 @@ export default defineComponent({
       }
     }
 
+    // One in-flight stream at a time; cancelRun() aborts the fetch and
+    // the reader loop below. Kept outside the reactive state — an abort
+    // controller is plumbing, not render state.
+    let aborter = null;
+
+    function cancelRun() {
+      if (aborter) aborter.abort();
+    }
+
     async function run() {
-      s.busy = true; s.error = ''; s.result = null; s.stages = [];
+      s.busy = true; s.error = ''; s.notice = ''; s.result = null; s.stages = [];
+      aborter = new AbortController();
       try {
         const body = requestBody();
         if (!body) return;
@@ -164,6 +183,7 @@ export default defineComponent({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: aborter.signal,
         });
         // A response with no content-type at all (an error page, a proxy
         // reset) made this `.includes` throw a TypeError that was then
@@ -198,9 +218,13 @@ export default defineComponent({
           }
         }
       } catch (e) {
-        s.error = String(e.message || e);
+        // Aborting is the operator's own action, not a failure: report it
+        // quietly and keep whatever stages already landed.
+        if (e && e.name === 'AbortError') s.notice = t('retrieval.cancelled');
+        else s.error = String(e.message || e);
       } finally {
         s.busy = false;
+        aborter = null;
       }
     }
 
@@ -220,10 +244,22 @@ export default defineComponent({
       candidatePool: intError(s.candidatePool, 1, 64),
       maxTokens: s.maxTokens === '' ? '' : intError(s.maxTokens, 1, null),
     }));
-    const canRun = computed(() => s.mode === 'custom' || !Object.values(numErrs.value).some(Boolean));
+    // 'custom' validates its own JSON at run time. For the control modes
+    // every numeric field must be a whole number in range, and at least
+    // one recall channel must stay on — both off used to send a request
+    // that could not recall anything at all.
+    const canRun = computed(() => {
+      if (s.mode === 'custom') return true;
+      if (Object.values(numErrs.value).some(Boolean)) return false;
+      return s.mode === 'basic' || s.dense || s.bm25;
+    });
 
-    return { s, setMode, run, numErrs, canRun, regenCustom: () => { s.customJson = JSON.stringify(buildBody(), null, 2); } };
+    return {
+      s, setMode, run, cancelRun, numErrs, canRun,
+      regenCustom: () => { s.customJson = JSON.stringify(buildBody(), null, 2); },
+    };
   },
+  components: { StatusBanner, EmptyState },
   template: `
   <div class="retrieval-panel">
     <div class="section">
@@ -232,8 +268,9 @@ export default defineComponent({
         <span class="pill accent">POST /v1/retrieval/stream</span>
       </div>
 
-      <div class="retrieval-modes">
+      <div class="retrieval-modes" role="tablist" :aria-label="$t('nav.retrieval')">
         <button v-for="m in ['basic','hybrid','advanced','custom']" :key="m"
+          role="tab" :aria-selected="s.mode === m ? 'true' : 'false'"
           :class="['btn','sm', s.mode === m ? 'primary' : '']"
           @click="setMode(m)">{{ $t('retrieval.modes.' + m) }}</button>
       </div>
@@ -272,10 +309,16 @@ export default defineComponent({
         <span class="hint" v-if="numErrs.topK">{{ numErrs.topK }}</span>
       </div>
 
+      <!-- basic is dense-only with everything else preset: channels,
+           fusion and the accordion would only crowd the form. -->
+      <template v-if="s.mode !== 'basic'">
       <div class="cap-group-title">{{ $t('retrieval.group.channels') }}</div>
       <div class="row">
         <label><input type="checkbox" v-model="s.dense"> dense</label>
         <label><input type="checkbox" v-model="s.bm25"> bm25</label>
+        <!-- Both channels off used to send a request that could not
+             recall anything; the run button now refuses it too. -->
+        <span class="hint" v-if="!s.dense && !s.bm25">{{ $t('retrieval.err.no_channel') }}</span>
       </div>
       <div class="row">
         <label>{{ $t('retrieval.fusion') }}</label>
@@ -300,60 +343,83 @@ export default defineComponent({
         </template>
       </div>
 
-      <div class="cap-group-title">{{ $t('retrieval.group.routing') }}</div>
-      <div class="row">
-        <label><input type="checkbox" v-model="s.routing"> {{ $t('retrieval.auto_route') }}</label>
-        <label><input type="checkbox" v-model="s.routeLlm"
-          :disabled="!s.caps.llm_configured"> {{ $t('retrieval.use_llm') }}</label>
-      </div>
+      <!-- Six tuning sections fold into one accordion: hybrid leaves it
+           closed (channels + fusion are its job), advanced opens it. -->
+      <details class="collapsible retrieval-adv" :open="s.advOpen"
+               @toggle="s.advOpen = $event.target.open">
+        <summary>{{ $t('retrieval.adv_options') }}</summary>
+        <div class="body">
+          <fieldset class="retrieval-fieldset">
+            <legend>{{ $t('retrieval.group.routing') }}</legend>
+            <div class="row">
+              <label><input type="checkbox" v-model="s.routing"> {{ $t('retrieval.auto_route') }}</label>
+              <label><input type="checkbox" v-model="s.routeLlm"
+                :disabled="!s.caps.llm_configured"> {{ $t('retrieval.use_llm') }}</label>
+            </div>
+          </fieldset>
 
-      <div class="cap-group-title">{{ $t('retrieval.group.rewrite') }}
-        <span v-if="!s.caps.llm_configured" class="pill danger">{{ $t('retrieval.llm_hint') }}</span>
-      </div>
-      <fieldset class="retrieval-fieldset" :disabled="!s.caps.llm_configured">
-        <div class="row">
-          <label><input type="checkbox" v-model="s.rewrite"> {{ $t('retrieval.rewrite_enabled') }}</label>
-        </div>
-        <div class="row">
-          <label v-for="k in ['hyde','multi_query','step_back','decompose']" :key="k">
-            <input type="checkbox" v-model="s.methods[k]"> {{ $t('retrieval.method.' + k) }}
-          </label>
-        </div>
-        <div class="row">
-          <label>hyde α</label>
-          <input type="number" min="0" max="1" step="0.05" v-model.number="s.hydeAlpha">
-          <label>{{ $t('retrieval.n_variants') }}</label>
-          <input type="number" min="1" max="5" v-model.number="s.nVariants">
-          <span class="hint" v-if="numErrs.nVariants">{{ numErrs.nVariants }}</span>
-        </div>
-      </fieldset>
+          <fieldset class="retrieval-fieldset" :disabled="!s.caps.llm_configured">
+            <legend>{{ $t('retrieval.group.rewrite') }}
+              <span v-if="!s.caps.llm_configured" class="pill danger">{{ $t('retrieval.llm_hint') }}</span>
+            </legend>
+            <div class="row">
+              <label><input type="checkbox" v-model="s.rewrite"> {{ $t('retrieval.rewrite_enabled') }}</label>
+            </div>
+            <div class="row">
+              <label v-for="k in ['hyde','multi_query','step_back','decompose']" :key="k">
+                <input type="checkbox" v-model="s.methods[k]"> {{ $t('retrieval.method.' + k) }}
+              </label>
+            </div>
+            <div class="row">
+              <label>hyde α</label>
+              <input type="number" min="0" max="1" step="0.05" v-model.number="s.hydeAlpha">
+              <label>{{ $t('retrieval.n_variants') }}</label>
+              <input type="number" min="1" max="5" v-model.number="s.nVariants">
+              <span class="hint" v-if="numErrs.nVariants">{{ numErrs.nVariants }}</span>
+            </div>
+          </fieldset>
 
-      <div class="cap-group-title">{{ $t('retrieval.group.diversity') }}</div>
-      <div class="row">
-        <label><input type="checkbox" v-model="s.mmr"> mmr</label>
-        <label>λ</label>
-        <input type="number" min="0" max="1" step="0.05" v-model.number="s.mmrLambda">
-      </div>
-      <div class="row">
-        <label><input type="checkbox" v-model="s.rerank"> {{ $t('retrieval.cross_encoder') }}</label>
-        <label>{{ $t('retrieval.candidate_pool') }}</label>
-        <input type="number" min="1" max="64" v-model.number="s.candidatePool">
-        <span class="hint" v-if="numErrs.candidatePool">{{ numErrs.candidatePool }}</span>
-      </div>
+          <fieldset class="retrieval-fieldset">
+            <legend>{{ $t('retrieval.group.diversity') }}</legend>
+            <div class="row">
+              <label><input type="checkbox" v-model="s.mmr"> mmr</label>
+              <label>λ</label>
+              <input type="number" min="0" max="1" step="0.05" v-model.number="s.mmrLambda">
+            </div>
+          </fieldset>
 
-      <div class="cap-group-title">{{ $t('retrieval.group.context') }}</div>
-      <div class="row">
-        <label>{{ $t('retrieval.max_tokens') }}</label>
-        <input type="number" min="1" v-model.number="s.maxTokens"
-          :placeholder="$t('retrieval.max_tokens_ph')">
-        <span class="hint" v-if="numErrs.maxTokens">{{ numErrs.maxTokens }}</span>
-      </div>
-      <div class="row">
-        <label>doc_id</label>
-        <input v-model="s.docId" :placeholder="$t('retrieval.doc_id_ph')">
-        <label>filename</label>
-        <input v-model="s.filename" :placeholder="$t('retrieval.filename_ph')">
-      </div>
+          <fieldset class="retrieval-fieldset">
+            <legend>{{ $t('retrieval.group.rerank') }}</legend>
+            <div class="row">
+              <label><input type="checkbox" v-model="s.rerank"> {{ $t('retrieval.cross_encoder') }}</label>
+              <label>{{ $t('retrieval.candidate_pool') }}</label>
+              <input type="number" min="1" max="64" v-model.number="s.candidatePool">
+              <span class="hint" v-if="numErrs.candidatePool">{{ numErrs.candidatePool }}</span>
+            </div>
+          </fieldset>
+
+          <fieldset class="retrieval-fieldset">
+            <legend>{{ $t('retrieval.group.budget') }}</legend>
+            <div class="row">
+              <label>{{ $t('retrieval.max_tokens') }}</label>
+              <input type="number" min="1" v-model.number="s.maxTokens"
+                :placeholder="$t('retrieval.max_tokens_ph')">
+              <span class="hint" v-if="numErrs.maxTokens">{{ numErrs.maxTokens }}</span>
+            </div>
+          </fieldset>
+
+          <fieldset class="retrieval-fieldset">
+            <legend>{{ $t('retrieval.group.filter') }}</legend>
+            <div class="row">
+              <label>doc_id</label>
+              <input v-model="s.docId" :placeholder="$t('retrieval.doc_id_ph')">
+              <label>filename</label>
+              <input v-model="s.filename" :placeholder="$t('retrieval.filename_ph')">
+            </div>
+          </fieldset>
+        </div>
+      </details>
+      </template>
       </template>
 
       <div class="actions">
@@ -364,6 +430,11 @@ export default defineComponent({
           <span v-if="s.busy" class="btn-spinner"></span>
           {{ s.busy ? $t('retrieval.running') : $t('retrieval.run') }}
         </button>
+        <!-- The stream can run for seconds; abort mid-flight instead of
+             waiting it out. -->
+        <button v-if="s.busy" class="btn" id="btn-retrieval-cancel" @click="cancelRun">
+          {{ $t('retrieval.cancel') }}
+        </button>
       </div>
 
       <div v-if="s.stages.length" class="response retrieval-progress">
@@ -373,15 +444,15 @@ export default defineComponent({
         </span>
       </div>
 
-      <div v-if="s.error" class="response ingest-result-err">
-        <div class="result-banner err">
-          <span class="result-glyph err">!</span>
-          <span class="result-banner-text">{{ s.error }}</span>
-        </div>
-      </div>
+      <status-banner kind="info" :text="s.notice" />
+      <status-banner kind="error" :text="s.error" :retry="run" />
 
       <div v-if="s.result" class="retrieval-results">
-        <div v-for="(c, i) in s.result.chunks" :key="c.chunk_id" class="retrieval-chunk">
+        <!-- Zero hits is a normal outcome and used to render just the
+             trace toggle with nothing under it. -->
+        <empty-state v-if="!(s.result.chunks || []).length" state="empty"
+                     :text="$t('retrieval.no_hits')" />
+        <div v-for="(c, i) in (s.result.chunks || [])" :key="c.chunk_id" class="retrieval-chunk">
           <div class="retrieval-chunk-head">
             <strong>#{{ i + 1 }}</strong>
             <span v-for="ch in c.matched_channels" :key="ch" class="pill accent">{{ ch }}</span>
@@ -407,9 +478,13 @@ export default defineComponent({
           </div>
         </div>
 
-        <div class="retrieval-trace-toggle" @click="s.showTrace = !s.showTrace">
-          {{ s.showTrace ? '▾' : '▸' }} {{ $t('retrieval.trace') }}
-        </div>
+        <!-- Button, not a clickable div: real focus stop + expanded state
+             for assistive tech (S7). -->
+        <button type="button" class="retrieval-trace-toggle"
+                :aria-expanded="s.showTrace ? 'true' : 'false'"
+                @click="s.showTrace = !s.showTrace">
+          <span aria-hidden="true">{{ s.showTrace ? '▾' : '▸' }}</span> {{ $t('retrieval.trace') }}
+        </button>
         <div v-if="s.showTrace" class="retrieval-trace">
           <div class="stat" v-for="(tr, i) in s.result.traces" :key="i">
             <span class="key">{{ stageLabel(tr.stage) }}</span>

@@ -7,7 +7,7 @@
 // stage / progress then a terminal result/error event.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
 import { api, enc, extractApiError, t, modelsByType, refreshModels as loadModels } from './app.js';
-import { intError } from './util.js';
+import { intError, copyText } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 import { renderMarkdown } from './markdown.js';
 import ParserProfileCards from './parser-cards.js';
@@ -84,29 +84,6 @@ function formatCount(n) {
   return n == null ? '—' : Number(n).toLocaleString();
 }
 
-// Clipboard API is unavailable in non-secure contexts (plain http);
-// fall back to a hidden textarea + execCommand. Returns success.
-function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text).then(() => true).catch(() => {
-      legacyCopy(text);
-      return true;
-    });
-  }
-  legacyCopy(text);
-  return Promise.resolve(true);
-}
-function legacyCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.select();
-  try { document.execCommand('copy'); } catch (_) {}
-  document.body.removeChild(ta);
-}
-
 export default defineComponent({
   name: 'KnowledgeBasePanel',
   components: { StatusBanner, BusyButton, EmptyState, ParserProfileCards, UiPager },
@@ -151,7 +128,7 @@ export default defineComponent({
     }
     const parseFile = ref(null);
     const parseResult = ref(null);
-    const parseCopied = ref(false);
+    const parseCopy = ref('');      // '' | 'ok' | 'err' — flashes on the button
     // Result-pane toggle over the parsed markdown:
     // 'source' (raw markdown in a <pre>) | 'preview' (rendered HTML).
     const parseView = ref('source');
@@ -206,7 +183,7 @@ export default defineComponent({
     const ingestElapsed = ref(0);
     const ingestError = ref(null);          // { code, message }
     const ingestMeta = ref(null);           // { database, collection, model, filename, sizeBytes, durationMs }
-    const docIdCopied = ref(false);
+    const docIdCopy = ref('');      // '' | 'ok' | 'err' — flashes on the button
     let ingestTimer = null;
 
     // Ingested-chunks browser state (view === 'ingested'). The rows
@@ -226,11 +203,58 @@ export default defineComponent({
     // empty state then says "ingest a document first" instead of
     // showing a raw 404.
     const viewNoColl = ref(false);
-    const copiedChunkDoc = ref('');
+    // Which group header's copy button last flashed, and whether the
+    // clipboard actually took (plain http has no Clipboard API).
+    const chunkDocCopy = ref({ id: '', ok: false });
     // Per-card "show full text" toggles. Chunk bodies now flow with
     // the page (no nested scrollbar); only super-long ones clamp at
     // first with an expand button (keyed 'chunk:N' / 'ing:ID').
     const textExpanded = ref({});
+    // Body view for the ingested cards, mirroring the parse page's
+    // source/preview switch: raw markdown vs rendered output.
+    const chunkView = ref('source');
+
+    // Per-group fold state for the by-doc grouping below, keyed by
+    // doc_id. Open by default: the page's job is showing the chunks;
+    // folding is for when several docs share a page and the operator
+    // wants to collapse the ones they are done with.
+    const docGroupsOpen = ref({});
+    function toggleDocGroup(id) {
+      // Negate the effective state, not the raw map slot: an untouched
+      // group reads as open (undefined), so `!undefined` would land on
+      // "open" again and swallow the first click.
+      docGroupsOpen.value = { ...docGroupsOpen.value, [id]: !docGroupOpen(id) };
+    }
+    // viewChunks is already sorted doc_id → chunk_index, so grouping is
+    // one pass keeping order. The group header is the only place that
+    // repeats the doc_id (was a row on every card).
+    const chunkGroups = computed(() => {
+      const groups = [];
+      const index = new Map();
+      for (const it of viewChunks.value) {
+        const f = (it && it.fields) || {};
+        const id = f.doc_id || '';
+        let g = index.get(id);
+        if (!g) {
+          g = { docId: id, filename: f.filename || '', items: [] };
+          index.set(id, g);
+          groups.push(g);
+        }
+        if (!g.filename && f.filename) g.filename = f.filename;
+        g.items.push(it);
+      }
+      return groups;
+    });
+    function docGroupOpen(id) { return docGroupsOpen.value[id] !== false; }
+    // Rendered HTML per chunk body for the preview tab; renderMarkdown
+    // escapes all input, so the values are safe to bind via v-html.
+    const chunkMdHtml = computed(() => {
+      const out = new Map();
+      for (const it of viewChunks.value) {
+        out.set(it.id, renderMarkdown((it.fields && it.fields.text) || ''));
+      }
+      return out;
+    });
 
     function escapeEq(s) {
       return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -320,10 +344,10 @@ export default defineComponent({
       loadChunks();
     }
     async function copyChunkDoc(id) {
-      try { await copyText(id); } catch (_e) { return; }
-      copiedChunkDoc.value = id;
+      const ok = await copyText(id);
+      chunkDocCopy.value = { id, ok };
       setTimeout(() => {
-        if (copiedChunkDoc.value === id) copiedChunkDoc.value = '';
+        if (chunkDocCopy.value.id === id) chunkDocCopy.value = { id: '', ok: false };
       }, 1600);
     }
 
@@ -707,11 +731,8 @@ export default defineComponent({
 
     async function copyParseMarkdown() {
       if (!parseResult.value) return;
-      try {
-        await copyText(parseOutput());
-      } catch (_e) { return; }
-      parseCopied.value = true;
-      setTimeout(() => { parseCopied.value = false; }, 1600);
+      parseCopy.value = (await copyText(parseOutput())) ? 'ok' : 'err';
+      setTimeout(() => { parseCopy.value = ''; }, 1600);
     }
 
     function downloadParseMarkdown() {
@@ -732,11 +753,8 @@ export default defineComponent({
 
     async function copyDocId() {
       if (!ingestResult.value || !ingestResult.value.doc_id) return;
-      try {
-        await copyText(ingestResult.value.doc_id);
-      } catch (_e) { return; }
-      docIdCopied.value = true;
-      setTimeout(() => { docIdCopied.value = false; }, 1600);
+      docIdCopy.value = (await copyText(ingestResult.value.doc_id)) ? 'ok' : 'err';
+      setTimeout(() => { docIdCopy.value = ''; }, 1600);
     }
 
     function stageState(key) {
@@ -823,7 +841,7 @@ export default defineComponent({
       ingestStage.value = 'uploading';
       uploadPct.value = 0;
       ingestElapsed.value = 0;
-      docIdCopied.value = false;
+      docIdCopy.value = '';
       const startedAt = performance.now();
       ingestTimer = setInterval(() => {
         ingestElapsed.value = (performance.now() - startedAt) / 1000;
@@ -884,13 +902,13 @@ export default defineComponent({
 
     return { status, statusBannerKind, statusBannerText, parserStatus, refreshParserStatus,
              formErr, dbsErr, modelsErr, parserErr, chunkBusy,
-             parseFile, parseResult, parseCopied, chunkSize, chunkOverlap, chunkMd, chunkResults,
+             parseFile, parseResult, parseCopy, chunkSize, chunkOverlap, chunkMd, chunkResults,
              chunkStrategy, chunkPercentile, chunkAddContext,
              chunkSizeErr, chunkOverlapErr, chunkPercentileErr, canChunk,
              ingestSizeErr, ingestOverlapErr, ingestPercentileErr, canIngest,
              dbs, db, models, model, ingestFile, chunkParams, metadata, ingestResult,
              ingestBusy, ingestStage, ingestFailedStage, ingestParsePages, uploadPct, ingestElapsed,
-             ingestError, ingestMeta, docIdCopied,
+             ingestError, ingestMeta, docIdCopy,
              parseView, renderedMarkdown, parseProfile, parseStats,
              parseBusy, parseStage, parseUploadPct, parseElapsed, parseProgress, parseError,
              ingestProfile,
@@ -903,7 +921,8 @@ export default defineComponent({
              STAGES, INGEST_ACCEPT, PROFILES, STRATEGIES,
              viewChunks, viewTotal, viewOffset, viewPageSize,
              viewDocId, viewNameKw, viewBusy, viewError, viewNoColl,
-             viewPage, viewPages, copiedChunkDoc,
+             viewPage, viewPages, chunkDocCopy,
+             chunkView, chunkGroups, docGroupOpen, toggleDocGroup, chunkMdHtml,
              textExpanded, chunkTextLong, chunkTextClamped, toggleChunkText,
              refreshDbs, refreshModels,
              loadChunks, chunksQuery, chunksReset,
@@ -998,15 +1017,17 @@ export default defineComponent({
           <div class="response-head">
             <div class="seg-toggle" role="tablist">
               <button type="button" class="btn sm" id="btn-parse-source"
+                      role="tab" :aria-selected="parseView === 'source'"
                       :class="{ primary: parseView === 'source' }"
                       @click="parseView = 'source'">{{ $t('kb.source') }}</button>
               <button type="button" class="btn sm" id="btn-parse-preview"
+                      role="tab" :aria-selected="parseView === 'preview'"
                       :class="{ primary: parseView === 'preview' }"
                       @click="parseView = 'preview'">{{ $t('kb.preview') }}</button>
             </div>
             <span class="head-actions">
               <button class="btn sm" id="btn-parse-copy" @click="copyParseMarkdown">
-                {{ parseCopied ? $t('kb.copied') : $t('kb.copy') }}
+                {{ parseCopy === 'ok' ? $t('kb.copied') : (parseCopy === 'err' ? $t('common.copy_failed') : $t('kb.copy')) }}
               </button>
               <button class="btn sm" id="btn-parse-download" @click="downloadParseMarkdown">
                 {{ $t('kb.download_md') }}
@@ -1298,7 +1319,7 @@ export default defineComponent({
             <span class="ingest-docid-key">{{ $t('ingest.doc_id') }}</span>
             <code class="ingest-docid-val" :title="ingestResult.doc_id">{{ ingestResult.doc_id }}</code>
             <button class="btn sm" id="btn-ingest-copy-docid" @click="copyDocId">
-              {{ docIdCopied ? $t('ingest.copied') : $t('ingest.copy') }}
+              {{ docIdCopy === 'ok' ? $t('ingest.copied') : (docIdCopy === 'err' ? $t('common.copy_failed') : $t('ingest.copy')) }}
             </button>
           </div>
 
@@ -1346,7 +1367,21 @@ export default defineComponent({
         <div class="response" id="chunks-result">
           <div class="response-head">
             <span>{{ $t('chunks.count') }}: {{ formatCount(viewTotal) }}</span>
-            <span v-if="viewBusy" class="spinner"></span>
+            <span class="head-actions">
+              <!-- Same dual view as the parse result: raw markdown vs
+                   rendered output, applied to every card body. -->
+              <div class="seg-toggle" role="tablist">
+                <button type="button" class="btn sm" id="btn-chunk-source"
+                        role="tab" :aria-selected="chunkView === 'source'"
+                        :class="{ primary: chunkView === 'source' }"
+                        @click="chunkView = 'source'">{{ $t('kb.source') }}</button>
+                <button type="button" class="btn sm" id="btn-chunk-preview"
+                        role="tab" :aria-selected="chunkView === 'preview'"
+                        :class="{ primary: chunkView === 'preview' }"
+                        @click="chunkView = 'preview'">{{ $t('kb.preview') }}</button>
+              </div>
+              <span v-if="viewBusy" class="spinner"></span>
+            </span>
           </div>
 
           <!-- Four states: the missing-collection case and the failed
@@ -1367,31 +1402,58 @@ export default defineComponent({
               <div class="stat"><span class="key">{{ $t('chunks.stat_returned') }}</span><span class="val">{{ viewChunks.length }}</span></div>
             </div>
 
-            <div v-for="it in viewChunks" :key="it.id" class="field-card">
-              <div class="field-card-header">
-                <span class="index-badge">#{{ it.fields && it.fields.chunk_index }}</span>
-                <span class="title">{{ $t('kb.chars_tokens', { chars: (it.fields && it.fields.text ? it.fields.text.length : 0), tokens: it.fields && it.fields.token_count }) }}</span>
-                <span v-if="it.fields && it.fields.section_header" class="hint">{{ it.fields.section_header }}</span>
-                <span v-if="it.fields && it.fields.page_number != null" class="hint">{{ $t('kb.page', { n: it.fields.page_number }) }}</span>
-                <span v-if="it.fields && it.fields.filename" class="hint">{{ it.fields.filename }}</span>
-              </div>
-              <pre class="code-pane chunk-text"
-                   :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }">{{ (it.fields && it.fields.text) || '' }}</pre>
-              <button v-if="chunkTextLong((it.fields && it.fields.text) || '')" type="button"
-                      class="btn sm chunk-expand"
-                      :aria-expanded="!chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')"
-                      @click="toggleChunkText('ing:' + it.id)">
-                {{ chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')
-                   ? $t('kb.expand_full') : $t('kb.collapse') }}
-              </button>
-              <div class="chunks-docid">
-                <span class="hint">doc_id</span>
-                <code :title="it.fields && it.fields.doc_id">{{ it.fields && it.fields.doc_id }}</code>
-                <button class="btn sm" @click="copyChunkDoc(it.fields && it.fields.doc_id)">
-                  {{ copiedChunkDoc === (it.fields && it.fields.doc_id)
-                     ? $t('ingest.copied') : $t('ingest.copy') }}
+            <div v-for="g in chunkGroups" :key="g.docId" class="doc-group">
+              <!-- One doc_id row per document (was one per card): fold
+                   caret, file name, chunk count, copyable id. -->
+              <div class="doc-group-head">
+                <button type="button" class="doc-fold" :aria-expanded="docGroupOpen(g.docId)"
+                        :aria-label="docGroupOpen(g.docId) ? $t('kb.collapse') : $t('kb.expand_doc')"
+                        @click="toggleDocGroup(g.docId)">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M6 3l5 5-5 5"/>
+                  </svg>
                 </button>
+                <span class="title" :title="g.filename || g.docId">{{ g.filename || g.docId }}</span>
+                <span class="hint">{{ $t('kb.doc_chunks', { n: g.items.length }) }}</span>
+                <span class="chunks-docid">
+                  <span class="hint">doc_id</span>
+                  <code :title="g.docId">{{ g.docId }}</code>
+                  <button class="btn sm" @click="copyChunkDoc(g.docId)">
+                    {{ chunkDocCopy.id === g.docId
+                       ? (chunkDocCopy.ok ? $t('ingest.copied') : $t('common.copy_failed'))
+                       : $t('ingest.copy') }}
+                  </button>
+                </span>
               </div>
+
+              <template v-if="docGroupOpen(g.docId)">
+                <div v-for="it in g.items" :key="it.id" class="field-card">
+                  <!-- Row 1: file name › section path breadcrumb.
+                       Row 2: chunk #, chars/tokens, page — meta, muted. -->
+                  <div class="field-card-header">
+                    <span class="title crumb" :title="(it.fields && it.fields.filename) || ''">{{ (it.fields && it.fields.filename) || '—' }}</span>
+                    <span v-if="it.fields && it.fields.section_header" class="hint crumb-path" :title="it.fields.section_header">› {{ it.fields.section_header }}</span>
+                  </div>
+                  <div class="field-card-meta">
+                    <span class="index-badge">#{{ it.fields && it.fields.chunk_index }}</span>
+                    <span class="hint">{{ $t('kb.chars_tokens', { chars: (it.fields && it.fields.text ? it.fields.text.length : 0), tokens: it.fields && it.fields.token_count }) }}</span>
+                    <span v-if="it.fields && it.fields.page_number != null" class="hint">{{ $t('kb.page', { n: it.fields.page_number }) }}</span>
+                  </div>
+                  <pre v-if="chunkView === 'source'" class="code-pane chunk-text"
+                       :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }">{{ (it.fields && it.fields.text) || '' }}</pre>
+                  <!-- chunkMdHtml is HTML-escaped by markdown.js before v-html -->
+                  <div v-else class="md-preview chunk-md"
+                       :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }"
+                       v-html="chunkMdHtml.get(it.id)"></div>
+                  <button v-if="chunkTextLong((it.fields && it.fields.text) || '')" type="button"
+                          class="btn sm chunk-expand"
+                          :aria-expanded="!chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')"
+                          @click="toggleChunkText('ing:' + it.id)">
+                    {{ chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')
+                       ? $t('kb.expand_full') : $t('kb.collapse') }}
+                  </button>
+                </div>
+              </template>
             </div>
 
             <ui-pager root-id="chunks-pager"

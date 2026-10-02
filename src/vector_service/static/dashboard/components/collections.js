@@ -3,6 +3,14 @@ import { defineComponent, ref, computed, watch, onMounted, onUnmounted } from '.
 import { t, store, api, enc, extractApiError } from './app.js';
 import { StatusBanner, BusyButton, EmptyState, askConfirm } from './feedback.js';
 
+// Quick-fill params for the new-index form: the two shapes operators
+// actually tune, offered as one-click templates instead of a blank
+// JSON box everyone has to look up.
+const INDEX_PARAM_TEMPLATES = {
+  hnsw: { M: 16, efConstruction: 200 },
+  ivf: { nlist: 128 },
+};
+
 export default defineComponent({
   name: 'CollectionsPanel',
   setup() {
@@ -189,6 +197,14 @@ export default defineComponent({
       opMsg.value = t(key);
     }
 
+    function fillIndexParams(name, which) {
+      const form = newIndex.value[db.value + '::' + name];
+      if (!form) return;
+      form.params = which === 'clear'
+        ? '{}'
+        : JSON.stringify(INDEX_PARAM_TEMPLATES[which], null, 2);
+    }
+
     function submitNewIndex(coll) {
       const form = newIndex.value[db.value + '::' + coll];
       if (!form) return;
@@ -242,7 +258,8 @@ export default defineComponent({
       store,
       db, dbs, colls, detailCache, detailErr, newIndex, expanded, loadErr,
       opKind, opMsg, busyKey, refreshDbs, reloadDbs, refreshColls, reloadColls,
-             toggleDetail, reloadDetail, dropColl, dropIndex, createIndex, submitNewIndex };
+             toggleDetail, reloadDetail, dropColl, dropIndex, createIndex, submitNewIndex,
+      fillIndexParams };
   },
   components: { StatusBanner, BusyButton, EmptyState },
   template: `
@@ -377,9 +394,11 @@ export default defineComponent({
                     <div class="body">
                       <div class="row">
                         <label>{{ $t('collections.target_field') }}</label>
-                        <select data-new-index-field v-model="newIndex[db + '::' + name].field">
-                          <option :value="newIndex[db + '::' + name].field">{{ newIndex[db + '::' + name].field }} {{ $t('collections.vector_field_suffix') }}</option>
-                        </select>
+                        <!-- The target is always the collection's vector
+                             field: the old single-option select implied a
+                             choice that does not exist (stage 3). -->
+                        <span class="ops-mono" data-new-index-field>{{ newIndex[db + '::' + name].field }}</span>
+                        <span class="hint">{{ $t('collections.vector_field_suffix') }}</span>
                       </div>
                       <div class="row split">
                         <div class="row"><label>{{ $t('common.metric') }}</label>
@@ -401,6 +420,14 @@ export default defineComponent({
                       </div>
                       <div class="row">
                         <label>params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
+                        <div class="actions" style="margin:0 0 6px;">
+                          <button type="button" class="btn sm" data-tpl-hnsw
+                                  @click="fillIndexParams(name, 'hnsw')">{{ $t('collections.tpl_hnsw') }}</button>
+                          <button type="button" class="btn sm" data-tpl-ivf
+                                  @click="fillIndexParams(name, 'ivf')">{{ $t('collections.tpl_ivf') }}</button>
+                          <button type="button" class="btn sm" data-tpl-clear
+                                  @click="fillIndexParams(name, 'clear')">{{ $t('collections.tpl_clear') }}</button>
+                        </div>
                         <textarea data-new-index-params rows="2" class="code-input"
                                   v-model="newIndex[db + '::' + name].params"></textarea>
                       </div>
