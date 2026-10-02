@@ -597,7 +597,7 @@ Milvus 行，同时 best-effort 删除 `<artifacts_dir>/<doc_id>/` 整个图片�
 | 文档解析 | `POST /v1/parse/stream` | 解析方案下拉（自动按类型/标准/原生/VLM），选中即显示方案介绍 + multipart 上传（字节 %）+ 逐页解析进度条 → 统计区（字符/页数/图片/表格/OCR 页数/耗时）+ Markdown 预览（图片可点开） |
 | 分片测试 | `POST /v1/chunk` | 策略下拉（5 种，semantic 显示百分位参数、显示上下文/摘要增强开关）+ Markdown 输入 → 可折叠 chunk 列表（含 token / 页码 / 章节 / 原文 / LLM 上下文前缀与摘要），不落库 |
 | 一键入库 | `POST /v1/jobs/ingest` + `GET /v1/jobs/{id}/events` | database/embed_model 联动选择 + 分片策略下拉（含策略参数与上下文/摘要增强）+ 解析方案下拉 + multipart 上传（支持图片文件，字节 %），提交后订阅 SSE `job` 帧渲染阶段进度 → 摄取结果统计；取消走 `POST /v1/jobs/{id}/cancel`（协作式，worker 在阶段边界停止） |
-| 入库浏览 | `POST /v1/databases/{db}/collections/ingest/rows` | 分页浏览已入库分片，支持按 doc_id 精确匹配 / 文件名关键字过滤 |
+| 入库浏览 | `POST /v1/databases/{db}/collections/ingest/rows` + `GET /v1/databases/{db}/collections/ingest/chunks/{chunk_id}` | 分页浏览已入库内容，支持按 doc_id 精确匹配 / 文件名关键字过滤。层级下拉默认「叶子分片」（`level=chunk`，即进 ANN 检索的那层；可切章节父级 / 文档根级）。点击叶子卡片弹出详情：正文 + 统计（序号/层级/tokens/页码/字符区间）+ 父级链（section → document 小到大上下文）+ 已登记索引（dense/sparse/summary） |
 
 ---
 

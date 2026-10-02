@@ -65,6 +65,9 @@ from vector_service.schemas.errors import ErrorEnvelope
 from vector_service.schemas.management import (
     BrowseRequest,
     BrowseResponse,
+    ChunkAncestorItem,
+    ChunkDetailResponse,
+    ChunkIndexItem,
     CollectionInfoResponse,
     CreateCollectionRequest,
     CreateDatabaseRequest,
@@ -893,7 +896,9 @@ async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request)
     # derived index — page over the corpus regardless of Milvus state.
     # filter_expr / output_fields from the body are not applied on this
     # path (the corpus serves its fixed content-field vocabulary); the
-    # dashboard sends neither.
+    # dashboard sends neither. ``level`` narrows the page to one
+    # hierarchy level — the browse UI defaults to the leaf ``chunk``
+    # level, which is exactly what the ANN index holds.
     is_corpus_collection = await run_in_sqlite(
         repo.is_corpus_collection, db, name
     )
@@ -902,6 +907,7 @@ async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request)
             functools.partial(
                 repo.browse, db, name,
                 limit=body.limit, offset=body.offset,
+                level=body.level,
             ),
         )
         total = int(total)
@@ -944,6 +950,43 @@ async def browse_rows(db: str, name: str, body: BrowseRequest, request: Request)
         offset=body.offset,
         returned=returned,
         has_more=has_more,
+    )
+
+
+@router.get(
+    "/databases/{db}/collections/{name}/chunks/{chunk_id}",
+    response_model=ChunkDetailResponse,
+    responses={
+        404: {"model": ErrorEnvelope, "description": "Chunk not found."},
+        503: {"model": ErrorEnvelope, "description": "Corpus store unavailable."},
+    },
+    summary="Corpus chunk detail (content + hierarchy + indexes)",
+    description=(
+        "Return one corpus content row with everything the browse UI "
+        "needs to explain it: the content fields plus `level` / "
+        "`parent_id` / `context`, the ancestor chain (its section parent "
+        "then the document root), and the derived-index registry rows "
+        "(dense / summary / sparse) the chunk is enrolled in. Corpus "
+        "collections only — the chunk id is looked up in the SQLite "
+        "system of record, never in the vector store."
+    ),
+)
+async def get_chunk_detail(db: str, name: str, chunk_id: str, request: Request):
+    repo = request.app.state.corpus
+    detail = await run_in_sqlite(
+        functools.partial(repo.get_chunk_detail, db, name, chunk_id),
+    )
+    if detail is None:
+        raise HTTPException(404, detail={"error": {
+            "code": "chunk_not_found",
+            "message": f"chunk {chunk_id!r} not found",
+            "chunk_id": chunk_id,
+        }})
+    return ChunkDetailResponse(
+        chunk_id=detail["chunk_id"],
+        fields=detail["fields"],
+        ancestors=[ChunkAncestorItem(**a) for a in detail["ancestors"]],
+        indexes=[ChunkIndexItem(**ix) for ix in detail["indexes"]],
     )
 
 

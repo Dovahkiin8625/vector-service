@@ -215,6 +215,49 @@ class FakeRepo:
         # These unit tests exercise the Milvus-backed browse path.
         return False
 
+    def browse(self, database, collection, *, limit, offset, level=None):
+        # Corpus-backed browse path: mirrors CorpusRepository.browse's
+        # (items, total) contract. Tests flip is_corpus_collection to
+        # reach this and then assert on the recorded level.
+        self.calls.append(("browse", database, collection, limit, offset, level))
+        return (
+            [
+                {"id": "leaf-0", "fields": {"text": "叶子一", "level": level or "chunk"}},
+                {"id": "leaf-1", "fields": {"text": "叶子二", "level": level or "chunk"}},
+            ],
+            2,
+        )
+
+    def get_chunk_detail(self, database, collection, chunk_id):
+        self.calls.append(("get_chunk_detail", database, collection, chunk_id))
+        if chunk_id == "missing":
+            return None
+        return {
+            "chunk_id": chunk_id,
+            "fields": {
+                "text": "叶子一", "level": "chunk",
+                "parent_id": "d1_sec", "context": None,
+            },
+            "ancestors": [
+                {
+                    "chunk_id": "d1_sec", "level": "section",
+                    "section_header": "引言", "text": "章节全文",
+                    "token_count": 30,
+                },
+                {
+                    "chunk_id": "d1_doc", "level": "document",
+                    "section_header": "", "text": "整篇文档",
+                    "token_count": 100,
+                },
+            ],
+            "indexes": [
+                {
+                    "index_kind": "dense", "model": "bge-m3",
+                    "index_ref": "ingest:vector", "created_ts": 1.0,
+                },
+            ],
+        }
+
     def corpus_collections(self, database):
         self.calls.append(("corpus_collections", database))
         return []
@@ -862,6 +905,76 @@ def test_browse_live_count_store_error_returns_422(client):
     )
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "invalid_request"
+
+
+# ---- corpus browse (level) + chunk detail ----
+
+def test_browse_corpus_backed_passes_level_to_repo(client):
+    """The dashboard leaf-only list: level rides through to the corpus
+    repo on the SQLite-backed path (never the Milvus one)."""
+    client.app.state.corpus.is_corpus_collection = lambda db, coll: True
+    r = client.post(
+        "/v1/databases/alpha/collections/ingest/rows",
+        json={"primary_field": "id", "limit": 10, "offset": 0, "level": "chunk"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2
+    assert body["returned"] == 2
+    assert body["items"][0]["fields"]["level"] == "chunk"
+    assert ("browse", "alpha", "ingest", 10, 0, "chunk") in client.app.state.corpus.calls
+    # The Milvus adapter is untouched on this path.
+    assert not any(c[0] == "browse" for c in client.app.state.store.calls)
+
+
+def test_browse_corpus_backed_without_level_pages_everything(client):
+    client.app.state.corpus.is_corpus_collection = lambda db, coll: True
+    r = client.post(
+        "/v1/databases/alpha/collections/ingest/rows",
+        json={"primary_field": "id"},
+    )
+    assert r.status_code == 200
+    assert ("browse", "alpha", "ingest", 20, 0, None) in client.app.state.corpus.calls
+
+
+def test_browse_level_not_in_vocabulary_rejected(client):
+    r = client.post(
+        "/v1/databases/alpha/collections/c1/rows",
+        json={"primary_field": "id", "level": "root"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_chunk_detail_happy_path(client):
+    r = client.get("/v1/databases/alpha/collections/ingest/chunks/leaf-0")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["chunk_id"] == "leaf-0"
+    assert body["fields"]["level"] == "chunk"
+    assert body["fields"]["parent_id"] == "d1_sec"
+    # Ancestors ordered parent → root.
+    assert [a["chunk_id"] for a in body["ancestors"]] == ["d1_sec", "d1_doc"]
+    assert [a["level"] for a in body["ancestors"]] == ["section", "document"]
+    assert body["ancestors"][0]["section_header"] == "引言"
+    assert body["indexes"] == [
+        {
+            "index_kind": "dense",
+            "model": "bge-m3",
+            "index_ref": "ingest:vector",
+            "created_ts": 1.0,
+        }
+    ]
+    assert ("get_chunk_detail", "alpha", "ingest", "leaf-0") in client.app.state.corpus.calls
+
+
+def test_chunk_detail_not_found(client):
+    r = client.get("/v1/databases/alpha/collections/ingest/chunks/missing")
+    assert r.status_code == 404
+    body = r.json()
+    assert body["error"]["code"] == "chunk_not_found"
+    # Non code/message fields ride the envelope's extra bag.
+    assert body["error"]["extra"]["chunk_id"] == "missing"
 
 
 # ---- delete (POST .../vectors/delete) — ids vs filter_expr ----

@@ -8,7 +8,7 @@
 // XHR submits POST /v1/jobs/ingest (202 + job_id), the run is then
 // followed over GET /v1/jobs/{id}/events (SSE `job` frames carrying
 // full JobStatus snapshots) and cancelled via POST /v1/jobs/{id}/cancel.
-import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
+import { defineComponent, ref, computed, onMounted, onUnmounted, watch } from '../vue.esm-browser.prod.js';
 import { api, enc, extractApiError, t, modelsByType, refreshModels as loadModels } from './app.js';
 import { intError, copyText } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
@@ -214,24 +214,35 @@ export default defineComponent({
     // collection is fixed to INGEST_COLLECTION and output fields are
     // pinned to the chunk schema; cards are re-sorted client-side by
     // doc_id then chunk_index because Milvus query order is unspecified.
+    // The list is leaf-first: retrieval only ever searches level=chunk
+    // rows, so that is what the browser pages over by default. The
+    // hierarchy parents (section / document) stay reachable one level
+    // away via the level selector — never mixed into the leaf count.
     const viewChunks = ref([]);
     const viewTotal = ref(0);
     const viewOffset = ref(0);
     const viewPageSize = ref(10);
     const viewDocId = ref('');        // exact doc_id == match
     const viewNameKw = ref('');       // filename like %keyword%
+    const viewLevel = ref('chunk');   // 'chunk' | 'section' | 'document'
     const viewBusy = ref(false);
     const viewError = ref('');
     // Set when the server reports the ingest collection missing: the
     // empty state then says "ingest a document first" instead of
     // showing a raw 404.
     const viewNoColl = ref(false);
+    // Leaf-detail dialog: opened by clicking a card, filled from
+    // GET .../chunks/{id} (content + parent chain + index registry).
+    const detailChunk = ref(null);    // ChunkDetailResponse payload
+    const detailBusy = ref(false);
+    const detailError = ref('');
     // Which group header's copy button last flashed, and whether the
     // clipboard actually took (plain http has no Clipboard API).
     const chunkDocCopy = ref({ id: '', ok: false });
-    // Per-card "show full text" toggles. Chunk bodies now flow with
-    // the page (no nested scrollbar); only super-long ones clamp at
-    // first with an expand button (keyed 'chunk:N' / 'ing:ID').
+    // Per-card "show full text" toggles for the 分片测试 results list,
+    // which has no detail dialog (keyed 'chunk:N'). 入库浏览 cards
+    // don't clamp-or-expand: they render a fixed excerpt and the full
+    // body lives in the leaf detail dialog (chunkTextPreview below).
     const textExpanded = ref({});
     // Body view for the ingested cards, mirroring the parse page's
     // source/preview switch: raw markdown vs rendered output.
@@ -271,10 +282,12 @@ export default defineComponent({
     function docGroupOpen(id) { return docGroupsOpen.value[id] !== false; }
     // Rendered HTML per chunk body for the preview tab; renderMarkdown
     // escapes all input, so the values are safe to bind via v-html.
+    // The list renders the same excerpt as the source tab — full text
+    // is the detail dialog's job.
     const chunkMdHtml = computed(() => {
       const out = new Map();
       for (const it of viewChunks.value) {
-        out.set(it.id, renderMarkdown((it.fields && it.fields.text) || ''));
+        out.set(it.id, renderMarkdown(chunkTextPreview((it.fields && it.fields.text) || '')));
       }
       return out;
     });
@@ -307,6 +320,7 @@ export default defineComponent({
         limit: viewPageSize.value,
         offset: viewOffset.value,
         output_fields: CHUNK_FIELDS,
+        level: viewLevel.value,
       };
       const filterExpr = buildChunkFilter();
       if (filterExpr) body.filter_expr = filterExpr;
@@ -343,6 +357,7 @@ export default defineComponent({
     function chunksReset() {
       viewDocId.value = '';
       viewNameKw.value = '';
+      viewLevel.value = 'chunk';
       viewOffset.value = 0;
       loadChunks();
     }
@@ -385,6 +400,22 @@ export default defineComponent({
     }
     function toggleChunkText(key) {
       textExpanded.value = { ...textExpanded.value, [key]: !textExpanded.value[key] };
+    }
+    // 入库浏览 list cards show only a fixed-size excerpt of each body —
+    // enough to recognise the chunk, not enough to scroll the list.
+    // The full body is one click away in the leaf detail dialog.
+    const CHUNK_EXCERPT_CHARS = 220;
+    function chunkTextPreview(s) {
+      s = s || '';
+      if (s.length <= CHUNK_EXCERPT_CHARS) return s;
+      // Prefer cutting at the last newline so the excerpt keeps whole
+      // lines; fall back to a hard slice for single-line bodies.
+      const head = s.slice(0, CHUNK_EXCERPT_CHARS);
+      const nl = head.lastIndexOf('\n');
+      return (nl > 60 ? head.slice(0, nl) : head).replace(/\s+$/, '') + '…';
+    }
+    function chunkTextExcerpted(s) {
+      return (s || '').length > CHUNK_EXCERPT_CHARS;
     }
 
     async function refreshDbs() {
@@ -457,9 +488,61 @@ export default defineComponent({
       if (v === 'parse') refreshParserStatus();
       if (v === 'ingested') { refreshDbs().finally(loadChunks); }
     });
-    // Re-query on db / page-size switches while the browser is open.
+    // Re-query on db / page-size / level switches while the browser is open.
     watch(db, () => { if (props.view === 'ingested') { viewOffset.value = 0; loadChunks(); } });
     watch(viewPageSize, () => { if (props.view === 'ingested') { viewOffset.value = 0; loadChunks(); } });
+    watch(viewLevel, () => { if (props.view === 'ingested') { viewOffset.value = 0; loadChunks(); } });
+
+    // Leaf detail dialog. Only leaves are listed, so every card can open
+    // one; the payload pulls the parent chain (section → document) and
+    // the derived-index registry so the row's place in the hierarchy is
+    // visible without paging the parents into the list.
+    async function openChunkDetail(item) {
+      detailChunk.value = {
+        chunk_id: item.id,
+        fields: (item && item.fields) || {},
+        ancestors: [],
+        indexes: [],
+      };
+      detailBusy.value = true;
+      detailError.value = '';
+      try {
+        const { payload } = await api(
+          'GET',
+          '/v1/databases/' + enc(db.value)
+            + '/collections/' + INGEST_COLLECTION
+            + '/chunks/' + enc(item.id),
+        );
+        detailChunk.value = payload;
+      } catch (e) {
+        detailError.value = extractApiError(e, 'unknown');
+      } finally {
+        detailBusy.value = false;
+      }
+    }
+    function closeChunkDetail() {
+      detailChunk.value = null;
+      detailError.value = '';
+    }
+    // Card-body click target. A drag-select inside the card ends with a
+    // click too — skip opening so copying text out of a card doesn't
+    // yank the dialog open over the selection.
+    function openChunkDetailFromCard(item) {
+      const sel = window.getSelection && window.getSelection();
+      if (sel && String(sel).length) return;
+      openChunkDetail(item);
+    }
+    // status-banner retry: re-fetch the chunk the dialog is showing.
+    function retryDetail() {
+      const cur = detailChunk.value;
+      if (cur) openChunkDetail({ id: cur.chunk_id, fields: cur.fields });
+    }
+    function onDetailKeydown(ev) {
+      if (!detailChunk.value) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); closeChunkDetail(); }
+    }
+    onMounted(() => window.addEventListener('keydown', onDetailKeydown));
+    onUnmounted(() => window.removeEventListener('keydown', onDetailKeydown));
 
     function onParseFile(ev) {
       parseFile.value = ev.target.files[0] || null;
@@ -1058,10 +1141,13 @@ export default defineComponent({
              formatBytes, formatDuration, formatCount,
              STAGES, INGEST_ACCEPT, PROFILES, STRATEGIES,
              viewChunks, viewTotal, viewOffset, viewPageSize,
-             viewDocId, viewNameKw, viewBusy, viewError, viewNoColl,
+             viewDocId, viewNameKw, viewLevel, viewBusy, viewError, viewNoColl,
              viewPage, viewPages, chunkDocCopy,
+             detailChunk, detailBusy, detailError,
+             openChunkDetail, openChunkDetailFromCard, closeChunkDetail, retryDetail,
              chunkView, chunkGroups, docGroupOpen, toggleDocGroup, chunkMdHtml,
              textExpanded, chunkTextLong, chunkTextClamped, toggleChunkText,
+             chunkTextPreview, chunkTextExcerpted,
              refreshDbs, refreshModels,
              loadChunks, chunksQuery, chunksReset,
              chunksFirst, chunksPrev, chunksNext, chunksLast, copyChunkDoc };
@@ -1484,6 +1570,13 @@ export default defineComponent({
               <option :value="10">10</option><option :value="20">20</option><option :value="50">50</option>
             </select>
           </div>
+          <div class="row"><label>{{ $t('chunks.level') }}</label>
+            <select id="chunks-level" v-model="viewLevel" :disabled="viewBusy">
+              <option value="chunk">{{ $t('chunks.level_chunk') }}</option>
+              <option value="section">{{ $t('chunks.level_section') }}</option>
+              <option value="document">{{ $t('chunks.level_document') }}</option>
+            </select>
+          </div>
         </div>
         <div class="row split">
           <div class="row"><label>{{ $t('chunks.doc_filter') }}</label>
@@ -1566,31 +1659,38 @@ export default defineComponent({
               </div>
 
               <template v-if="docGroupOpen(g.docId)">
-                <div v-for="it in g.items" :key="it.id" class="field-card">
+                <div v-for="it in g.items" :key="it.id" class="field-card chunk-card"
+                     role="button" tabindex="0"
+                     :aria-label="$t('chunks.detail')"
+                     @click="openChunkDetailFromCard(it)"
+                     @keyup.enter="openChunkDetail(it)">
                   <!-- Row 1: file name › section path breadcrumb.
-                       Row 2: chunk #, chars/tokens, page — meta, muted. -->
+                       Row 2: chunk #, chars/tokens, page — meta, muted.
+                       Click anywhere on the card opens the leaf detail
+                       dialog (parent chain + index registry); the inner
+                       buttons stop the click from bubbling up. -->
                   <div class="field-card-header">
                     <span class="title crumb" :title="(it.fields && it.fields.filename) || ''">{{ (it.fields && it.fields.filename) || '—' }}</span>
                     <span v-if="it.fields && it.fields.section_header" class="hint crumb-path" :title="it.fields.section_header">› {{ it.fields.section_header }}</span>
+                    <button class="btn sm chunk-detail-btn"
+                            :id="'btn-chunk-detail-' + it.id"
+                            @click.stop="openChunkDetail(it)">{{ $t('chunks.detail') }}</button>
                   </div>
                   <div class="field-card-meta">
                     <span class="index-badge">#{{ it.fields && it.fields.chunk_index }}</span>
                     <span class="hint">{{ $t('kb.chars_tokens', { chars: (it.fields && it.fields.text ? it.fields.text.length : 0), tokens: it.fields && it.fields.token_count }) }}</span>
                     <span v-if="it.fields && it.fields.page_number != null" class="hint">{{ $t('kb.page', { n: it.fields.page_number }) }}</span>
                   </div>
-                  <pre v-if="chunkView === 'source'" class="code-pane chunk-text"
-                       :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }">{{ (it.fields && it.fields.text) || '' }}</pre>
+                  <!-- Body is an excerpt of the chunk; the detail dialog
+                       (above the fold on every card) carries the rest. -->
+                  <pre v-if="chunkView === 'source'" class="code-pane chunk-text">{{ chunkTextPreview((it.fields && it.fields.text) || '') }}</pre>
                   <!-- chunkMdHtml is HTML-escaped by markdown.js before v-html -->
                   <div v-else class="md-preview chunk-md"
-                       :class="{ clamped: chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '') }"
                        v-html="chunkMdHtml.get(it.id)"></div>
-                  <button v-if="chunkTextLong((it.fields && it.fields.text) || '')" type="button"
-                          class="btn sm chunk-expand"
-                          :aria-expanded="!chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')"
-                          @click="toggleChunkText('ing:' + it.id)">
-                    {{ chunkTextClamped('ing:' + it.id, (it.fields && it.fields.text) || '')
-                       ? $t('kb.expand_full') : $t('kb.collapse') }}
-                  </button>
+                  <div v-if="chunkTextExcerpted((it.fields && it.fields.text) || '')"
+                       class="hint chunk-excerpt-hint">
+                    {{ $t('chunks.excerpt_more') }}
+                  </div>
                 </div>
               </template>
             </div>
@@ -1603,6 +1703,63 @@ export default defineComponent({
                       @first="chunksFirst" @prev="chunksPrev"
                       @next="chunksNext" @last="chunksLast" />
           </template>
+        </div>
+
+        <!-- Leaf detail dialog: this chunk's content fields, its parent
+             chain (section → document) and the derived indexes it is
+             registered in. The list itself stays leaf-only. -->
+        <div v-if="detailChunk" class="modal-overlay" id="modal-chunk-detail"
+             @click.self="closeChunkDetail">
+          <div class="modal modal--wide" role="dialog" aria-modal="true"
+               aria-labelledby="modal-chunk-detail-title">
+            <header class="modal-head">
+              <h3 id="modal-chunk-detail-title">{{ $t('chunks.detail_title') }}
+                <span class="pill accent">{{ detailChunk.chunk_id }}</span>
+              </h3>
+              <button class="modal-close" @click="closeChunkDetail"
+                      :aria-label="$t('common.close')">x</button>
+            </header>
+            <div class="modal-body">
+              <empty-state v-if="detailBusy" state="loading" />
+              <status-banner v-else-if="detailError" kind="error" :text="detailError"
+                             :retry="retryDetail" />
+              <template v-else>
+                <div class="kb-result" id="chunk-detail-stats">
+                  <div class="stat"><span class="key">{{ $t('chunks.detail_index') }}</span><span class="val accent">#{{ detailChunk.fields.chunk_index }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('chunks.detail_level') }}</span><span class="val">{{ detailChunk.fields.level }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('chunks.detail_tokens') }}</span><span class="val">{{ detailChunk.fields.token_count }}</span></div>
+                  <div class="stat" v-if="detailChunk.fields.page_number != null"><span class="key">{{ $t('chunks.detail_page') }}</span><span class="val">{{ detailChunk.fields.page_number }}</span></div>
+                  <div class="stat"><span class="key">{{ $t('chunks.detail_span') }}</span><span class="val">{{ detailChunk.fields.char_start }}–{{ detailChunk.fields.char_end }}</span></div>
+                </div>
+
+                <h4 class="cap-group-title">{{ $t('chunks.detail_text') }}</h4>
+                <pre class="code-pane chunk-text" id="chunk-detail-text">{{ detailChunk.fields.text || '' }}</pre>
+
+                <h4 class="cap-group-title">{{ $t('chunks.detail_ancestors') }}</h4>
+                <div v-if="!detailChunk.ancestors.length" class="hint" id="chunk-detail-no-ancestors">{{ $t('chunks.detail_no_ancestors') }}</div>
+                <div v-for="a in detailChunk.ancestors" :key="a.chunk_id" class="field-card ancestor-card">
+                  <div class="field-card-header">
+                    <span class="index-badge">{{ a.level }}</span>
+                    <span class="title crumb" :title="a.section_header || a.chunk_id">{{ a.section_header || a.chunk_id }}</span>
+                    <span class="hint">{{ $t('kb.chars_tokens', { chars: (a.text || '').length, tokens: a.token_count }) }}</span>
+                  </div>
+                  <pre class="code-pane chunk-text clamped">{{ a.text || '' }}</pre>
+                </div>
+
+                <h4 class="cap-group-title">{{ $t('chunks.detail_indexes') }}</h4>
+                <div v-if="!detailChunk.indexes.length" class="hint" id="chunk-detail-no-indexes">{{ $t('chunks.detail_no_indexes') }}</div>
+                <table v-else class="info-table" id="chunk-detail-indexes">
+                  <tr v-for="ix in detailChunk.indexes" :key="ix.index_kind">
+                    <th>{{ ix.index_kind }}</th>
+                    <td><code>{{ ix.model }}</code> · <code>{{ ix.index_ref }}</code></td>
+                  </tr>
+                </table>
+              </template>
+            </div>
+            <footer class="modal-foot">
+              <button class="btn" id="btn-chunk-detail-close" @click="closeChunkDetail">{{ $t('common.close') }}</button>
+            </footer>
+          </div>
         </div>
       </div>
 

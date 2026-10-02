@@ -201,6 +201,77 @@ def test_dashboard_ingest_panel_follows_job_events():
     assert ".is-failed .stage-dot" in _CSS
 
 
+def test_dashboard_ingested_view_defaults_to_leaves_with_detail_dialog():
+    """Retrieval only searches leaf chunks, so 入库浏览 lists leaves by
+    default (viewLevel='chunk'), and clicking a leaf opens a detail
+    dialog with its parent chain (section → document) and index rows."""
+    kb = (
+        _ST / "static" / "dashboard" / "components" / "knowledge-base.js"
+    ).read_text(encoding="utf-8")
+    # Leaf-only default + level selector.
+    assert "viewLevel = ref('chunk')" in kb
+    assert 'id="chunks-level"' in kb
+    assert "level: viewLevel.value" in kb
+    # The detail dialog + its fetch endpoint (corpus route).
+    assert 'id="modal-chunk-detail"' in kb
+    assert "openChunkDetail" in kb
+    assert "'/chunks/'" in kb
+    # Parent chain + index registry sections inside the dialog.
+    assert 'id="chunk-detail-stats"' in kb
+    assert "detailChunk.ancestors" in kb
+    assert 'id="chunk-detail-indexes"' in kb
+    # Escape closes; the fetch has an error state with retry.
+    assert "onDetailKeydown" in kb
+    assert "retryDetail" in kb
+    # i18n keys exist in both dictionaries (the i18n parity suite
+    # covers every key; pin the pair this dialog introduces).
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert app_js.count("chunks.detail_ancestors") == 2  # zh + en
+    assert app_js.count("chunks.level_chunk") == 2
+    # Dialog + clickable-card styles.
+    assert ".chunk-card" in _CSS
+    assert ".ancestor-card" in _CSS
+    assert ".chunk-detail-btn" in _CSS
+
+
+def test_dashboard_ingested_list_shows_chunk_excerpts():
+    """入库浏览 list cards show only an excerpt of each chunk body; the
+    full body is the detail dialog's job (``#chunk-detail-text``).
+
+    The excerpt applies to both body tabs (raw source and rendered
+    markdown), and truncated cards end with a hint pointing at the
+    dialog instead of an in-list expand toggle — long-text expansion
+    stays on the 分片测试 results, which have no dialog."""
+    kb = (
+        _ST / "static" / "dashboard" / "components" / "knowledge-base.js"
+    ).read_text(encoding="utf-8")
+    # Excerpt helper + its "was anything cut" flag.
+    assert "chunkTextPreview" in kb
+    assert "chunkTextExcerpted" in kb
+    assert "CHUNK_EXCERPT_CHARS" in kb
+    # The list body binds the excerpt, never the raw text — both tabs.
+    assert "chunkTextPreview((it.fields && it.fields.text) || '')" in kb
+    assert "renderMarkdown(chunkTextPreview(" in kb
+    # The raw full text survives only inside the detail dialog.
+    assert "id=\"chunk-detail-text\">{{ detailChunk.fields.text || '' }}" in kb
+    # Truncated cards point at the dialog; the ingested list no longer
+    # clamps/expands in place ('ing:' toggles are gone).
+    assert "chunkTextExcerpted((it.fields && it.fields.text) || '')" in kb
+    assert "$t('chunks.excerpt_more')" in kb
+    assert "toggleChunkText('ing:'" not in kb
+    assert "chunkTextClamped('ing:'" not in kb
+    # The 分片测试 results keep their expand toggle (keyed 'chunk:N').
+    assert "toggleChunkText('chunk:'" in kb
+    # Hint styling + i18n pair.
+    assert ".chunk-excerpt-hint" in _CSS
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert app_js.count("chunks.excerpt_more") == 2  # zh + en
+
+
 def test_dashboard_exposes_browse_panel():
     """BrowsePanel renders the paginated table + pager."""
     assert _has('data-view="browse"')

@@ -178,6 +178,7 @@ class RetrievalPipeline:
         embedder: Any,
         reranker: Any,
         repo: Any = None,
+        bm25: Any = None,
         chat_getter: Callable = get_chat_client,
         chat_check: Callable = is_llm_configured,
     ):
@@ -186,6 +187,7 @@ class RetrievalPipeline:
         self._embedder = embedder
         self._reranker = reranker
         self._repo = repo
+        self._bm25 = bm25
         self._chat_getter = chat_getter
         self._chat_check = chat_check
 
@@ -245,8 +247,9 @@ class RetrievalPipeline:
 
         # Summary leg needs the summary_vector field; graph legs need the
         # two derived graph collections (plus graph rows when the repo is
-        # attached).
+        # attached). The bm25 leg needs the sparse float vector field.
         summary_available = "summary_vector" in field_names
+        sparse_available = _SPARSE_FIELD in field_names
         entity_coll, community_coll = graph_collection_names(req.collection)
         try:
             coll_names = await loop.run_in_executor(
@@ -260,6 +263,24 @@ class RetrievalPipeline:
                 None, self._repo.graph_stats, req.database, req.collection
             )
             graph_available = int(stats["entities_count"]) > 0
+
+        # Explicit bm25 on a collection without the sparse field is a
+        # client error (send channels.bm25=false); the routing mode picks
+        # channels itself and drops the leg instead (best-effort).
+        if not req.routing.enabled and req.channels.bm25:
+            if not sparse_available:
+                raise _http(
+                    422, "retrieval_channel_unsupported",
+                    f"collection {physical!r} has no {_SPARSE_FIELD!r} field; "
+                    "the bm25 channel needs a SPARSE_FLOAT_VECTOR index "
+                    "(send channels.bm25=false to run dense-only)",
+                    channels=["bm25"],
+                )
+            if self._bm25 is None:
+                raise _http(
+                    503, "bm25_unavailable",
+                    "client-side BM25 encoder is not loaded",
+                )
 
         if req.rerank.enabled and (
             self._reranker is None or getattr(self._reranker, "_impl", None) is None
@@ -283,6 +304,7 @@ class RetrievalPipeline:
             "rewrite_on": rewrite_on,
             "output_fields": output_fields,
             "summary_available": summary_available,
+            "sparse_available": sparse_available,
             "graph_available": graph_available,
             "physical": physical,
         }
@@ -650,9 +672,16 @@ class RetrievalPipeline:
         if req.routing.enabled:
             decision = ctx["decision"]
             use_dense = bool(decision.dense)
-            use_bm25 = bool(decision.bm25)
+            use_bm25 = bool(decision.bm25 and ctx["sparse_available"])
             use_summary = bool(decision.summary and ctx["summary_available"])
             use_graph = bool(decision.graph and ctx["graph_available"])
+        if use_bm25 and self._bm25 is None:
+            # Explicit channels are rejected in validate(); this catches
+            # a routed decision that picked bm25 without an encoder.
+            raise _http(
+                503, "bm25_unavailable",
+                "client-side BM25 encoder is not loaded",
+            )
 
         output_fields = ctx["output_fields"]
         physical = ctx["physical"]
@@ -671,7 +700,9 @@ class RetrievalPipeline:
         dense_ch = DenseChannel(self._store, req.database, physical,
                                 self._embedder, _VECTOR_FIELD)
         bm25_ch = BM25Channel(self._store, req.database, physical,
-                              _SPARSE_FIELD)
+                              self._bm25, repo=self._repo,
+                              logical_collection=req.collection,
+                              sparse_field=_SPARSE_FIELD)
         summary_ch = SummaryChannel(self._store, req.database, physical,
                                     self._embedder)
         # (channel, query, awaitable): legs are scheduled as before,

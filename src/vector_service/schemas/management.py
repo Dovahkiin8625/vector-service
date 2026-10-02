@@ -636,6 +636,17 @@ class BrowseRequest(BaseModel):
             "included regardless."
         ),
     )
+    level: str | None = Field(
+        default=None,
+        pattern="^(chunk|section|document)$",
+        description=(
+            "Corpus collections only: restrict the page to one "
+            "hierarchy level of the ingested content tree — ``chunk`` "
+            "(leaf, the only rows that enter the ANN index), "
+            "``section`` or ``document`` (parents). ``None`` returns "
+            "every content row. Ignored for non-corpus collections."
+        ),
+    )
 
 
 class BrowseResponse(BaseModel):
@@ -665,6 +676,43 @@ class BrowseResponse(BaseModel):
             "returned < total``). On the last page this is False "
             "even if the page is non-empty."
         ),
+    )
+
+
+class ChunkAncestorItem(BaseModel):
+    """One parent row of a corpus chunk, from its section up to the root."""
+
+    chunk_id: str = Field(description="Parent row's chunk id.")
+    level: str = Field(description="Hierarchy level: `section` or `document`.")
+    section_header: str = Field(default="", description="Header path for sections; empty for the document root.")
+    text: str = Field(default="", description="Parent row's full content text.")
+    token_count: int = Field(default=0, description="Token count of the parent text.")
+
+
+class ChunkIndexItem(BaseModel):
+    """One derived-index registry row belonging to a chunk."""
+
+    index_kind: str = Field(description="`dense` / `sparse` / `summary`.")
+    model: str = Field(description="Model id that produced the index.")
+    index_ref: str = Field(description="Concrete index reference (`<collection>:<field>`).")
+    created_ts: float = Field(description="Unix timestamp of registration.")
+
+
+class ChunkDetailResponse(BaseModel):
+    """Response of `GET .../chunks/{chunk_id}` (corpus collections only)."""
+
+    chunk_id: str = Field(description="The requested chunk id.")
+    fields: dict = Field(
+        description=(
+            "Content fields of the row plus hierarchy columns "
+            "(`level` / `parent_id` / `context`)."
+        ),
+    )
+    ancestors: list[ChunkAncestorItem] = Field(
+        description="Parent chain ordered parent → root (section, then document)."
+    )
+    indexes: list[ChunkIndexItem] = Field(
+        description="Derived indexes this chunk is registered in."
     )
 
 

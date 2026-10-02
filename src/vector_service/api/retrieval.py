@@ -34,6 +34,7 @@ def _pipeline(request: Request) -> RetrievalPipeline:
         embedder=getattr(state, "embedder", None),
         reranker=getattr(state, "reranker", None),
         repo=getattr(state, "corpus", None),
+        bm25=getattr(state, "bm25", None),
     )
 
 

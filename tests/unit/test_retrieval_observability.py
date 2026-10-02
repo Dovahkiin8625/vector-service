@@ -25,6 +25,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 from tests.unit.test_retrieval_pipeline_advanced import (
     _INFO_FIELDS,
+    FakeBM25,
     FakeEmbedder,
     FakeSettings,
     FakeStore,
@@ -77,6 +78,7 @@ def _pipeline(*, reranker=None):
         store=store,
         embedder=FakeEmbedder(),
         reranker=reranker,
+        bm25=FakeBM25(),
     )
     return store, pipe
 
@@ -176,6 +178,9 @@ async def test_metrics_record_request_channel_and_fusion(recorded):
     before_hit_req = _value(
         "vs_retrieval_channel_hit_requests_total", channel="dense"
     )
+    before_hit_req_bm25 = _value(
+        "vs_retrieval_channel_hit_requests_total", channel="bm25"
+    )
 
     await pipe.retrieve(
         RetrievalRequest(query="季度营收", rerank={"enabled": False})
@@ -207,12 +212,10 @@ async def test_metrics_record_request_channel_and_fusion(recorded):
         - before_hit_req == 1
     )
     # Empty channel doesn't count as a per-request hit.
-    assert REGISTRY.get_sample_value(
-        "vs_retrieval_channel_hit_requests_total",
-        {"channel": "bm25"},
-    ) is None or _value(
-        "vs_retrieval_channel_hit_requests_total", channel="bm25"
-    ) == 0.0
+    assert (
+        _value("vs_retrieval_channel_hit_requests_total", channel="bm25")
+        - before_hit_req_bm25 == 0
+    )
 
 
 @async_test

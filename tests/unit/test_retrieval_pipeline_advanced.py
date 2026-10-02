@@ -49,7 +49,7 @@ class FakeStore:
         self._dense = list(dense_hits)
         self._text = list(text_hits)
         self.search_calls = []
-        self.text_calls = []
+        self.sparse_calls = []
 
     def list_collections(self, database):
         return list(self._collection_names)
@@ -71,13 +71,26 @@ class FakeStore:
             for hit_id, score, fields in self._dense
         ]
 
-    def search_text(self, db, coll, field, query, *, top_k=10,
-                    filter_expr=None, output_fields=None):
-        self.text_calls.append({"filter_expr": filter_expr})
+    def search_sparse(self, db, coll, field, query_sparse, *, top_k=10,
+                      filter_expr=None, output_fields=None):
+        self.sparse_calls.append({
+            "filter_expr": filter_expr,
+            "query_sparse": query_sparse,
+        })
         return [
             Hit(id=hit_id, score=score, fields=dict(fields))
             for hit_id, score, fields in self._text
         ]
+
+
+class FakeBM25:
+    def __init__(self):
+        self.queries = []
+
+    def encode_query(self, repo, database, logical_collection,
+                     physical_collection, query):
+        self.queries.append(query)
+        return {3: 1.5}
 
 
 class FakeEmbedder:
@@ -117,13 +130,14 @@ _INFO_FIELDS = [
 _INFO_FIELDS_SUMMARY = _INFO_FIELDS + [{"name": "summary_vector"}]
 
 
-def _pipe(store, *, repo=None, reranker=None, **kwargs):
+def _pipe(store, *, repo=None, reranker=None, bm25=None, **kwargs):
     return RetrievalPipeline(
         settings=FakeSettings(),
         store=store,
         embedder=FakeEmbedder(),
         reranker=reranker,
         repo=repo,
+        bm25=FakeBM25() if bm25 is None else bm25,
         **kwargs,
     )
 
@@ -170,6 +184,24 @@ async def test_graph_intent_without_graph_index_skips_graph_leg():
     assert result.route.graph is True
     channels = {run.channel for run in result.channel_runs}
     assert "graph" not in channels
+    assert channels == {"dense"}
+
+
+@async_test
+async def test_routing_drops_bm25_leg_without_sparse_field():
+    # Routing degrades best-effort: a collection without the sparse
+    # field loses the bm25 leg instead of failing the request.
+    store = FakeStore(
+        info_fields=[{"name": "id"}, {"name": "text"}],
+        dense_hits=[("d1_0", 0.9, {"text": "x"})],
+    )
+    pipe = _pipe(store)
+    result = await pipe.retrieve(
+        _req("季度营收", routing={"enabled": True},
+             rerank={"enabled": False}),
+    )
+    assert result.route.bm25 is True
+    channels = {run.channel for run in result.channel_runs}
     assert channels == {"dense"}
 
 

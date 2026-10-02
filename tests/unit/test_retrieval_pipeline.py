@@ -27,10 +27,13 @@ _SPARSE_INFO_FIELDS = [
 
 
 class FakeStore:
-    def __init__(self, collection_names=()):
+    def __init__(self, collection_names=(), info_fields=None):
         self.collection_names = list(collection_names)
+        self.info_fields = list(
+            _SPARSE_INFO_FIELDS if info_fields is None else info_fields
+        )
         self.search_calls = []
-        self.text_calls = []
+        self.sparse_calls = []
 
     def list_collections(self, database):
         return list(self.collection_names)
@@ -38,7 +41,7 @@ class FakeStore:
     def collection_info(self, db, coll):
         return CollectionInfo(
             database=db, name=coll, dim=4, metric="cosine", count=0,
-            fields=list(_SPARSE_INFO_FIELDS),
+            fields=list(self.info_fields),
         )
 
     @staticmethod
@@ -61,15 +64,26 @@ class FakeStore:
             "section_header": "S1", "page_number": 1, "filename": "a.pdf",
         }, output_fields))]
 
-    def search_text(self, db, coll, field, query, top_k=10,
-                    filter_expr=None, output_fields=None):
-        self.text_calls.append({"query": query, "top_k": top_k,
-                                "filter_expr": filter_expr,
-                                "output_fields": output_fields})
+    def search_sparse(self, db, coll, field, query_sparse, top_k=10,
+                      filter_expr=None, output_fields=None):
+        self.sparse_calls.append({"query_sparse": query_sparse,
+                                  "top_k": top_k,
+                                  "filter_expr": filter_expr,
+                                  "output_fields": output_fields})
         return [Hit(id="c2", score=5.0, fields=self._project({
             "text": "lexical text", "doc_id": "d1", "chunk_index": 1,
             "section_header": "S2", "page_number": 2, "filename": "a.pdf",
         }, output_fields))]
+
+
+class FakeBM25:
+    def __init__(self):
+        self.queries = []
+
+    def encode_query(self, repo, database, logical_collection,
+                     physical_collection, query):
+        self.queries.append(query)
+        return {3: 1.5}
 
 
 class FakeEmbedder:
@@ -102,6 +116,7 @@ def _pipe(**kwargs):
         "store": FakeStore(),
         "embedder": FakeEmbedder(),
         "reranker": FakeReranker(),
+        "bm25": FakeBM25(),
         "chat_check": lambda s: True,
         "chat_getter": lambda s: None,
     }
@@ -139,13 +154,53 @@ async def test_hybrid_fans_out_two_legs():
 
 
 @async_test
+async def test_bm25_leg_encodes_query_and_searches_sparse():
+    store, enc = FakeStore(), FakeBM25()
+    pipe = _pipe(store=store, bm25=enc)
+    await pipe.retrieve(_req(rerank={"enabled": False}))
+    assert enc.queries == ["季度营收"]
+    assert store.sparse_calls[0]["query_sparse"] == {3: 1.5}
+
+
+@async_test
+async def test_bm25_on_sparse_less_collection_is_422():
+    store = FakeStore(info_fields=[{"name": "id"}, {"name": "text"}])
+    pipe = _pipe(store=store)
+    with pytest.raises(Exception) as exc:
+        await pipe.retrieve(_req(rerank={"enabled": False}))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"]["code"] == "retrieval_channel_unsupported"
+    assert exc.value.detail["error"]["channels"] == ["bm25"]
+
+
+@async_test
+async def test_dense_only_skips_the_bm25_gate():
+    store = FakeStore(info_fields=[{"name": "id"}, {"name": "text"}])
+    pipe = _pipe(store=store, bm25=None)
+    result = await pipe.retrieve(_req(
+        channels={"dense": True, "bm25": False},
+        rerank={"enabled": False},
+    ))
+    assert [c.chunk_id for c in result.chunks] == ["c1"]
+
+
+@async_test
+async def test_missing_bm25_encoder_is_503():
+    pipe = _pipe(bm25=None)
+    with pytest.raises(Exception) as exc:
+        await pipe.retrieve(_req(rerank={"enabled": False}))
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"]["code"] == "bm25_unavailable"
+
+
+@async_test
 async def test_recall_uses_explicit_scalar_projection():
     store = FakeStore()
     pipe = _pipe(store=store)
     result = await pipe.retrieve(_req(rerank={"enabled": False}))
     # Every leg received an explicit scalar projection derived from the
     # preflight schema — never None, and never vector/sparse.
-    for call in store.search_calls + store.text_calls:
+    for call in store.search_calls + store.sparse_calls:
         fields = call["output_fields"]
         assert fields is not None
         assert "vector" not in fields

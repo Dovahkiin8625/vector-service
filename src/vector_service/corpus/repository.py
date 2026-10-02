@@ -1551,33 +1551,127 @@ class CorpusRepository:
         return row is not None
 
     def browse(
-        self, database: str, collection: str, *, limit: int, offset: int
+        self,
+        database: str,
+        collection: str,
+        *,
+        limit: int,
+        offset: int,
+        level: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Page over chunks with content assembled from the corpus.
 
         Returns rows shaped ``{"id": chunk_id, "fields": {content fields}}``
         plus a total count, matching the generic management browse output.
+        ``level`` restricts the page to one hierarchy level (``chunk`` /
+        ``section`` / ``document``); ``None`` pages over every content row.
+        Each row's ``fields`` also carries ``level`` so a mixed page can
+        still badge leaves against parents client-side.
         """
+        where = "c.database = ? AND c.collection = ?"
+        params: list[Any] = [database, collection]
+        if level is not None:
+            where += " AND c.level = ?"
+            params.append(level)
         with self._txn() as conn:
             total = conn.execute(
-                """
-                SELECT COUNT(*) FROM chunks
-                WHERE database = ? AND collection = ?
-                """,
-                (database, collection),
+                f"SELECT COUNT(*) FROM chunks c WHERE {where}",
+                tuple(params),
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
-                SELECT {_JOIN_PROJECTION}
+                SELECT {_JOIN_PROJECTION}, c.level AS level
                 FROM chunks c JOIN documents d ON c.doc_id = d.doc_id
-                WHERE c.database = ? AND c.collection = ?
+                WHERE {where}
                 ORDER BY c.rowid
                 LIMIT ? OFFSET ?
                 """,
-                (database, collection, limit, offset),
+                (*params, limit, offset),
             ).fetchall()
-        items = [{"id": row["chunk_id"], "fields": self._assemble(row)} for row in rows]
+        items = []
+        for row in rows:
+            fields = self._assemble(row)
+            fields["level"] = row["level"]
+            items.append({"id": row["chunk_id"], "fields": fields})
         return items, int(total)
+
+    def get_chunk_detail(
+        self, database: str, collection: str, chunk_id: str
+    ) -> dict[str, Any] | None:
+        """Return one content row plus its ancestor chain and index rows.
+
+        Shaped for the browse UI's detail dialog::
+
+            {
+              "chunk_id": ...,
+              "fields": {content fields, level, parent_id, context},
+              "ancestors": [{chunk_id, level, section_header, text,
+                             token_count}, ...],   # parent → root
+              "indexes": [{index_kind, model, index_ref, created_ts}, ...],
+            }
+
+        ``None`` when the chunk is unknown or lives in another logical
+        collection. Ancestors are fetched by walking ``parent_id``; a
+        broken chain (deleted parent) stops at the last row that exists.
+        """
+        detail_projection = f"{_ANCESTOR_PROJECTION}, c.context AS context"
+        with self._txn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {detail_projection}
+                FROM chunks c JOIN documents d ON c.doc_id = d.doc_id
+                WHERE c.database = ? AND c.collection = ? AND c.chunk_id = ?
+                """,
+                (database, collection, chunk_id),
+            ).fetchone()
+            if row is None:
+                return None
+            ancestors: list[dict[str, Any]] = []
+            seen = {chunk_id}
+            current = row
+            while current["parent_id"] and current["parent_id"] not in seen:
+                parent = conn.execute(
+                    f"""
+                    SELECT {detail_projection}
+                    FROM chunks c JOIN documents d ON c.doc_id = d.doc_id
+                    WHERE c.chunk_id = ?
+                    """,
+                    (current["parent_id"],),
+                ).fetchone()
+                if parent is None:
+                    break
+                seen.add(parent["chunk_id"])
+                ancestors.append(
+                    {
+                        "chunk_id": parent["chunk_id"],
+                        "level": parent["level"],
+                        "section_header": parent["section_header"],
+                        "text": parent["text"],
+                        "token_count": parent["token_count"],
+                    }
+                )
+                current = parent
+            indexes = conn.execute(
+                """
+                SELECT index_kind, model, index_ref, created_ts
+                FROM chunk_indexes
+                WHERE chunk_id = ?
+                ORDER BY index_kind
+                """,
+                (chunk_id,),
+            ).fetchall()
+        fields = {name: row[name] for name in CONTENT_FIELDS}
+        fields.update(
+            level=row["level"],
+            parent_id=row["parent_id"],
+            context=row["context"],
+        )
+        return {
+            "chunk_id": row["chunk_id"],
+            "fields": fields,
+            "ancestors": ancestors,
+            "indexes": [dict(ix) for ix in indexes],
+        }
 
     # ---- GraphRAG graph -------------------------------------------------
 

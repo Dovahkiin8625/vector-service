@@ -1980,9 +1980,11 @@ pre.code-pane {
   word-break: break-word;
   background: var(--code-bg);
 }
-/* Chunk-card bodies (分片测试 / 入库浏览) drop the pane clamp so the
+/* Chunk-card bodies (分片测试 results) drop the pane clamp so the
    text flows and the page is the only scroller. Super-long bodies
-   clamp again behind an expand toggle instead of a nested scrollbar. */
+   clamp again behind an expand toggle instead of a nested scrollbar.
+   入库浏览 list cards don't use the clamp at all — they render a fixed
+   excerpt (chunkTextPreview) and point at the detail dialog. */
 pre.code-pane.chunk-text {
   max-height: none;
   overflow: visible;
@@ -2007,6 +2009,34 @@ pre.code-pane.chunk-text.clamped {
   max-height: 320px;
   overflow: hidden;
 }
+/* ============ Leaf chunk cards + detail dialog (入库浏览) ============ */
+/* The whole card is the hit target for the leaf detail dialog; the
+   detail button in the header is the keyboard/screen-reader affordance
+   and is also clickable for people who don't discover the card click. */
+.chunk-card {
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.chunk-card:hover { border-color: var(--accent); background: var(--surface-2); }
+.chunk-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.chunk-detail-btn { margin-left: auto; flex-shrink: 0; }
+/* Excerpt foot: muted pointer to the detail dialog, after the
+   truncated body. Bare .hint has no base rule, so style it here. */
+.chunk-excerpt-hint {
+  margin: 8px 0 0;
+  font-size: var(--fz-xs);
+  color: var(--text-muted);
+}
+/* Parent-chain cards in the detail dialog: inset surface so they read
+   as context around the leaf, not as peers of the list. */
+.ancestor-card {
+  background: var(--surface-2);
+  border-left: 3px solid var(--accent-dim);
+}
+.ancestor-card .field-card-header .hint { margin-left: auto; flex-shrink: 0; }
 
 /* ============ Status bar ============ */
 .statusbar {

@@ -21,6 +21,7 @@ import pytest
 from fastapi import HTTPException
 
 from tests.unit.test_retrieval_pipeline_advanced import (
+    FakeBM25,
     FakeEmbedder,
     FakeSettings,
     FakeStore,
@@ -92,7 +93,7 @@ def _state(repo, *, dense_hits):
     )
     return SimpleNamespace(
         corpus=repo, settings=FakeSettings(), store=store,
-        embedder=FakeEmbedder(), reranker=None,
+        embedder=FakeEmbedder(), reranker=None, bm25=FakeBM25(),
     )
 
 

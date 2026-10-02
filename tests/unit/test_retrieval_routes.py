@@ -35,7 +35,7 @@ class FakeStore:
                     fields=self._project({"text": "dense"},
                                          kw.get("output_fields")))]
 
-    def search_text(self, *a, **kw):
+    def search_sparse(self, *a, **kw):
         return [Hit(id="c2", score=5.0,
                     fields=self._project({"text": "lexical"},
                                          kw.get("output_fields")))]
@@ -44,6 +44,12 @@ class FakeStore:
 class FakeEmbedder:
     def embed_query(self, q):
         return [0.1, 0.2, 0.3, 0.4]
+
+
+class FakeBM25:
+    def encode_query(self, repo, database, logical_collection,
+                     physical_collection, query):
+        return {3: 1.5}
 
 
 class FakeReranker:
@@ -77,6 +83,7 @@ def client():
     app.state.store = FakeStore()
     app.state.embedder = FakeEmbedder()
     app.state.reranker = FakeReranker()
+    app.state.bm25 = FakeBM25()
     return TestClient(app)
 
 
@@ -115,7 +122,7 @@ def test_stream_postflight_backend_error_is_503_event(client):
         raise BackendError("milvus unavailable")
 
     client.app.state.store.search = boom
-    client.app.state.store.search_text = boom
+    client.app.state.store.search_sparse = boom
     resp = client.post("/v1/retrieval/stream", json=_body())
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/x-ndjson")
@@ -157,6 +164,7 @@ def test_json_embedder_error_maps_via_global_handler():
     app.state.store = FakeStore()
     app.state.embedder = RaisingEmbedder()
     app.state.reranker = FakeReranker()
+    app.state.bm25 = FakeBM25()
     client = TestClient(app)  # no context manager -> lifespan does not run
 
     resp = client.post("/v1/retrieval", json=_body(rerank={"enabled": False}))

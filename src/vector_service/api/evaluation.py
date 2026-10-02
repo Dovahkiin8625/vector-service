@@ -67,6 +67,7 @@ def _build_pipeline(state: Any) -> RetrievalPipeline:
         repo=state.corpus,
         embedder=state.embedder,
         reranker=state.reranker,
+        bm25=getattr(state, "bm25", None),
     )
 
 

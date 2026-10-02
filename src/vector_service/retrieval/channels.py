@@ -84,15 +84,26 @@ class DenseChannel(Channel):
 
 
 class BM25Channel(Channel):
-    """Full-text leg over the BM25 sparse field."""
+    """Full-text leg over the BM25 sparse field.
+
+    The thin index stores no text and runs no server-side analyzer: the
+    query is encoded to a ``{term_id: weight}`` sparse vector with the
+    collection's client-side BM25 statistics (``SparseBM25``) and matched
+    via ``search_sparse``. Stats live under the physical collection name
+    but rebuild from the logical collection's leaves.
+    """
 
     name = "bm25"
 
-    def __init__(self, store, database: str, collection: str,
+    def __init__(self, store, database: str, collection: str, encoder, *,
+                 repo=None, logical_collection: str | None = None,
                  sparse_field: str = "sparse"):
         self._store = store
         self._database = database
         self._collection = collection
+        self._encoder = encoder
+        self._repo = repo
+        self._logical = logical_collection or collection
         self._sparse_field = sparse_field
 
     def recall(
@@ -102,11 +113,23 @@ class BM25Channel(Channel):
         filter_expr: str | None = None,
         output_fields: list[str] | None = None,
     ) -> ChannelRun:
-        hits = self._store.search_text(
+        try:
+            query_sparse = self._encoder.encode_query(
+                self._repo,
+                self._database,
+                self._logical,
+                self._collection,
+                spec.query,
+            )
+        except RuntimeError:
+            # No BM25 stats and no corpus leaves to rebuild from: the
+            # lexical leg matches nothing (dense may still answer).
+            return self._wrap(spec.query, [])
+        hits = self._store.search_sparse(
             self._database,
             self._collection,
             self._sparse_field,
-            spec.query,
+            query_sparse,
             top_k=top_k,
             filter_expr=filter_expr,
             output_fields=output_fields,

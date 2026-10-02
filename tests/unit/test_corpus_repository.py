@@ -555,6 +555,160 @@ def test_browse_empty_collection(repo):
     assert total == 0
 
 
+def test_browse_level_filters_to_one_hierarchy_level(repo):
+    # The browse list defaults to leaves because retrieval only searches
+    # them; the parent levels stay reachable through an explicit filter.
+    repo.store_document(_document(), _hierarchy_chunks())
+
+    leaves, total = repo.browse("default", "ingest", limit=10, offset=0, level="chunk")
+    assert total == 2
+    assert [it["id"] for it in leaves] == ["d1_l0", "d1_l1"]
+    assert all(it["fields"]["level"] == "chunk" for it in leaves)
+
+    sections, total = repo.browse(
+        "default", "ingest", limit=10, offset=0, level="section"
+    )
+    assert total == 1
+    assert [it["id"] for it in sections] == ["d1_sec"]
+
+    documents, total = repo.browse(
+        "default", "ingest", limit=10, offset=0, level="document"
+    )
+    assert total == 1
+    assert [it["id"] for it in documents] == ["d1_doc"]
+
+    # No filter: every content row, each still carrying its level so the
+    # UI can badge leaves against parents on a mixed page.
+    everything, total = repo.browse("default", "ingest", limit=10, offset=0)
+    assert total == 4
+    assert [it["fields"]["level"] for it in everything] == [
+        "document",
+        "section",
+        "chunk",
+        "chunk",
+    ]
+
+
+def test_browse_level_paging_scopes_only_that_level(repo):
+    repo.store_document(_document(), _hierarchy_chunks())
+    items, total = repo.browse("default", "ingest", limit=1, offset=1, level="chunk")
+    assert total == 2  # the count excludes the parent rows
+    assert [it["id"] for it in items] == ["d1_l1"]
+
+
+def test_get_chunk_detail_walks_parent_chain_and_indexes(repo):
+    chunks = _hierarchy_chunks()
+    for c in chunks:
+        c.context = "上下文前缀" if c.level == "chunk" else None
+    repo.store_document(_document(), chunks)
+    repo.record_indexes(
+        [
+            IndexEntry(
+                chunk_id="d1_l0",
+                doc_id="d1",
+                database="default",
+                collection="ingest",
+                index_kind="sparse",
+                model="bm25-jieba",
+                index_ref="ingest:text",
+            ),
+            IndexEntry(
+                chunk_id="d1_l0",
+                doc_id="d1",
+                database="default",
+                collection="ingest",
+                index_kind="dense",
+                model="bge-m3",
+                index_ref="ingest:vector",
+            ),
+        ]
+    )
+
+    detail = repo.get_chunk_detail("default", "ingest", "d1_l0")
+    assert detail["chunk_id"] == "d1_l0"
+    assert detail["fields"]["text"] == "叶子一"
+    assert detail["fields"]["level"] == "chunk"
+    assert detail["fields"]["parent_id"] == "d1_sec"
+    assert detail["fields"]["context"] == "上下文前缀"
+    # Ancestors are ordered parent → root: section, then document.
+    assert [a["chunk_id"] for a in detail["ancestors"]] == ["d1_sec", "d1_doc"]
+    assert [a["level"] for a in detail["ancestors"]] == ["section", "document"]
+    assert detail["ancestors"][0]["text"] == "章节全文"
+    assert detail["ancestors"][1]["text"] == "整篇文档"
+    # Index registry rows come back sorted by kind with their model tag.
+    assert [ix["index_kind"] for ix in detail["indexes"]] == ["dense", "sparse"]
+    assert detail["indexes"][0]["model"] == "bge-m3"
+    assert detail["indexes"][0]["index_ref"] == "ingest:vector"
+
+
+def test_get_chunk_detail_root_has_no_ancestors(repo):
+    repo.store_document(_document(), _hierarchy_chunks())
+    detail = repo.get_chunk_detail("default", "ingest", "d1_doc")
+    assert detail["ancestors"] == []
+    assert detail["indexes"] == []
+    assert detail["fields"]["parent_id"] is None
+
+
+def test_get_chunk_detail_missing_or_foreign_is_none(repo):
+    repo.store_document(_document(), _hierarchy_chunks())
+    assert repo.get_chunk_detail("default", "ingest", "ghost") is None
+    # Same chunk_id in a different logical collection is not this chunk.
+    assert repo.get_chunk_detail("default", "other", "d1_l0") is None
+    assert repo.get_chunk_detail("otherdb", "ingest", "d1_l0") is None
+
+
+def test_get_chunk_detail_broken_chain_stops_at_last_existing_row(repo):
+    chunks = _hierarchy_chunks()
+    chunks.append(
+        ChunkRecord(
+            chunk_id="d1_lost",
+            doc_id="d1",
+            database="default",
+            collection="ingest",
+            chunk_index=4,
+            text="失联叶子",
+            level="chunk",
+            parent_id="d1_missing_section",
+        )
+    )
+    repo.store_document(_document(), chunks)
+    detail = repo.get_chunk_detail("default", "ingest", "d1_lost")
+    assert detail["ancestors"] == []
+
+
+def test_get_chunk_detail_cycle_guard_terminates(repo):
+    chunks = _hierarchy_chunks()
+    # Mutually-linked parents: the walk must stop revisiting rows
+    # instead of looping forever.
+    chunks.append(
+        ChunkRecord(
+            chunk_id="d1_a",
+            doc_id="d1",
+            database="default",
+            collection="ingest",
+            chunk_index=5,
+            text="环甲",
+            level="section",
+            parent_id="d1_b",
+        )
+    )
+    chunks.append(
+        ChunkRecord(
+            chunk_id="d1_b",
+            doc_id="d1",
+            database="default",
+            collection="ingest",
+            chunk_index=6,
+            text="环乙",
+            level="section",
+            parent_id="d1_a",
+        )
+    )
+    repo.store_document(_document(), chunks)
+    detail = repo.get_chunk_detail("default", "ingest", "d1_a")
+    assert [a["chunk_id"] for a in detail["ancestors"]] == ["d1_b"]
+
+
 # ---- index bindings (blue/green rebuild) ------------------------------
 
 
