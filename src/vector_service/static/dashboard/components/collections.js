@@ -401,14 +401,14 @@ export default defineComponent({
                         <span class="hint">{{ $t('collections.vector_field_suffix') }}</span>
                       </div>
                       <div class="row split">
-                        <div class="row"><label>{{ $t('common.metric') }}</label>
+                        <div class="row"><label v-tip="$t('tip.metric')">{{ $t('common.metric') }}</label>
                           <select data-new-index-metric v-model="newIndex[db + '::' + name].metric">
                             <option value="cosine">cosine</option>
                             <option value="ip">ip</option>
                             <option value="l2">l2</option>
                           </select>
                         </div>
-                        <div class="row"><label>{{ $t('collections.index_type') }}</label>
+                        <div class="row"><label v-tip="$t('tip.index_type')">{{ $t('collections.index_type') }}</label>
                           <select data-new-index-type v-model="newIndex[db + '::' + name].type">
                             <option value="HNSW">HNSW</option>
                             <option value="IVF_FLAT">IVF_FLAT</option>
@@ -419,7 +419,7 @@ export default defineComponent({
                         </div>
                       </div>
                       <div class="row">
-                        <label>params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
+                        <label v-tip="$t('tip.index_params')">params <span class="hint">{{ $t('collections.params_hint') }}</span></label>
                         <div class="actions" style="margin:0 0 6px;">
                           <button type="button" class="btn sm" data-tpl-hnsw
                                   @click="fillIndexParams(name, 'hnsw')">{{ $t('collections.tpl_hnsw') }}</button>

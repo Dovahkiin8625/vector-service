@@ -110,6 +110,7 @@ def test_panel_key_groups_exist_in_both_locales():
     for prefix in (
         "embeddings.", "rerank.", "similarity.", "search.", "browse.",
         "collections.", "records.", "modals.", "retrieval.", "kb.",
+        "tip.",
     ):
         assert any(k.startswith(prefix) for k in ZH), f"no zh keys for {prefix}"
         assert any(k.startswith(prefix) for k in EN), f"no en keys for {prefix}"

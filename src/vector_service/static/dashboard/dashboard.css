@@ -628,6 +628,40 @@ input, textarea, select { font-family: inherit; color: inherit; }
 .pill.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
 .pill.danger { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
 
+/* ============ Term tooltips (v-tip) ============
+   Glosses for jargon: the host element wears a dotted underline and a
+   help cursor; tooltip.js paints one fixed-positioned bubble on <body>
+   (fixed, not absolute, so scrolling panels cannot clip it). */
+.has-tip {
+  border-bottom: 1px dotted var(--text-muted);
+  cursor: help;
+}
+.has-tip:focus-visible {
+  outline: 2px solid var(--accent-dim);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.has-tip.tip-open { border-bottom-color: var(--accent); }
+.tip-bubble {
+  position: fixed;             /* placed by tooltip.js, never inline */
+  z-index: 200;                /* above modals' overlay (100) */
+  max-width: 320px;
+  padding: 8px 11px;
+  border-radius: var(--r-md);
+  background: var(--text);
+  color: var(--surface-1);
+  font-family: var(--font);
+  font-size: var(--fz-sm);
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: 0;
+  text-transform: none;
+  text-align: left;
+  white-space: normal;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;        /* gloss only — never eats the hover */
+}
+
 /* ============ Model cards (models panel) ============
    Loading/unloading is per-model (not per-family): each registered model
    id gets its own card. The card title shows the model_id, a small
@@ -1006,18 +1040,47 @@ input[type="file"] {
   padding: 6px;
   cursor: pointer;
 }
-input[type="file"]::-webkit-file-upload-button {
-  background: var(--surface-2);
-  color: var(--text);
+/* Unified file picker: the same shell as a select/text input — a small
+   trigger chip plus the chosen file (or a muted placeholder). The real
+   input is clipped invisibly inside its own label, so the whole box is
+   the click target and the id/change contract is untouched. */
+.file-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  padding: 4px 10px;
-  margin-right: 8px;
   cursor: pointer;
-  font-family: var(--font);
-  font-size: 11px;
+  transition: all var(--t-fast);
 }
-input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accent); color: var(--accent); }
+.file-pick:hover { border-color: var(--border-strong); }
+.file-pick:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.file-pick.disabled { opacity: 0.55; cursor: not-allowed; }
+.file-pick.disabled:hover { border-color: var(--border); }
+/* Class + descendant: outranks the generic input[type="file"] padding. */
+.file-pick .file-pick-input {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.file-pick-btn { flex-shrink: 0; pointer-events: none; }
+.file-pick-empty {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.file-pick .ingest-file-meta { flex: 1; min-width: 0; }
 .check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 
 /* ============ Buttons ============
@@ -1086,26 +1149,16 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 
 /* ============ Form groups ============
    The one-shot ingest form follows the pipeline order — file → parse
-   → chunk → embed/store; each block carries a small mono heading with
-   a numbered chip. */
+   → chunk → embed/store. Each stage is a horizontal band: a compact
+   numbered label on a fixed left rail, its fields packed into a dense
+   grid on the right, so no control gets a full row of its own. */
 .form-group { margin-bottom: 20px; }
 .form-group:last-of-type { margin-bottom: 0; }
-.form-group-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 10px;
-  font-family: var(--font);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-}
 .form-group-step {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   width: 17px; height: 17px;
   border-radius: 99px;
   background: var(--surface-2);
@@ -1113,6 +1166,51 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 700;
+}
+.form-bands { display: flex; flex-direction: column; gap: 14px; }
+.form-band {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 6px 16px;
+  align-items: start;
+}
+.form-band-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.form-band-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px 12px;
+  align-items: start;
+}
+/* Fields inside a band grid: no stack margins, cells size to content. */
+.form-band-fields > .row { margin-bottom: 0; min-width: 0; }
+/* Wide items (file picker, profile help, metadata) span the band —
+   the class is not limited to .row cells. */
+.form-band-fields > .span-all { grid-column: 1 / -1; }
+.form-band-fields > .profile-desc { margin: 0; }
+/* Checkbox cell lines up with the label row of its neighbours (the
+   checkbox itself sits where their inputs do). Two columns wide: the
+   contextual-enrichment caption is long and must not wrap per-word. */
+.form-band-fields > .row.check-cell { padding-top: 24px; grid-column: span 2; }
+/* Short-caption toggles (retrieval's dense/bm25, mmr, …) take one
+   column so their neighbours stay on the same line instead of
+   wrapping onto a row of their own. */
+.form-band-fields > .row.check-cell.narrow { grid-column: span 1; }
+@media (max-width: 1100px) {
+  .form-band { grid-template-columns: 1fr; gap: 4px 0; }
+  /* span 2 would overflow a single-column grid — fold back to full. */
+  .form-band-fields > .row.check-cell { padding-top: 0; grid-column: 1 / -1; }
 }
 
 /* ============ Knowledge Base panels ============
@@ -1729,6 +1827,9 @@ input[type="file"]::-webkit-file-upload-button:hover { border-color: var(--accen
 
 /* Checkbox rows (contextual enrichment toggle) */
 .checkbox-row { align-items: center; }
+/* Several toggles packed onto one line inside a form-band cell
+   (recall channels, rewrite methods). */
+.check-line { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 .checkbox-label {
   display: flex;
   align-items: center;
@@ -2644,14 +2745,6 @@ details.ops-id-details > summary:hover { color: var(--accent); }
 
 /* ---- retrieval panel ---- */
 .retrieval-modes { display: flex; gap: 6px; margin: 10px 0; }
-.retrieval-fieldset { border: none; padding: 0; margin: 0 0 10px; }
-.retrieval-fieldset[disabled] { opacity: .55; }
-.retrieval-fieldset > legend {
-  padding: 0; margin: 0 0 6px;
-  font-family: var(--font); font-size: 11px; color: var(--text-muted);
-  letter-spacing: 0.04em;
-}
-.retrieval-adv { margin: 10px 0 12px; }
 .retrieval-progress { display: flex; flex-wrap: wrap; gap: 12px; }
 .retrieval-stage { display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; color: var(--text-muted, #888); }

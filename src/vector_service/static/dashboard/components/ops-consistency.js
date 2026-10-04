@@ -116,14 +116,14 @@ export default defineComponent({
           <div class="kpi kpi--accent">
             <span class="label">{{ $t('ops.consistency.sqlite_leaves') }}</span>
             <span class="value">{{ report.corpus_leaves }}</span>
-            <span class="sub">{{ $t('ops.consistency.source_truth') }}</span>
+            <span class="sub" v-tip="$t('tip.source_truth')">{{ $t('ops.consistency.source_truth') }}</span>
           </div>
         </div>
 
         <div v-for="ix in report.indexes" :key="ix.ref" class="ops-index-card">
           <div class="ops-card-title">
             <span class="ops-mono ops-ref">{{ ix.ref }}</span>
-            <span v-if="ix.canary" class="pill warn">{{ $t('common.canary') }}</span>
+            <span v-if="ix.canary" class="pill warn" v-tip="$t('tip.canary')">{{ $t('common.canary') }}</span>
             <span v-else class="pill accent">{{ $t('common.active') }}</span>
             <span :class="['pill', ix.ok ? 'success' : 'danger']">
               {{ ix.ok ? 'OK' : $t('ops.consistency.drift') }}
@@ -135,7 +135,7 @@ export default defineComponent({
               <td>{{ ix.milvus_rows }}</td>
             </tr>
             <tr>
-              <th>{{ $t('ops.consistency.missing') }}</th>
+              <th v-tip="$t('tip.missing')">{{ $t('ops.consistency.missing') }}</th>
               <td>
                 <span :class="['ops-count', ix.missing_in_milvus.length ? 'bad' : 'good']">
                   {{ ix.missing_in_milvus.length }}
@@ -149,7 +149,7 @@ export default defineComponent({
               </td>
             </tr>
             <tr>
-              <th>{{ $t('ops.consistency.orphans') }}</th>
+              <th v-tip="$t('tip.orphans')">{{ $t('ops.consistency.orphans') }}</th>
               <td>
                 <span :class="['ops-count', ix.orphans_in_milvus.length ? 'bad' : 'good']">
                   {{ ix.orphans_in_milvus.length }}

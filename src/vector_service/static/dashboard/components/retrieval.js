@@ -50,8 +50,6 @@ function defaultState() {
     notice: '',
     result: null,
     showTrace: false,
-    // 「高级选项」accordion. hybrid keeps it folded, advanced opens it.
-    advOpen: false,
     // Raw request body for the 'custom' preset. Filled from the current
     // controls when the mode is entered, then editable verbatim.
     customJson: '',
@@ -106,10 +104,6 @@ export default defineComponent({
         s.methods = { hyde: true, multi_query: true, step_back: true, decompose: true };
         s.mmr = false; s.rerank = true;
       }
-      // The mode is also the disclosure level: advanced is the mode for
-      // the tuning sections, so it unfurls the accordion that hybrid
-      // leaves folded (basic hides it entirely).
-      s.advOpen = mode === 'advanced';
     }
 
     function buildBody() {
@@ -272,155 +266,193 @@ export default defineComponent({
         <button v-for="m in ['basic','hybrid','advanced','custom']" :key="m"
           role="tab" :aria-selected="s.mode === m ? 'true' : 'false'"
           :class="['btn','sm', s.mode === m ? 'on' : '']"
+          v-tip="$t('tip.mode.' + m)"
           @click="setMode(m)">{{ $t('retrieval.modes.' + m) }}</button>
       </div>
 
-      <div class="row">
-        <label>{{ $t('common.database') }}</label>
-        <select v-model="s.database" @change="loadCaps">
-          <option v-for="d in s.databases" :key="d" :value="d">{{ d }}</option>
-        </select>
-      </div>
-
-      <!-- 'custom' sends the textarea verbatim, so the control-driven
-           body below would only contradict it. -->
-      <template v-if="s.mode === 'custom'">
-        <div class="row">
-          <label>{{ $t('retrieval.custom_json') }}
-            <span class="hint">{{ $t('retrieval.custom_hint') }}</span>
-          </label>
-          <textarea v-model="s.customJson" rows="14" spellcheck="false" class="code-input"
-                    :aria-label="$t('retrieval.custom_json')"></textarea>
-        </div>
-        <div class="actions">
-          <button class="btn sm" @click="regenCustom">{{ $t('retrieval.custom_regen') }}</button>
-        </div>
-      </template>
-
-      <template v-else>
-      <div class="row">
-        <label>{{ $t('retrieval.query') }}</label>
-        <textarea v-model="s.query" rows="2" :placeholder="$t('retrieval.query_placeholder')"></textarea>
-      </div>
-
-      <div class="row">
-        <label>top_k</label>
-        <input type="number" min="1" max="100" v-model.number="s.topK">
-        <span class="hint" v-if="numErrs.topK">{{ numErrs.topK }}</span>
-      </div>
-
-      <!-- basic is dense-only with everything else preset: channels,
-           fusion and the accordion would only crowd the form. -->
-      <template v-if="s.mode !== 'basic'">
-      <div class="cap-group-title">{{ $t('retrieval.group.channels') }}</div>
-      <div class="row">
-        <label><input type="checkbox" v-model="s.dense"> dense</label>
-        <label><input type="checkbox" v-model="s.bm25"> bm25</label>
-        <!-- Both channels off used to send a request that could not
-             recall anything; the run button now refuses it too. -->
-        <span class="hint" v-if="!s.dense && !s.bm25">{{ $t('retrieval.err.no_channel') }}</span>
-      </div>
-      <div class="row">
-        <label>{{ $t('retrieval.fusion') }}</label>
-        <select v-model="s.fusionMethod">
-          <option value="rrf">rrf</option>
-          <option value="weighted">weighted</option>
-        </select>
-        <template v-if="s.fusionMethod === 'rrf'">
-          <label>rrf_k</label>
-          <input type="number" min="1" max="200" v-model.number="s.rrfK">
-          <span class="hint" v-if="numErrs.rrfK">{{ numErrs.rrfK }}</span>
-        </template>
-        <template v-else>
-          <label>w dense</label>
-          <input type="number" min="0" step="0.1" v-model.number="s.wDense">
-          <label>w bm25</label>
-          <input type="number" min="0" step="0.1" v-model.number="s.wBm25">
-          <label>w summary</label>
-          <input type="number" min="0" step="0.1" v-model.number="s.wSummary">
-          <label>w graph</label>
-          <input type="number" min="0" step="0.1" v-model.number="s.wGraph">
-        </template>
-      </div>
-
-      <!-- Six tuning sections fold into one accordion: hybrid leaves it
-           closed (channels + fusion are its job), advanced opens it. -->
-      <details class="collapsible retrieval-adv" :open="s.advOpen"
-               @toggle="s.advOpen = $event.target.open">
-        <summary>{{ $t('retrieval.adv_options') }}</summary>
-        <div class="body">
-          <fieldset class="retrieval-fieldset">
-            <legend>{{ $t('retrieval.group.routing') }}</legend>
+      <!-- One dense band grid for every mode. The mode tabs are the
+           disclosure level: 'custom' swaps the query for the raw JSON
+           body, 'basic' drops channels/fusion, 'advanced' adds the
+           tuning bands. No separate options accordion — a folded
+           'advanced options' under 'hybrid' just duplicated the
+           'advanced' tab. -->
+      <div class="form-bands">
+        <div class="form-band">
+          <div class="form-band-title">{{ $t('retrieval.group.core') }}</div>
+          <div class="form-band-fields">
             <div class="row">
-              <label><input type="checkbox" v-model="s.routing"> {{ $t('retrieval.auto_route') }}</label>
-              <label><input type="checkbox" v-model="s.routeLlm"
-                :disabled="!s.caps.llm_configured"> {{ $t('retrieval.use_llm') }}</label>
+              <label>{{ $t('common.database') }}</label>
+              <select v-model="s.database" @change="loadCaps">
+                <option v-for="d in s.databases" :key="d" :value="d">{{ d }}</option>
+              </select>
             </div>
-          </fieldset>
 
-          <fieldset class="retrieval-fieldset" :disabled="!s.caps.llm_configured">
-            <legend>{{ $t('retrieval.group.rewrite') }}
+            <!-- 'custom' sends the textarea verbatim as the whole body,
+                 so the control-driven fields would only contradict it. -->
+            <template v-if="s.mode === 'custom'">
+              <div class="row span-all">
+                <label>{{ $t('retrieval.custom_json') }}
+                  <span class="hint">{{ $t('retrieval.custom_hint') }}</span>
+                </label>
+                <textarea v-model="s.customJson" rows="14" spellcheck="false" class="code-input"
+                          :aria-label="$t('retrieval.custom_json')"></textarea>
+              </div>
+            </template>
+            <template v-else>
+              <div class="row">
+                <label v-tip="$t('tip.top_k')">top_k</label>
+                <input type="number" min="1" max="100" v-model.number="s.topK">
+                <span class="hint" v-if="numErrs.topK">{{ numErrs.topK }}</span>
+              </div>
+              <div class="row span-all">
+                <label>{{ $t('retrieval.query') }}</label>
+                <textarea v-model="s.query" rows="2" :placeholder="$t('retrieval.query_placeholder')"></textarea>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <template v-if="s.mode !== 'custom'">
+        <!-- basic is dense-only with everything else preset: channels
+             and fusion would only crowd the form. -->
+        <div class="form-band" v-if="s.mode !== 'basic'">
+          <div class="form-band-title">{{ $t('retrieval.group.channels') }}</div>
+          <div class="form-band-fields">
+            <div class="row check-cell narrow">
+              <div class="check-line">
+                <label class="checkbox-label" v-tip="$t('tip.dense')"><input type="checkbox" v-model="s.dense"> dense</label>
+                <label class="checkbox-label" v-tip="$t('tip.bm25')"><input type="checkbox" v-model="s.bm25"> bm25</label>
+              </div>
+              <!-- Both channels off used to send a request that could not
+                   recall anything; the run button now refuses it too. -->
+              <span class="hint" v-if="!s.dense && !s.bm25">{{ $t('retrieval.err.no_channel') }}</span>
+            </div>
+            <div class="row">
+              <label v-tip="$t('tip.fusion')">{{ $t('retrieval.fusion') }}</label>
+              <select v-model="s.fusionMethod">
+                <option value="rrf">rrf</option>
+                <option value="weighted">weighted</option>
+              </select>
+            </div>
+            <div class="row" v-if="s.fusionMethod === 'rrf'">
+              <label v-tip="$t('tip.rrf_k')">rrf_k</label>
+              <input type="number" min="1" max="200" v-model.number="s.rrfK">
+              <span class="hint" v-if="numErrs.rrfK">{{ numErrs.rrfK }}</span>
+            </div>
+            <template v-else>
+              <div class="row"><label v-tip="$t('tip.weights')">w dense</label>
+                <input type="number" min="0" step="0.1" v-model.number="s.wDense"></div>
+              <div class="row"><label v-tip="$t('tip.weights')">w bm25</label>
+                <input type="number" min="0" step="0.1" v-model.number="s.wBm25"></div>
+              <div class="row"><label v-tip="$t('tip.weights')">w summary</label>
+                <input type="number" min="0" step="0.1" v-model.number="s.wSummary"></div>
+              <div class="row"><label v-tip="$t('tip.weights')">w graph</label>
+                <input type="number" min="0" step="0.1" v-model.number="s.wGraph"></div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Tuning groups belong to the 'advanced' tab alone: the tab IS
+             the disclosure, so they render inline instead of folding
+             into an accordion that 'hybrid' would also offer. -->
+        <template v-if="s.mode === 'advanced'">
+          <div class="form-band">
+            <div class="form-band-title">{{ $t('retrieval.group.routing') }}</div>
+            <div class="form-band-fields">
+              <div class="row check-cell narrow">
+                <label class="checkbox-label" v-tip="$t('tip.auto_route')">
+                  <input type="checkbox" v-model="s.routing"> {{ $t('retrieval.auto_route') }}
+                </label>
+              </div>
+              <div class="row check-cell narrow">
+                <label class="checkbox-label" v-tip="$t('tip.use_llm')">
+                  <input type="checkbox" v-model="s.routeLlm"
+                    :disabled="!s.caps.llm_configured"> {{ $t('retrieval.use_llm') }}
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-band">
+            <div class="form-band-title">{{ $t('retrieval.group.rewrite') }}
               <span v-if="!s.caps.llm_configured" class="pill danger">{{ $t('retrieval.llm_hint') }}</span>
-            </legend>
-            <div class="row">
-              <label><input type="checkbox" v-model="s.rewrite"> {{ $t('retrieval.rewrite_enabled') }}</label>
             </div>
-            <div class="row">
-              <label v-for="k in ['hyde','multi_query','step_back','decompose']" :key="k">
-                <input type="checkbox" v-model="s.methods[k]"> {{ $t('retrieval.method.' + k) }}
-              </label>
+            <div class="form-band-fields">
+              <div class="row check-cell narrow">
+                <label class="checkbox-label" v-tip="$t('tip.rewrite')">
+                  <input type="checkbox" v-model="s.rewrite"
+                    :disabled="!s.caps.llm_configured"> {{ $t('retrieval.rewrite_enabled') }}
+                </label>
+              </div>
+              <div class="row">
+                <label v-tip="$t('tip.hyde_alpha')">hyde α</label>
+                <input type="number" min="0" max="1" step="0.05" v-model.number="s.hydeAlpha"
+                  :disabled="!s.caps.llm_configured || !s.rewrite">
+              </div>
+              <div class="row">
+                <label v-tip="$t('tip.n_variants')">{{ $t('retrieval.n_variants') }}</label>
+                <input type="number" min="1" max="5" v-model.number="s.nVariants"
+                  :disabled="!s.caps.llm_configured || !s.rewrite">
+                <span class="hint" v-if="numErrs.nVariants">{{ numErrs.nVariants }}</span>
+              </div>
+              <div class="row span-all">
+                <label>{{ $t('retrieval.methods') }}</label>
+                <div class="check-line">
+                  <label class="checkbox-label" v-for="k in ['hyde','multi_query','step_back','decompose']"
+                    :key="k" v-tip="$t('tip.' + k)">
+                    <input type="checkbox" v-model="s.methods[k]"
+                      :disabled="!s.caps.llm_configured || !s.rewrite"> {{ $t('retrieval.method.' + k) }}
+                  </label>
+                </div>
+              </div>
             </div>
-            <div class="row">
-              <label>hyde α</label>
-              <input type="number" min="0" max="1" step="0.05" v-model.number="s.hydeAlpha">
-              <label>{{ $t('retrieval.n_variants') }}</label>
-              <input type="number" min="1" max="5" v-model.number="s.nVariants">
-              <span class="hint" v-if="numErrs.nVariants">{{ numErrs.nVariants }}</span>
-            </div>
-          </fieldset>
+          </div>
 
-          <fieldset class="retrieval-fieldset">
-            <legend>{{ $t('retrieval.group.diversity') }}</legend>
-            <div class="row">
-              <label><input type="checkbox" v-model="s.mmr"> mmr</label>
-              <label>λ</label>
-              <input type="number" min="0" max="1" step="0.05" v-model.number="s.mmrLambda">
+          <div class="form-band">
+            <div class="form-band-title">{{ $t('retrieval.group.div_rerank') }}</div>
+            <div class="form-band-fields">
+              <div class="row check-cell narrow">
+                <label class="checkbox-label" v-tip="$t('tip.mmr')"><input type="checkbox" v-model="s.mmr"> mmr</label>
+              </div>
+              <div class="row">
+                <label v-tip="$t('tip.mmr_lambda')">λ</label>
+                <input type="number" min="0" max="1" step="0.05" v-model.number="s.mmrLambda">
+              </div>
+              <div class="row check-cell narrow">
+                <label class="checkbox-label" v-tip="$t('tip.cross_encoder')">
+                  <input type="checkbox" v-model="s.rerank"> {{ $t('retrieval.cross_encoder') }}
+                </label>
+              </div>
+              <div class="row">
+                <label v-tip="$t('tip.candidate_pool')">{{ $t('retrieval.candidate_pool') }}</label>
+                <input type="number" min="1" max="64" v-model.number="s.candidatePool">
+                <span class="hint" v-if="numErrs.candidatePool">{{ numErrs.candidatePool }}</span>
+              </div>
             </div>
-          </fieldset>
+          </div>
 
-          <fieldset class="retrieval-fieldset">
-            <legend>{{ $t('retrieval.group.rerank') }}</legend>
-            <div class="row">
-              <label><input type="checkbox" v-model="s.rerank"> {{ $t('retrieval.cross_encoder') }}</label>
-              <label>{{ $t('retrieval.candidate_pool') }}</label>
-              <input type="number" min="1" max="64" v-model.number="s.candidatePool">
-              <span class="hint" v-if="numErrs.candidatePool">{{ numErrs.candidatePool }}</span>
+          <div class="form-band">
+            <div class="form-band-title">{{ $t('retrieval.group.budget_filter') }}</div>
+            <div class="form-band-fields">
+              <div class="row">
+                <label v-tip="$t('tip.max_tokens')">{{ $t('retrieval.max_tokens') }}</label>
+                <input type="number" min="1" v-model.number="s.maxTokens"
+                  :placeholder="$t('retrieval.max_tokens_ph')">
+                <span class="hint" v-if="numErrs.maxTokens">{{ numErrs.maxTokens }}</span>
+              </div>
+              <div class="row">
+                <label>doc_id</label>
+                <input v-model="s.docId" :placeholder="$t('retrieval.doc_id_ph')">
+              </div>
+              <div class="row">
+                <label>filename</label>
+                <input v-model="s.filename" :placeholder="$t('retrieval.filename_ph')">
+              </div>
             </div>
-          </fieldset>
-
-          <fieldset class="retrieval-fieldset">
-            <legend>{{ $t('retrieval.group.budget') }}</legend>
-            <div class="row">
-              <label>{{ $t('retrieval.max_tokens') }}</label>
-              <input type="number" min="1" v-model.number="s.maxTokens"
-                :placeholder="$t('retrieval.max_tokens_ph')">
-              <span class="hint" v-if="numErrs.maxTokens">{{ numErrs.maxTokens }}</span>
-            </div>
-          </fieldset>
-
-          <fieldset class="retrieval-fieldset">
-            <legend>{{ $t('retrieval.group.filter') }}</legend>
-            <div class="row">
-              <label>doc_id</label>
-              <input v-model="s.docId" :placeholder="$t('retrieval.doc_id_ph')">
-              <label>filename</label>
-              <input v-model="s.filename" :placeholder="$t('retrieval.filename_ph')">
-            </div>
-          </fieldset>
-        </div>
-      </details>
-      </template>
-      </template>
+          </div>
+        </template>
+        </template>
+      </div>
 
       <div class="actions">
         <!-- In custom mode the query lives in the JSON body, so the
@@ -434,6 +466,9 @@ export default defineComponent({
              waiting it out. -->
         <button v-if="s.busy" class="btn" id="btn-retrieval-cancel" @click="cancelRun">
           {{ $t('retrieval.cancel') }}
+        </button>
+        <button v-if="s.mode === 'custom'" class="btn sm" @click="regenCustom">
+          {{ $t('retrieval.custom_regen') }}
         </button>
       </div>
 

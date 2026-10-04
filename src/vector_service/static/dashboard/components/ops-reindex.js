@@ -327,13 +327,13 @@ export default defineComponent({
             <span class="form-hint">{{ $t('ops.reindex.embed_hint') }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label" for="reindex-canary">{{ $t('ops.reindex.canary_percent') }}</label>
+            <label class="form-label" for="reindex-canary" v-tip="$t('tip.canary')">{{ $t('ops.reindex.canary_percent') }}</label>
             <input id="reindex-canary" v-model.number="canaryPercent" type="number" min="0" max="100" step="1" />
             <span class="form-hint">{{ $t('ops.reindex.canary_hint') }}</span>
             <span class="form-hint" v-if="canaryErr">{{ canaryErr }}</span>
           </div>
           <div class="form-group">
-            <label class="form-label" for="reindex-batch">{{ $t('ops.reindex.batch_size') }}</label>
+            <label class="form-label" for="reindex-batch" v-tip="$t('tip.batch_size')">{{ $t('ops.reindex.batch_size') }}</label>
             <input id="reindex-batch" v-model.number="batchSize" type="number" min="1" step="1" />
             <span class="form-hint" v-if="batchErr">{{ batchErr }}</span>
           </div>
@@ -373,7 +373,7 @@ export default defineComponent({
 
       <div class="section">
         <div class="section-head">
-          <h3 class="section-title">{{ $t('ops.reindex.gate') }}</h3>
+          <h3 class="section-title" v-tip="$t('tip.gate')">{{ $t('ops.reindex.gate') }}</h3>
           <span class="section-sub">
             <busy-button class="sm" variant="ghost" :busy="refreshing"
                          :label="$t('common.refresh')"

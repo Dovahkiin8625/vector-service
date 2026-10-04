@@ -181,7 +181,7 @@ export default defineComponent({
           <div class="row"><label>{{ $t('common.model') }}</label>
             <select v-model="model"><option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option></select>
           </div>
-          <div class="row"><label>{{ $t('common.metric') }}</label>
+          <div class="row"><label v-tip="$t('tip.metric')">{{ $t('common.metric') }}</label>
             <select v-model="metric"><option value="cosine">cosine</option><option value="ip">ip</option><option value="l2">l2</option></select>
           </div>
         </div>

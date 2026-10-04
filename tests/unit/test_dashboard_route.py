@@ -122,6 +122,40 @@ def test_dashboard_exposes_similarity_panel():
     assert "<similarity-panel :kind" not in _ALL
 
 
+def test_dashboard_exposes_embeddings_panel():
+    """The three embedding views are merged into one EmbeddingsPanel
+    with an internal text/image/multimodal mode switch (same contract
+    as the similarity merge above)."""
+    emb = (
+        _ST / "static" / "dashboard" / "components" / "embeddings.js"
+    ).read_text(encoding="utf-8")
+    # One merged sidebar view; the old per-modality views are gone.
+    assert _has('data-view="embeddings"')
+    assert 'data-view="image-embeddings"' not in _ALL
+    assert 'data-view="multimodal-embeddings"' not in _ALL
+    # The mode switch still targets all three endpoints.
+    assert "/v1/embeddings" in emb
+    assert "/v1/image_embeddings" in emb
+    assert "/v1/multimodal_embeddings" in emb
+    # Internal segmented mode switch (no kind prop from the App). As
+    # above, ``{ kind: ... }`` in the model-list copy is an i18n
+    # placeholder, not a prop — match the prop-declaration shape.
+    assert "seg-toggle" in emb
+    assert "const kind = ref('text')" in emb
+    assert "kind: { type:" not in emb
+    assert '<embeddings-panel v-show="store.view === \'embeddings\'" />' in _ALL
+    assert "<embeddings-panel :kind" not in _ALL
+    assert '<embeddings-panel kind="' not in _ALL
+    # Request bodies match the route schemas (schemas/image_embeddings.py,
+    # schemas/multimodal_embeddings.py): `input` carries {data, mime}
+    # image items and {text} / {image:{data,mime}} multimodal items. The
+    # management-upsert shapes (images/image_mimes, kind-tagged items)
+    # caused 422s and must not come back.
+    assert "image_mimes" not in emb
+    assert "input: items.map(i => ({ data: i.data" in emb
+    assert "{ image: { data:" in emb
+
+
 def test_dashboard_exposes_knowledge_base_panels():
     """Knowledge base uses the KnowledgeBasePanel component switched
     by a view prop."""
@@ -444,13 +478,26 @@ def test_dashboard_exposes_retrieval_panel():
     # Four mode presets.
     for m in ["'basic'", "'hybrid'", "'advanced'", "'custom'"]:
         assert m in retrieval
+    # The mode tab is the disclosure level: tuning groups render inline
+    # under 'advanced' only. No nested 'advanced options' accordion —
+    # it duplicated the 'advanced' tab under 'hybrid'.
+    assert 'v-if="s.mode === \'advanced\'"' in retrieval
+    assert "advOpen" not in retrieval
+    assert "retrieval.adv_options" not in app_js
+    assert "retrieval-adv" not in _CSS
+    # Dense form packing via the shared band grid, so small controls
+    # share lines instead of each owning a stacked .row.
+    assert "form-bands" in retrieval
+    assert "form-band-fields" in retrieval
+    assert "check-line" in retrieval
+    assert ".check-line" in _CSS
     # Four-channel weights, intent routing and token budget controls.
     assert "s.wSummary" in retrieval
     assert "s.wGraph" in retrieval
     assert "s.routing" in retrieval
     assert "s.maxTokens" in retrieval
     # Capabilities-driven disabled states: LLM classifier off without
-    # an LLM; the whole rewrite group too.
+    # an LLM; the rewrite controls too.
     assert ':disabled="!s.caps.llm_configured"' in retrieval
     # NDJSON frame splitting (partial trailing line kept in buffer).
     assert "buffer.split('\\n')" in retrieval
@@ -545,3 +592,55 @@ def test_dashboard_exposes_operations_panels():
     assert "physical index(es)" not in _COMP_JS
     assert ">source of truth</span>" not in _COMP_JS
     assert "total · offset" not in _COMP_JS
+
+
+def test_dashboard_term_tooltips():
+    """Term tooltips (v-tip): one shared directive glosses jargon labels.
+
+    The directive lives in tooltip.js and paints a single
+    fixed-positioned bubble appended to <body> — an ::after bubble
+    would be clipped by the panels' overflow:auto. Gloss text goes
+    through i18n (`tip.*` keys in both locales) so the language toggle
+    swaps it in place via the directive's `updated` hook.
+    """
+    tip_js = (
+        _ST / "static" / "dashboard" / "components" / "tooltip.js"
+    ).read_text(encoding="utf-8")
+    app_js = (
+        _ST / "static" / "dashboard" / "components" / "app.js"
+    ).read_text(encoding="utf-8")
+    # Served as a static asset; registered globally on the app.
+    with TestClient(app) as c:
+        rr = c.get("/static/dashboard/components/tooltip.js")
+    assert rr.status_code == 200
+    assert "export const tipDirective" in tip_js
+    assert "import { tipDirective } from './tooltip.js'" in app_js
+    assert "_app.directive('tip', tipDirective)" in app_js
+    # One shared bubble on <body>, never per-host markup.
+    assert "document.body.appendChild(bubble)" in tip_js
+    assert "role', 'tooltip'" in tip_js
+    # Keyboard parity: focus mirrors hover for non-interactive hosts.
+    assert "el.__tipAddedTabindex" in tip_js
+    # Styles: the affordance + the fixed bubble above modal overlays.
+    assert ".has-tip" in _CSS
+    assert ".tip-bubble" in _CSS
+    assert "position: fixed" in _CSS
+    # Panels actually use it on their jargon labels.
+    retrieval = (
+        _ST / "static" / "dashboard" / "components" / "retrieval.js"
+    ).read_text(encoding="utf-8")
+    assert "v-tip=\"$t('tip.bm25')\"" in retrieval
+    assert "v-tip=\"$t('tip.rrf_k')\"" in retrieval
+    assert "v-tip=\"$t('tip.mmr_lambda')\"" in retrieval
+    assert "v-tip=\"$t('tip.mode.' + m)\"" in retrieval
+    kb = (
+        _ST / "static" / "dashboard" / "components" / "knowledge-base.js"
+    ).read_text(encoding="utf-8")
+    assert "v-tip=\"$t('tip.strategy')\"" in kb
+    assert "v-tip=\"$t('tip.breakpoint')\"" in kb
+    assert "v-tip=\"$t('tip.add_context')\"" in kb
+    ops = (
+        _ST / "static" / "dashboard" / "components" / "ops-reindex.js"
+    ).read_text(encoding="utf-8")
+    assert "v-tip=\"$t('tip.canary')\"" in ops
+    assert "v-tip=\"$t('tip.gate')\"" in ops

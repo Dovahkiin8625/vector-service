@@ -25,6 +25,9 @@ import { NewDbModal, NewCollModal } from './modals.js';
 // confirmation are app-level hosts — panels mount the inline banner,
 // busy button and empty block themselves.
 import { NoticeBar, ConfirmHost, notify, dismissNotice, noticeState } from './feedback.js';
+// Term tooltips: one shared hover-gloss directive (v-tip) used by the
+// panels to explain jargon labels.
+import { tipDirective } from './tooltip.js';
 
 // =====================================================================
 // i18n: Chinese (default) + English
@@ -49,16 +52,14 @@ const I18N = {
     // Sidebar nav
     'nav.overview': '总览首页',
     'nav.models': '模型列表',
-    'nav.embeddings': '文本嵌入',
-    'nav.image_embeddings': '图像嵌入',
-    'nav.multimodal_embeddings': '图文嵌入',
+    'nav.embeddings': '嵌入',
     'nav.rerank': '重排',
     'nav.similarity': '相似度',
-    'nav.databases': '数据库管理',
-    'nav.collections': '集合管理',
+    'nav.databases': '数据库',
+    'nav.collections': '集合',
     'nav.records': '记录',
     'nav.search': '检索',
-    'nav.browse': '浏览数据',
+    'nav.browse': '浏览',
     'nav.parse': '文档解析',
     'nav.chunk': '分片测试',
     'nav.ingest': '一键入库',
@@ -555,7 +556,7 @@ const I18N = {
     'embeddings.select_images': '选择图片',
     'embeddings.hint.local_files': '本地文件 → 自动转 base64',
     'embeddings.json_list': 'JSON 列表',
-    'embeddings.hint.each_item': '每项：data / mime',
+    'embeddings.hint.each_item': '每项：data / mime；图文模式也可用纯文本字符串',
     'embeddings.err.no_input': '请选择文件或粘贴 JSON 数组。',
     'embeddings.err.no_items': '请至少添加一项文本或图片。',
     'embeddings.err.bad_list': '批量输入的 JSON 不是数组，请修正后重试。',
@@ -784,11 +785,11 @@ const I18N = {
     // 'custom' mode posts the textarea verbatim instead of the
     // control-driven body, so it gets its own copy.
     'retrieval.custom_json': '请求体 (JSON)',
-    'retrieval.custom_hint': '按原文发送，忽略上方控件',
+    'retrieval.custom_hint': '按原文发送，忽略模式控件',
     'retrieval.custom_regen': '按当前控件重新生成',
     'retrieval.err.bad_json': '请求体必须是 JSON 对象：',
     'retrieval.err.no_channel': '至少启用一个召回通道',
-    'retrieval.adv_options': '高级选项',
+    'retrieval.group.core': '检索请求',
     'retrieval.group.channels': '通道与融合',
     'retrieval.fusion': '融合方式',
     'retrieval.group.routing': '意图路由',
@@ -796,17 +797,16 @@ const I18N = {
     'retrieval.use_llm': '使用 LLM 分类器',
     'retrieval.group.rewrite': '查询改写',
     'retrieval.rewrite_enabled': '启用',
+    'retrieval.methods': '改写方法',
     'retrieval.method.hyde': 'HyDE',
     'retrieval.method.multi_query': '多查询',
     'retrieval.method.step_back': '回溯提问',
     'retrieval.method.decompose': '问题分解',
     'retrieval.n_variants': '变体数',
-    'retrieval.group.diversity': '多样性',
-    'retrieval.group.rerank': '重排',
+    'retrieval.group.div_rerank': '多样性与重排',
     'retrieval.cross_encoder': '交叉编码器重排',
     'retrieval.candidate_pool': '候选池',
-    'retrieval.group.budget': '上下文预算',
-    'retrieval.group.filter': '元数据过滤',
+    'retrieval.group.budget_filter': '预算与过滤',
     'retrieval.max_tokens': '最大 tokens',
     'retrieval.max_tokens_ph': '按 token 预算裁剪',
     'retrieval.doc_id_ph': '精确匹配',
@@ -832,6 +832,8 @@ const I18N = {
     'kb.ingest_title': '一键入库',
     'kb.chunks_title': '入库浏览',
     'kb.file': '文件',
+    'kb.file_pick': '选择文件',
+    'kb.file_none': '未选择任何文件',
     'kb.strategy': '分片策略',
     'kb.breakpoint': '断点百分位',
     'kb.chunk_size': '分片大小',
@@ -861,6 +863,52 @@ const I18N = {
     'kb.cancelled': '已取消。',
     'kb.err.timeout': '流已连续 {seconds} 秒无响应，已中止。',
     'models.poll_failed': '模型列表刷新失败：',
+    // ---- Term tooltips (v-tip) ----
+    'tip.top_k': '最终返回的结果条数（融合、重排之后截断）。',
+    'tip.dense': '稠密向量召回：用嵌入模型把问题编码成向量，按语义相似度检索。',
+    'tip.bm25': 'BM25 关键词召回：经典稀疏检索，按词频匹配词面，擅长精确字面命中。',
+    'tip.fusion': '融合方式：rrf 只用各通道排名做倒数加权，无需归一化分数；weighted 按归一化分数加权求和。',
+    'tip.rrf_k': 'RRF 的排名衰减常数，越大头部排名的优势越小，常用 60。',
+    'tip.weights': 'weighted 融合下该通道分数的权重，0 表示忽略该通道。',
+    'tip.auto_route': '意图路由：按问题类型自动分配各通道权重（数字/实体类偏 bm25，语义类偏 dense）。',
+    'tip.use_llm': '用 LLM 分类器判断问题意图；关闭则用启发式规则。需要已配置 LLM。',
+    'tip.rewrite': '查询改写：用 LLM 扩展或变换查询后再检索，提升召回覆盖。',
+    'tip.hyde': 'HyDE：让 LLM 先写一段假想答案，用答案的向量去检索，弥合问题与文档的表述差距。',
+    'tip.hyde_alpha': '假想答案向量与原始问题向量的混合权重，1 表示全用假想答案。',
+    'tip.multi_query': '多查询改写：把问题改写成若干等价问法，分别检索后合并。',
+    'tip.step_back': '回退提问：先提出一个更上位的问题，检索背景知识后再回答原问题。',
+    'tip.decompose': '问题分解：把复杂问题拆成子问题，逐个检索。',
+    'tip.n_variants': '每种改写方法生成的变体数量。',
+    'tip.mmr': 'MMR 多样性控制：在相关性和多样性之间折衷，减少结果之间的重复。',
+    'tip.mmr_lambda': 'λ 越接近 1 越偏重相关性，越接近 0 越偏重多样性。',
+    'tip.cross_encoder': '交叉编码器重排：把「问题+分片」拼在一起逐对精打分，比双塔召回更准但更慢。',
+    'tip.candidate_pool': '进入重排的候选条数：先粗召回这么多条，再由重排器精选 top_k。',
+    'tip.max_tokens': '拼接上下文的 token 预算上限，超出部分被裁掉。',
+    'tip.strategy': '文本切分成入库分片的方式，决定分片边界与检索粒度。',
+    'tip.breakpoint': '语义分片在相邻句子相似度距离的该百分位处下断点；越高切分越少。',
+    'tip.chunk_size': '每个分片的目标 token 数上限（cl100k_base 计数）。',
+    'tip.overlap': '相邻分片之间重复的 token 数，避免上下文在边界处被切断。',
+    'tip.add_context': '入库前用 LLM 为每个分片生成上下文前缀，让分片脱离原文也能被理解。',
+    'tip.metric': '向量相似度的计算方式：cosine 余弦（方向）、ip 内积、l2 欧氏距离（越小越近）。',
+    'tip.index_type': '向量索引结构：HNSW 图索引（召回高速度快）、IVF 倒排聚类、DISKANN 磁盘索引、FLAT 精确扫描。',
+    'tip.index_params': '索引结构参数：HNSW 的 M（每节点连接数）与 efConstruction（构建期搜索宽度），IVF 的 nlist（聚类数）。',
+    'tip.dim': '向量维度，必须与嵌入模型输出维度一致。',
+    'tip.canary': '金丝雀——新索引先服务一小部分请求，验证无回退后再全量切换。',
+    'tip.batch_size': '重建索引时每批嵌入的分片条数，越大越快但越占内存。',
+    'tip.gate': '发布门禁——提升金丝雀前必须通过的回归评测阈值，防检索质量回退。',
+    'tip.recall': 'Recall@k：标准答案分片被召回到前 k 名的比例，衡量「找得全不全」。',
+    'tip.mrr': 'MRR：首个正确结果排名的倒数均值，衡量「对的结果排得靠不靠前」。',
+    'tip.ndcg': 'nDCG：按位置折扣的排序质量指标，衡量「整体排得好不好」。',
+    'tip.doc_hit_rate': '文档命中率：至少命中一个标准文档的问题占比。',
+    'tip.missing': '事实来源里有、向量库（Milvus）里缺的分片——向量没写进去。',
+    'tip.orphans': '向量库（Milvus）里有、事实来源里没有的多余向量——脏数据。',
+    'tip.source_truth': '一致性校验以 SQLite 中的分片记录为事实来源。',
+    'tip.query_vector': '直接提供查询向量（跳过服务端嵌入），维度须与集合向量字段一致。',
+    'tip.filter_expr': 'Milvus 过滤表达式，按标量字段先过滤再向量检索，如 category == "mouse"。',
+    'tip.mode.basic': '只用 dense 通道，其余参数走默认，最快也最省事。',
+    'tip.mode.hybrid': 'dense + bm25 双通道 + RRF 融合 + 交叉编码器重排，日常推荐。',
+    'tip.mode.advanced': '在 hybrid 之上开启意图路由、查询改写、MMR 等全部调参面板。',
+    'tip.mode.custom': '直接编辑请求体 JSON，按原文发送，忽略上方控件。',
   },
   en: {
     // Brand + topbar
@@ -875,9 +923,7 @@ const I18N = {
     // Sidebar nav
     'nav.overview': 'Overview',
     'nav.models': 'Model List',
-    'nav.embeddings': 'Text Embed',
-    'nav.image_embeddings': 'Image Embed',
-    'nav.multimodal_embeddings': 'Multimodal Embed',
+    'nav.embeddings': 'Embeddings',
     'nav.rerank': 'Rerank',
     'nav.similarity': 'Similarity',
     'nav.databases': 'Databases',
@@ -1368,7 +1414,7 @@ const I18N = {
     'embeddings.select_images': 'select images',
     'embeddings.hint.local_files': 'local files → auto base64',
     'embeddings.json_list': 'JSON list',
-    'embeddings.hint.each_item': 'each item: data / mime',
+    'embeddings.hint.each_item': 'each item: data / mime (multimodal also accepts plain strings)',
     'embeddings.err.no_input': 'select files or paste a JSON array.',
     'embeddings.err.no_items': 'add at least one text or image item.',
     'embeddings.err.bad_list': 'the batch JSON is not an array; fix it and retry.',
@@ -1582,11 +1628,11 @@ const I18N = {
     'retrieval.query': 'query',
     'retrieval.query_placeholder': 'Enter your query',
     'retrieval.custom_json': 'request body (JSON)',
-    'retrieval.custom_hint': 'sent verbatim; the controls above are ignored',
+    'retrieval.custom_hint': 'sent verbatim; the mode controls are ignored',
     'retrieval.custom_regen': 'rebuild from current controls',
     'retrieval.err.bad_json': 'request body must be a JSON object: ',
     'retrieval.err.no_channel': 'enable at least one recall channel',
-    'retrieval.adv_options': 'Advanced options',
+    'retrieval.group.core': 'Retrieval request',
     'retrieval.group.channels': 'Channels & fusion',
     'retrieval.fusion': 'fusion',
     'retrieval.group.routing': 'Intent routing',
@@ -1594,17 +1640,16 @@ const I18N = {
     'retrieval.use_llm': 'use LLM classifier',
     'retrieval.group.rewrite': 'Query rewrite',
     'retrieval.rewrite_enabled': 'enabled',
+    'retrieval.methods': 'rewrite methods',
     'retrieval.method.hyde': 'HyDE',
     'retrieval.method.multi_query': 'multi-query',
     'retrieval.method.step_back': 'step-back',
     'retrieval.method.decompose': 'decompose',
     'retrieval.n_variants': 'n variants',
-    'retrieval.group.diversity': 'Diversity',
-    'retrieval.group.rerank': 'Rerank',
+    'retrieval.group.div_rerank': 'Diversity & rerank',
     'retrieval.cross_encoder': 'cross-encoder rerank',
     'retrieval.candidate_pool': 'candidate pool',
-    'retrieval.group.budget': 'Context budget',
-    'retrieval.group.filter': 'Metadata filter',
+    'retrieval.group.budget_filter': 'Budget & filter',
     'retrieval.max_tokens': 'max tokens',
     'retrieval.max_tokens_ph': 'trim to a token budget',
     'retrieval.doc_id_ph': 'exact match',
@@ -1628,6 +1673,8 @@ const I18N = {
     'kb.ingest_title': 'ingest',
     'kb.chunks_title': 'chunks',
     'kb.file': 'file',
+    'kb.file_pick': 'choose file',
+    'kb.file_none': 'no file chosen',
     'kb.strategy': 'strategy',
     'kb.breakpoint': 'breakpoint %',
     'kb.chunk_size': 'chunk size',
@@ -1656,6 +1703,52 @@ const I18N = {
     'kb.cancelled': 'cancelled.',
     'kb.err.timeout': 'the stream sent nothing for {seconds}s; aborted.',
     'models.poll_failed': 'failed to refresh the model list: ',
+    // ---- Term tooltips (v-tip) ----
+    'tip.top_k': 'how many results to return after fusion and rerank.',
+    'tip.dense': 'dense recall: encodes the query into a vector and retrieves by semantic similarity.',
+    'tip.bm25': 'bm25 recall: classic sparse retrieval that matches literal terms by term frequency; strong on exact keyword hits.',
+    'tip.fusion': 'fusion method: rrf combines channels by reciprocal ranks only (no score normalization); weighted sums min-max normalized scores.',
+    'tip.rrf_k': 'RRF rank damping constant; larger values flatten the advantage of top ranks. 60 is common.',
+    'tip.weights': 'weight of this channel under weighted fusion; 0 ignores the channel.',
+    'tip.auto_route': 'intent routing: picks channel weights from the question type (numeric/entity queries lean bm25, semantic ones lean dense).',
+    'tip.use_llm': 'use an LLM classifier for intent routing; off falls back to heuristics. Needs a configured LLM.',
+    'tip.rewrite': 'query rewrite: an LLM expands or transforms the query before retrieval to widen recall.',
+    'tip.hyde': 'HyDE: an LLM writes a hypothetical answer first; retrieval embeds that answer to bridge question/document wording gaps.',
+    'tip.hyde_alpha': 'blend between the hypothetical-answer vector and the raw query vector; 1 uses only the generated answer.',
+    'tip.multi_query': 'multi-query rewrite: rewrites the question into several equivalent phrasings and merges the results.',
+    'tip.step_back': 'step-back prompting: asks a broader parent question first to retrieve background before answering.',
+    'tip.decompose': 'question decomposition: splits a complex question into sub-questions and retrieves each.',
+    'tip.n_variants': 'how many variants each rewrite method generates.',
+    'tip.mmr': 'MMR diversity control: trades relevance for diversity so results do not repeat each other.',
+    'tip.mmr_lambda': 'λ near 1 favors relevance; near 0 favors diversity.',
+    'tip.cross_encoder': 'cross-encoder rerank: scores each query/chunk pair jointly; more accurate than bi-encoder recall but slower.',
+    'tip.candidate_pool': 'candidates entering rerank: recall this many first, then the reranker picks the final top_k.',
+    'tip.max_tokens': 'token budget for the assembled context; anything past the budget is cut.',
+    'tip.strategy': 'how text is split into stored chunks; sets chunk boundaries and retrieval granularity.',
+    'tip.breakpoint': 'semantic chunking cuts where the adjacent-sentence distance reaches this percentile; higher means fewer cuts.',
+    'tip.chunk_size': 'target token budget per chunk (cl100k_base counting).',
+    'tip.overlap': 'tokens repeated between adjacent chunks so context is not cut at the boundary.',
+    'tip.add_context': 'before ingest, an LLM writes a context prefix per chunk so it still reads out of document context.',
+    'tip.metric': 'vector similarity measure: cosine (direction), ip (inner product), l2 (euclidean, smaller is closer).',
+    'tip.index_type': 'vector index structure: HNSW (graph; high recall, fast), IVF (inverted clusters), DISKANN (disk), FLAT (exact scan).',
+    'tip.index_params': 'index structure parameters: HNSW M (links per node) and efConstruction (build-time search width); IVF nlist (cluster count).',
+    'tip.dim': 'vector dimension; must match the embedding model output size.',
+    'tip.canary': 'canary — the new index serves a small share of traffic first; promote it after checks pass.',
+    'tip.batch_size': 'chunks embedded per rebuild batch; larger batches are faster but use more memory.',
+    'tip.gate': 'release gate — regression thresholds that must pass before promoting the canary, blocking quality regressions.',
+    'tip.recall': 'Recall@k: share of gold chunks retrieved into the top k; measures how completely the system finds them.',
+    'tip.mrr': 'MRR: mean reciprocal rank of the first correct hit; measures how high correct items place.',
+    'tip.ndcg': 'nDCG: position-discounted ranking quality; measures how good the overall ordering is.',
+    'tip.doc_hit_rate': 'doc hit rate: share of questions where at least one gold document was hit.',
+    'tip.missing': 'chunks in the source of truth missing from Milvus — the vectors were never written.',
+    'tip.orphans': 'extra vectors in Milvus with no backing chunk — stale data.',
+    'tip.source_truth': 'the consistency scan treats the SQLite chunk records as the source of truth.',
+    'tip.query_vector': 'query by raw vector (skips server-side embedding); the dimension must match the collection vector field.',
+    'tip.filter_expr': 'Milvus filter expression; filters by scalar fields before vector search, e.g. category == "mouse".',
+    'tip.mode.basic': 'dense channel only, everything else preset; the fastest option.',
+    'tip.mode.hybrid': 'dense + bm25 with RRF fusion and cross-encoder rerank; the everyday recommendation.',
+    'tip.mode.advanced': 'hybrid plus intent routing, query rewrite, MMR and every tuning panel.',
+    'tip.mode.custom': 'edit the raw request JSON and send it verbatim; the controls above are ignored.',
   },
 };
 
@@ -1909,8 +2002,6 @@ const NAV_LABELS = {
   'overview':            { catKey: 'cat.overview',  subKey: 'nav.overview' },
   'models':              { catKey: 'cat.models',    subKey: 'nav.models' },
   'embeddings':          { catKey: 'cat.models',    subKey: 'nav.embeddings' },
-  'image-embeddings':    { catKey: 'cat.models',    subKey: 'nav.image_embeddings' },
-  'multimodal-embeddings':{ catKey: 'cat.models',   subKey: 'nav.multimodal_embeddings' },
   'rerank':              { catKey: 'cat.models',    subKey: 'nav.rerank' },
   'similarity':          { catKey: 'cat.models',    subKey: 'nav.similarity' },
   'databases':           { catKey: 'cat.store',     subKey: 'nav.databases' },
@@ -2007,8 +2098,6 @@ const App = defineComponent({
             <div class="nav-items">
               <div :class="['nav-item', store.view === 'models' ? 'active' : '']" data-view="models" @click="store.view = 'models'"><span>{{ t('nav.models') }}</span></div>
               <div :class="['nav-item', store.view === 'embeddings' ? 'active' : '']" data-view="embeddings" @click="store.view = 'embeddings'"><span>{{ t('nav.embeddings') }}</span></div>
-              <div :class="['nav-item', store.view === 'image-embeddings' ? 'active' : '']" data-view="image-embeddings" @click="store.view = 'image-embeddings'"><span>{{ t('nav.image_embeddings') }}</span></div>
-              <div :class="['nav-item', store.view === 'multimodal-embeddings' ? 'active' : '']" data-view="multimodal-embeddings" @click="store.view = 'multimodal-embeddings'"><span>{{ t('nav.multimodal_embeddings') }}</span></div>
               <div :class="['nav-item', store.view === 'rerank' ? 'active' : '']" data-view="rerank" @click="store.view = 'rerank'"><span>{{ t('nav.rerank') }}</span></div>
               <div :class="['nav-item', store.view === 'similarity' ? 'active' : '']" data-view="similarity" @click="store.view = 'similarity'"><span>{{ t('nav.similarity') }}</span></div>
             </div>
@@ -2020,8 +2109,8 @@ const App = defineComponent({
               <div :class="['nav-item', store.view === 'databases' ? 'active' : '']" data-view="databases" @click="store.view = 'databases'"><span>{{ t('nav.databases') }}</span></div>
               <div :class="['nav-item', store.view === 'collections' ? 'active' : '']" data-view="collections" @click="store.view = 'collections'"><span>{{ t('nav.collections') }}</span></div>
               <div :class="['nav-item', store.view === 'records' ? 'active' : '']" data-view="records" @click="store.view = 'records'"><span>{{ t('nav.records') }}</span></div>
-              <div :class="['nav-item', store.view === 'search' ? 'active' : '']" data-view="search" @click="store.view = 'search'"><span>{{ t('nav.search') }}</span></div>
               <div :class="['nav-item', store.view === 'browse' ? 'active' : '']" data-view="browse" @click="store.view = 'browse'"><span>{{ t('nav.browse') }}</span></div>
+              <div :class="['nav-item', store.view === 'search' ? 'active' : '']" data-view="search" @click="store.view = 'search'"><span>{{ t('nav.search') }}</span></div>
             </div>
           </div>
 
@@ -2064,16 +2153,14 @@ const App = defineComponent({
         <div class="content">
           <overview-panel v-show="store.view === 'overview'" />
           <models-panel v-show="store.view === 'models'" />
-          <embeddings-panel v-show="store.view === 'embeddings'" kind="text" />
-          <embeddings-panel v-show="store.view === 'image-embeddings'" kind="image" />
-          <embeddings-panel v-show="store.view === 'multimodal-embeddings'" kind="multimodal" />
+          <embeddings-panel v-show="store.view === 'embeddings'" />
           <rerank-panel v-show="store.view === 'rerank'" />
           <similarity-panel v-show="store.view === 'similarity'" />
           <databases-panel v-show="store.view === 'databases'" />
           <collections-panel v-show="store.view === 'collections'" />
           <records-panel v-show="store.view === 'records'" />
-          <search-panel v-show="store.view === 'search'" />
           <browse-panel v-show="store.view === 'browse'" />
+          <search-panel v-show="store.view === 'search'" />
           <knowledge-base-panel v-show="store.view === 'parse' || store.view === 'chunk' || store.view === 'ingest' || store.view === 'ingested'" :view="store.view" />
           <retrieval-panel v-show="store.view === 'retrieval'" />
           <ops-queue-panel v-show="store.view === 'queue'" />
@@ -2115,5 +2202,7 @@ const App = defineComponent({
 // re-declare it.
 const _app = createApp(App);
 _app.config.globalProperties.$t = t;
+// Global so any panel can gloss a technical term with v-tip="$t('tip.…')".
+_app.directive('tip', tipDirective);
 _app.mount('#app');
 

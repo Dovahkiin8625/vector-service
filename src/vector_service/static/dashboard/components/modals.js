@@ -209,8 +209,8 @@ export const NewCollModal = defineComponent({
                 </div>
                 <div class="grid cols-3">
                   <div class="field"><label>{{ $t('modals.field_name') }}</label><input type="text" v-model="vectorName" /></div>
-                  <div class="field"><label>{{ $t('modals.dim') }}</label><input type="number" v-model.number="vectorDim" min="1" max="32768" /></div>
-                  <div class="field"><label>{{ $t('common.metric') }}</label>
+                  <div class="field"><label v-tip="$t('tip.dim')">{{ $t('modals.dim') }}</label><input type="number" v-model.number="vectorDim" min="1" max="32768" /></div>
+                  <div class="field"><label v-tip="$t('tip.metric')">{{ $t('common.metric') }}</label>
                     <select v-model="vectorMetric">
                       <option v-for="m in METRICS" :key="m" :value="m">{{ m }}</option>
                     </select>
@@ -232,13 +232,13 @@ export const NewCollModal = defineComponent({
                   </div>
                   <div class="grid">
                     <div class="field"><label>{{ $t('modals.field_name') }}</label><input type="text" v-model="ix.field_name" /></div>
-                    <div class="field"><label>{{ $t('modals.metric_type') }}</label>
+                    <div class="field"><label v-tip="$t('tip.metric')">{{ $t('modals.metric_type') }}</label>
                       <select v-model="ix.metric_type"><option v-for="m in METRICS" :key="m" :value="m">{{ m }}</option></select>
                     </div>
-                    <div class="field"><label>{{ $t('modals.index_type') }}</label>
+                    <div class="field"><label v-tip="$t('tip.index_type')">{{ $t('modals.index_type') }}</label>
                       <select v-model="ix.index_type"><option v-for="t in INDEX_TYPES" :key="t" :value="t">{{ t }}</option></select>
                     </div>
-                    <div class="field"><label>{{ $t('modals.params_json') }}</label>
+                    <div class="field"><label v-tip="$t('tip.index_params')">{{ $t('modals.params_json') }}</label>
                       <input type="text" class="code-input" :value="JSON.stringify(ix.params)" @input="ix.params = $event.target.value" />
                     </div>
                   </div>

@@ -270,19 +270,19 @@ export default defineComponent({
             <span class="value">{{ summary.questions || '—' }}</span>
           </div>
           <div class="kpi">
-            <span class="label">{{ $t('ops.eval.mean_recall') }}</span>
+            <span class="label" v-tip="$t('tip.recall')">{{ $t('ops.eval.mean_recall') }}</span>
             <span class="value">{{ fixed(summary.mean_recall) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">{{ $t('ops.eval.mean_mrr') }}</span>
+            <span class="label" v-tip="$t('tip.mrr')">{{ $t('ops.eval.mean_mrr') }}</span>
             <span class="value">{{ fixed(summary.mean_mrr) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">{{ $t('ops.eval.mean_ndcg') }}</span>
+            <span class="label" v-tip="$t('tip.ndcg')">{{ $t('ops.eval.mean_ndcg') }}</span>
             <span class="value">{{ fixed(summary.mean_ndcg) }}</span>
           </div>
           <div class="kpi">
-            <span class="label">{{ $t('ops.eval.doc_hit_rate') }}</span>
+            <span class="label" v-tip="$t('tip.doc_hit_rate')">{{ $t('ops.eval.doc_hit_rate') }}</span>
             <span class="value">{{ pct(summary.doc_hit_rate) }}</span>
           </div>
         </div>

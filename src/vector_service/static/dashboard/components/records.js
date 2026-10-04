@@ -347,7 +347,7 @@ export default defineComponent({
             </select>
           </div>
           <div class="row" id="vec-del-ids-row" v-show="delMode === 'ids'"><label>{{ $t('records.del_ids') }}</label><textarea id="vec-del-ids" class="code-input" rows="2" v-model="delIds" :placeholder="$t('records.ph.del_ids')"></textarea></div>
-          <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label>{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" class="code-input" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
+          <div class="row" id="vec-del-filter-row" v-show="delMode === 'filter'"><label v-tip="$t('tip.filter_expr')">{{ $t('records.del_filter') }}</label><textarea id="vec-del-filter" class="code-input" rows="2" v-model="delFilter" :placeholder="$t('records.ph.del_filter')"></textarea></div>
           <!-- Why the red button below is disabled. Lives here, beside
                the params that would unblock it. -->
           <div class="row" v-if="deleteBlockReason"><span class="hint">{{ deleteBlockReason }}</span></div>

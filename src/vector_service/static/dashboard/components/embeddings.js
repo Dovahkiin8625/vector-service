@@ -1,19 +1,28 @@
-// Embeddings panel: text / image / multimodal - kind prop picks mode.
+// Embeddings panel: text / image / multimodal merged into one panel
+// (same pattern as similarity.js). The internal mode switch picks the
+// endpoint; request bodies match the three /v1/*_embeddings routes.
 import { defineComponent, ref, computed, onMounted, watch } from '../vue.esm-browser.prod.js';
 import { t, api, extractApiError, modelsByType, refreshModels as loadModels } from './app.js';
 import { fileToB64, copyText, DEFAULT_MIME, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT, modelTypeOf } from './util.js';
 import { StatusBanner, BusyButton, EmptyState } from './feedback.js';
 
-// Endpoint pills are protocol literals and stay untranslated.
-const PILLS = { text: 'POST /v1/embeddings', image: 'POST /v1/image_embeddings', multimodal: 'POST /v1/multimodal_embeddings' };
+// `key` is the kind identifier (also the i18n key suffix); the endpoint
+// pill is a protocol literal and stays untranslated.
+const KINDS = [
+  { key: 'text', endpoint: 'POST /v1/embeddings' },
+  { key: 'image', endpoint: 'POST /v1/image_embeddings' },
+  { key: 'multimodal', endpoint: 'POST /v1/multimodal_embeddings' },
+];
 
 export default defineComponent({
   name: 'EmbeddingsPanel',
-  props: { kind: { type: String, default: 'text' } },
-  setup(props) {
+  setup() {
+    const kinds = KINDS;
+    const kind = ref('text');
     // S6: the list is a filter over the shared store cache, not a private
-    // GET /v1/models copy (each kind mounted one — three at startup).
-    const models = computed(() => modelsByType(modelTypeOf(props.kind)));
+    // GET /v1/models copy. Switching mode re-filters this computed
+    // instead of firing another request.
+    const models = computed(() => modelsByType(modelTypeOf(kind.value)));
     const model = ref('');
     const textInput = ref('hello world');
     const listInput = ref('["a", "b", "c"]');
@@ -44,23 +53,45 @@ export default defineComponent({
     const modelsText = computed(() => {
       if (modelsStatus.value === 'error') return t('common.load_failed') + modelsErr.value;
       if (modelsStatus.value === 'empty') {
-        return t('embeddings.no_models', { kind: t('embeddings.kind.' + props.kind) });
+        return t('embeddings.no_models', { kind: t('embeddings.kind.' + kind.value) });
       }
       return '';
     });
+
+    // Prefer an already-loaded instance when picking a default.
+    function autoSelect() {
+      if (model.value) return;
+      const list = models.value;
+      if (!list.length) return;
+      const loaded = list.find(m => m.loaded);
+      model.value = (loaded || list[0]).id;
+    }
 
     async function refreshModels() {
       modelsStatus.value = 'loading';
       modelsErr.value = '';
       try {
         await loadModels();
+        autoSelect();
         modelsStatus.value = models.value.length ? 'ok' : 'empty';
       } catch (e) {
         modelsStatus.value = 'error';
         modelsErr.value = extractApiError(e, t('common.unknown'));
       }
     }
-    // Prefer an already-loaded instance when picking a default.
+    // Switching mode re-filters the model list and drops the previous
+    // run's result (the response belongs to a different endpoint/family).
+    // autoSelect runs at the end of this watcher so the cleared selection
+    // is refilled for the new family regardless of watcher order.
+    watch(kind, () => {
+      model.value = '';
+      result.value = null;
+      status.value = 'idle';
+      errMsg.value = '';
+      canRetry.value = false;
+      autoSelect();
+      if (modelsStatus.value === 'error') refreshModels();
+    });
     watch(models, (list) => {
       if (!model.value && list.length) {
         const loaded = list.find(m => m.loaded);
@@ -68,7 +99,6 @@ export default defineComponent({
       }
     }, { immediate: true });
     onMounted(refreshModels);
-    watch(() => props.kind, refreshModels);
 
     function safeParse(s) { try { return JSON.parse(s); } catch (_e) { return null; } }
 
@@ -117,7 +147,7 @@ export default defineComponent({
         status.value = 'loading';
         errMsg.value = '';
         canRetry.value = false;
-        if (props.kind === 'text') {
+        if (kind.value === 'text') {
           let arr;
           if (modeText.value === 'list') {
             // In list mode the single-text box is hidden, but a parse
@@ -132,7 +162,7 @@ export default defineComponent({
           }
           const { payload } = await api('POST', '/v1/embeddings', { model: model.value, input: arr });
           result.value = payload;
-        } else if (props.kind === 'image') {
+        } else if (kind.value === 'image') {
           const items = [];
           const parsed = safeParse(listJson.value);
           if (Array.isArray(parsed) && parsed.length) {
@@ -142,17 +172,38 @@ export default defineComponent({
               items.push({ data: await fileToB64(f), mime: mime.value || f.type || DEFAULT_MIME });
             }
           } else { fail('embeddings.err.no_input'); return; }
-          const body = { model: model.value, images: items.map(i => i.data), image_mimes: items.map(i => i.mime || mime.value || DEFAULT_MIME) };
+          // Request shape is ImageInputItem[] under `input`
+          // (schemas/image_embeddings.py): one {data, mime} per image.
+          const body = {
+            model: model.value,
+            input: items.map(i => ({ data: i.data, mime: i.mime || mime.value || DEFAULT_MIME })),
+          };
           const { payload } = await api('POST', '/v1/image_embeddings', body);
           result.value = payload;
         } else {  // multimodal
           const items = [];
           for (const f of files.value) {
-            items.push({ kind: 'image', data: await fileToB64(f), mime: mime.value || f.type || DEFAULT_MIME });
+            items.push({ image: { data: await fileToB64(f), mime: mime.value || f.type || DEFAULT_MIME } });
           }
           const parsed = safeParse(listJson.value);
           if (Array.isArray(parsed)) {
-            for (const s of parsed) if (typeof s === 'string') items.push({ kind: 'text', text: s });
+            for (const it of parsed) {
+              // Each item is exactly one of {text} / {image:{data,mime}}
+              // (schemas/multimodal_embeddings.py). A bare string is
+              // shorthand for {text}; a flat {data, mime} matches the
+              // image-mode JSON list shape and maps to {image:...}.
+              if (typeof it === 'string') {
+                items.push({ text: it });
+              } else if (it && typeof it === 'object') {
+                if (it.image && it.image.data) {
+                  items.push({ image: { data: it.image.data, mime: it.image.mime || mime.value || DEFAULT_MIME } });
+                } else if (typeof it.text === 'string') {
+                  items.push({ text: it.text });
+                } else if (typeof it.data === 'string') {
+                  items.push({ image: { data: it.data, mime: it.mime || mime.value || DEFAULT_MIME } });
+                }
+              }
+            }
           }
           if (!items.length) { fail('embeddings.err.no_items'); return; }
           const { payload } = await api('POST', '/v1/multimodal_embeddings', { model: model.value, input: items });
@@ -172,6 +223,7 @@ export default defineComponent({
     }
 
     return {
+      kinds, kind,
       models, model, textInput, listInput, files, fileInput, listJson, mime, modeText,
       status, errMsg, result, busy, canRetry, refreshModels, run,
       modelsStatus, modelsText, IMAGE_MIME_OPTIONS, IMAGE_ACCEPT,
@@ -187,6 +239,10 @@ export default defineComponent({
           <h3 class="section-title">{{ $t('embeddings.title.' + kind) }} <span class="pill accent">{{ pill(kind) }}</span></h3>
         </div>
         <div class="actions">
+          <span class="seg-toggle" role="tablist">
+            <button v-for="k in kinds" :key="k.key" :class="['btn', kind === k.key ? 'on' : '']"
+                    @click="kind = k.key">{{ $t('embeddings.kind.' + k.key) }}</button>
+          </span>
           <busy-button variant="ghost" :busy="modelsStatus === 'loading'" :label="$t('common.refresh')"
                        @click="refreshModels" />
         </div>
@@ -200,7 +256,7 @@ export default defineComponent({
       </div>
 
       <div class="section">
-        <div class="row" v-if="kind === 'text'">
+        <div class="row">
           <label>{{ $t('common.model') }}</label>
           <select v-model="model">
             <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
@@ -222,12 +278,6 @@ export default defineComponent({
           <label>{{ $t('embeddings.list_json_array') }}</label><textarea rows="3" class="code-input" v-model="listInput"></textarea>
         </div>
 
-        <div class="row" v-if="kind !== 'text'">
-          <label>{{ $t('common.model') }}</label>
-          <select v-model="model">
-            <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
-          </select>
-        </div>
         <div class="row" v-if="kind === 'image' || kind === 'multimodal'">
           <label>{{ $t('embeddings.select_images') }} <span class="hint">{{ $t('embeddings.hint.local_files') }}</span></label>
           <input ref="fileInput" type="file" multiple :accept="IMAGE_ACCEPT" @change="onFiles" />
@@ -286,6 +336,6 @@ export default defineComponent({
     </div>
   `,
   methods: {
-    pill(k) { return PILLS[k] || ''; },
+    pill(k) { const m = KINDS.find(x => x.key === k); return m ? m.endpoint : ''; },
   },
 });

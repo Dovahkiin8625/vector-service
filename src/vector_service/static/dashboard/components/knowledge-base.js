@@ -1165,14 +1165,19 @@ export default defineComponent({
         <parser-profile-cards :parser="parserStatus" @changed="refreshParserStatus" />
 
         <div class="row"><label>{{ $t('kb.file') }}</label>
-          <input type="file" id="parse-file" :accept="INGEST_ACCEPT" :disabled="parseBusy" @change="onParseFile" />
-          <div v-if="parseFile" class="ingest-file-meta">
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-              <path d="M3 1.5h6L13 5v9.5H3z"/><path d="M9 1.5V5h4"/>
-            </svg>
-            <span class="ingest-file-name">{{ parseFile.name }}</span>
-            <span>· {{ formatBytes(parseFile.size) }}</span>
-          </div>
+          <label class="file-pick" :class="{ disabled: parseBusy }">
+            <input type="file" id="parse-file" class="file-pick-input" :accept="INGEST_ACCEPT"
+                   :disabled="parseBusy" @change="onParseFile" />
+            <span class="btn sm file-pick-btn">{{ $t('kb.file_pick') }}</span>
+            <div v-if="parseFile" class="ingest-file-meta">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M3 1.5h6L13 5v9.5H3z"/><path d="M9 1.5V5h4"/>
+              </svg>
+              <span class="ingest-file-name">{{ parseFile.name }}</span>
+              <span>· {{ formatBytes(parseFile.size) }}</span>
+            </div>
+            <span v-else class="file-pick-empty">{{ $t('kb.file_none') }}</span>
+          </label>
         </div>
         <div class="row"><label>{{ $t('profile.label') }}</label>
           <select id="parse-profile" v-model="parseProfile" :disabled="parseBusy">
@@ -1278,7 +1283,7 @@ export default defineComponent({
       <div class="section" v-show="view === 'chunk'">
         <div class="section-head"><h3 class="section-title">{{ $t('kb.chunk_title') }} <span class="pill accent">POST /v1/chunk</span></h3></div>
         <div class="row split">
-          <div class="row"><label>{{ $t('kb.strategy') }}</label>
+          <div class="row"><label v-tip="$t('tip.strategy')">{{ $t('kb.strategy') }}</label>
             <select id="chunk-strategy" v-model="chunkStrategy">
               <option v-for="s in STRATEGIES" :key="s.value" :value="s.value">
                 {{ $t(s.labelKey) }}
@@ -1286,20 +1291,20 @@ export default defineComponent({
             </select>
           </div>
           <div class="row" v-if="chunkStrategy === 'semantic'">
-            <label>{{ $t('kb.breakpoint') }}</label>
+            <label v-tip="$t('tip.breakpoint')">{{ $t('kb.breakpoint') }}</label>
             <input type="number" id="chunk-percentile" min="50" max="100"
                    v-model.number="chunkPercentile" />
             <span class="hint" v-if="chunkPercentileErr">{{ chunkPercentileErr }}</span>
           </div>
         </div>
         <div class="row split">
-          <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="chunk-size" min="1" max="8192" v-model.number="chunkSize" />
+          <div class="row"><label v-tip="$t('tip.chunk_size')">{{ $t('kb.chunk_size') }}</label><input type="number" id="chunk-size" min="1" max="8192" v-model.number="chunkSize" />
             <span class="hint" v-if="chunkSizeErr">{{ chunkSizeErr }}</span></div>
-          <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="chunk-overlap" min="0" max="8192" v-model.number="chunkOverlap" />
+          <div class="row"><label v-tip="$t('tip.overlap')">{{ $t('kb.overlap') }}</label><input type="number" id="chunk-overlap" min="0" max="8192" v-model.number="chunkOverlap" />
             <span class="hint" v-if="chunkOverlapErr">{{ chunkOverlapErr }}</span></div>
         </div>
         <div class="row checkbox-row">
-          <label class="checkbox-label">
+          <label class="checkbox-label" v-tip="$t('tip.add_context')">
             <input type="checkbox" id="chunk-add-context" v-model="chunkAddContext" />
             {{ $t('chunk.add_context') }}
           </label>
@@ -1342,90 +1347,104 @@ export default defineComponent({
              exist" rather than "the request failed". -->
         <status-banner kind="error" :text="dbsErr" :retry="dbsErr ? refreshDbs : null" />
         <status-banner kind="error" :text="modelsErr" :retry="modelsErr ? refreshModels : null" />
-        <!-- 1 · source file -->
-        <div class="form-group">
-          <div class="form-group-title"><span class="form-group-step">1</span>{{ $t('ingest.group.file') }}</div>
-          <div class="row"><label>{{ $t('kb.file') }}</label>
-            <input type="file" id="ingest-file" :accept="INGEST_ACCEPT" :disabled="ingestBusy" @change="onIngestFile" />
-            <div v-if="ingestFile" class="ingest-file-meta">
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-                <path d="M3 1.5h6L13 5v9.5H3z"/><path d="M9 1.5V5h4"/>
-              </svg>
-              <span class="ingest-file-name">{{ ingestFile.name }}</span>
-              <span>· {{ formatBytes(ingestFile.size) }}</span>
+        <!-- Compact pipeline bands: stage chip + name on a left rail,
+             fields packed into a dense grid on the right. The rail order
+             is the job order (file → parse → chunk → embed/store), so
+             the numbered chips still encode a real sequence while no
+             control gets a row of its own. -->
+        <div class="form-bands">
+          <!-- 1 · source file -->
+          <div class="form-band">
+            <div class="form-band-title"><span class="form-group-step">1</span>{{ $t('ingest.group.file') }}</div>
+            <div class="form-band-fields">
+              <div class="row span-all"><label>{{ $t('kb.file') }}</label>
+                <label class="file-pick" :class="{ disabled: ingestBusy }">
+                  <input type="file" id="ingest-file" class="file-pick-input" :accept="INGEST_ACCEPT"
+                         :disabled="ingestBusy" @change="onIngestFile" />
+                  <span class="btn sm file-pick-btn">{{ $t('kb.file_pick') }}</span>
+                  <div v-if="ingestFile" class="ingest-file-meta">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                      <path d="M3 1.5h6L13 5v9.5H3z"/><path d="M9 1.5V5h4"/>
+                    </svg>
+                    <span class="ingest-file-name">{{ ingestFile.name }}</span>
+                    <span>· {{ formatBytes(ingestFile.size) }}</span>
+                  </div>
+                  <span v-else class="file-pick-empty">{{ $t('kb.file_none') }}</span>
+                </label>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- 2 · parsing: profile -->
-        <div class="form-group">
-          <div class="form-group-title"><span class="form-group-step">2</span>{{ $t('ingest.group.parse') }}</div>
-          <div class="row"><label>{{ $t('profile.label') }}</label>
-            <select id="ingest-profile" v-model="ingestProfile" :disabled="ingestBusy">
-              <option v-for="p in PROFILES" :key="p.value" :value="p.value">
-                {{ $t(p.labelKey) }}
-              </option>
-            </select>
+          <!-- 2 · parsing: profile -->
+          <div class="form-band">
+            <div class="form-band-title"><span class="form-group-step">2</span>{{ $t('ingest.group.parse') }}</div>
+            <div class="form-band-fields">
+              <div class="row"><label>{{ $t('profile.label') }}</label>
+                <select id="ingest-profile" v-model="ingestProfile" :disabled="ingestBusy">
+                  <option v-for="p in PROFILES" :key="p.value" :value="p.value">
+                    {{ $t(p.labelKey) }}
+                  </option>
+                </select>
+              </div>
+              <!-- What the selected profile does; updates live on change. -->
+              <div class="profile-desc span-all" id="ingest-profile-desc">
+                {{ $t('profile.desc.' + ingestProfile) }}
+              </div>
+            </div>
           </div>
-          <!-- What the selected profile does; updates live on change. -->
-          <div class="profile-desc" id="ingest-profile-desc">
-            {{ $t('profile.desc.' + ingestProfile) }}
-          </div>
-        </div>
 
-        <!-- 3 · chunking: strategy, size/overlap, contextual enrichment -->
-        <div class="form-group">
-          <div class="form-group-title"><span class="form-group-step">3</span>{{ $t('ingest.group.chunk') }}</div>
-          <div class="row split">
-            <div class="row"><label>{{ $t('kb.strategy') }}</label>
-              <select id="ingest-strategy" v-model="chunkParams.strategy" :disabled="ingestBusy">
-                <option v-for="s in STRATEGIES" :key="s.value" :value="s.value">
-                  {{ $t(s.labelKey) }}
-                </option>
-              </select>
+          <!-- 3 · chunking: strategy, size/overlap, contextual enrichment -->
+          <div class="form-band">
+            <div class="form-band-title"><span class="form-group-step">3</span>{{ $t('ingest.group.chunk') }}</div>
+            <div class="form-band-fields">
+              <div class="row"><label v-tip="$t('tip.strategy')">{{ $t('kb.strategy') }}</label>
+                <select id="ingest-strategy" v-model="chunkParams.strategy" :disabled="ingestBusy">
+                  <option v-for="s in STRATEGIES" :key="s.value" :value="s.value">
+                    {{ $t(s.labelKey) }}
+                  </option>
+                </select>
+              </div>
+              <div class="row" v-if="chunkParams.strategy === 'semantic'">
+                <label v-tip="$t('tip.breakpoint')">{{ $t('kb.breakpoint') }}</label>
+                <input type="number" id="ingest-percentile" min="50" max="100"
+                       v-model.number="chunkParams.percentile" :disabled="ingestBusy" />
+                <span class="hint" v-if="ingestPercentileErr">{{ ingestPercentileErr }}</span>
+              </div>
+              <div class="row"><label v-tip="$t('tip.chunk_size')">{{ $t('kb.chunk_size') }}</label><input type="number" id="ingest-size" min="1" max="8192" v-model.number="chunkParams.size" :disabled="ingestBusy" />
+                <span class="hint" v-if="ingestSizeErr">{{ ingestSizeErr }}</span></div>
+              <div class="row"><label v-tip="$t('tip.overlap')">{{ $t('kb.overlap') }}</label><input type="number" id="ingest-overlap" min="0" max="8192" v-model.number="chunkParams.overlap" :disabled="ingestBusy" />
+                <span class="hint" v-if="ingestOverlapErr">{{ ingestOverlapErr }}</span></div>
+              <div class="row check-cell">
+                <label class="checkbox-label" v-tip="$t('tip.add_context')">
+                  <input type="checkbox" id="ingest-add-context"
+                         v-model="chunkParams.addContext" :disabled="ingestBusy" />
+                  {{ $t('chunk.add_context') }}
+                </label>
+              </div>
             </div>
-            <div class="row" v-if="chunkParams.strategy === 'semantic'">
-              <label>{{ $t('kb.breakpoint') }}</label>
-              <input type="number" id="ingest-percentile" min="50" max="100"
-                     v-model.number="chunkParams.percentile" :disabled="ingestBusy" />
-              <span class="hint" v-if="ingestPercentileErr">{{ ingestPercentileErr }}</span>
-            </div>
           </div>
-          <div class="row split">
-            <div class="row"><label>{{ $t('kb.chunk_size') }}</label><input type="number" id="ingest-size" min="1" max="8192" v-model.number="chunkParams.size" :disabled="ingestBusy" />
-              <span class="hint" v-if="ingestSizeErr">{{ ingestSizeErr }}</span></div>
-            <div class="row"><label>{{ $t('kb.overlap') }}</label><input type="number" id="ingest-overlap" min="0" max="8192" v-model.number="chunkParams.overlap" :disabled="ingestBusy" />
-              <span class="hint" v-if="ingestOverlapErr">{{ ingestOverlapErr }}</span></div>
-          </div>
-          <div class="row checkbox-row">
-            <label class="checkbox-label">
-              <input type="checkbox" id="ingest-add-context"
-                     v-model="chunkParams.addContext" :disabled="ingestBusy" />
-              {{ $t('chunk.add_context') }}
-            </label>
-          </div>
-        </div>
 
-        <!-- 4 · embedding + storage destination -->
-        <div class="form-group">
-          <div class="form-group-title"><span class="form-group-step">4</span>{{ $t('ingest.group.dest') }}</div>
-          <div class="row split">
-            <div class="row"><label>{{ $t('common.database') }}</label>
-              <select id="ingest-db" v-model="db" :disabled="ingestBusy">
-                <option v-if="!dbs.length" value="" disabled>{{ $t('ingest.no_dbs') }}</option>
-                <option v-for="d in dbs" :key="d" :value="d">{{ d }}</option>
-              </select>
+          <!-- 4 · embedding + storage destination -->
+          <div class="form-band">
+            <div class="form-band-title"><span class="form-group-step">4</span>{{ $t('ingest.group.dest') }}</div>
+            <div class="form-band-fields">
+              <div class="row"><label>{{ $t('common.database') }}</label>
+                <select id="ingest-db" v-model="db" :disabled="ingestBusy">
+                  <option v-if="!dbs.length" value="" disabled>{{ $t('ingest.no_dbs') }}</option>
+                  <option v-for="d in dbs" :key="d" :value="d">{{ d }}</option>
+                </select>
+              </div>
+              <div class="row"><label>{{ $t('kb.embed_model') }}</label>
+                <select id="ingest-model" v-model="model" :disabled="ingestBusy">
+                  <option v-for="mm in models" :key="mm.id" :value="mm.id">
+                    {{ mm.id }}{{ mm.loaded ? ' · ' + $t('common.loaded') : '' }}
+                  </option>
+                </select>
+              </div>
+              <div class="row span-all"><label>{{ $t('kb.metadata') }} <span class="hint">{{ $t('ingest.metadata_hint') }}</span></label>
+                <textarea id="ingest-metadata" class="code-input" rows="2" v-model="metadata" :disabled="ingestBusy">{}</textarea>
+              </div>
             </div>
-            <div class="row"><label>{{ $t('kb.embed_model') }}</label>
-              <select id="ingest-model" v-model="model" :disabled="ingestBusy">
-                <option v-for="mm in models" :key="mm.id" :value="mm.id">
-                  {{ mm.id }}{{ mm.loaded ? ' · ' + $t('common.loaded') : '' }}
-                </option>
-              </select>
-            </div>
-          </div>
-          <div class="row"><label>{{ $t('kb.metadata') }} <span class="hint">{{ $t('ingest.metadata_hint') }}</span></label>
-            <textarea id="ingest-metadata" class="code-input" rows="2" v-model="metadata" :disabled="ingestBusy">{}</textarea>
           </div>
         </div>
         <div class="actions">
