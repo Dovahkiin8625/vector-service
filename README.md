@@ -29,7 +29,7 @@
 ```bash
 cp .env.example .env                     # 1. 配 VS_* 环境变量
 uv sync --python 3.11                    # 2. 装依赖（NVIDIA 主机自动装 cu130 GPU torch）
-uv run uvicorn vector_service.main:app --host 0.0.0.0 --port 8080   # 3. 起服务
+uv run python run.py   # 3. 起服务
 # → http://localhost:8080/dashboard
 ```
 
